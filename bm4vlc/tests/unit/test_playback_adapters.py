@@ -165,6 +165,7 @@ def test_enhanced_adapter_full_roundtrip(bridge_server) -> None:
     adapter.stop()
     adapter.seek_absolute_us(5000)
     adapter.set_rate(1.5)  # none of these should raise
+    adapter.set_volume(0)
 
 
 def test_standard_http_adapter_reads_status_and_playlist(vlc_server) -> None:
@@ -239,3 +240,4 @@ def test_standard_http_adapter_transport_commands_do_not_raise(vlc_server) -> No
     adapter.previous_track()
     adapter.seek_absolute_us(3_000_000)
     adapter.set_rate(1.25)
+    adapter.set_volume(0)

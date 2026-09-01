@@ -42,6 +42,35 @@ def vlc_user_config_dir() -> Path:
     return Path(appdata) / "vlc"
 
 
+def parse_m3u(playlist_path: Path) -> list[str]:
+    """Extracts media entries from an .m3u/.m3u8 file (spec #EXTM3U lines and comments
+    ignored, blank lines skipped). Relative entries are resolved against the playlist
+    file's own directory, matching how VLC and other players interpret them.
+    """
+    base_dir = playlist_path.parent
+    entries: list[str] = []
+    for raw_line in playlist_path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith(("http://", "https://", "file://")):
+            entries.append(line)
+            continue
+        candidate = Path(line)
+        entries.append(str(candidate if candidate.is_absolute() else (base_dir / candidate).resolve()))
+    return entries
+
+
+def resolve_startup_media(selected_paths: list[str]) -> list[str]:
+    """Turns whatever the user picked in the startup file dialog into the flat list of
+    media paths VLC's command line expects. A single .m3u/.m3u8 selection expands to
+    its contents; anything else (one or more media files) passes through as-is.
+    """
+    if len(selected_paths) == 1 and selected_paths[0].lower().endswith((".m3u", ".m3u8")):
+        return parse_m3u(Path(selected_paths[0]))
+    return list(selected_paths)
+
+
 def launch_managed_vlc(
     vlc_path: str,
     media_paths: list[str],

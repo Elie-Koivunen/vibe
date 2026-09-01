@@ -15,6 +15,7 @@ class MockPlaybackAdapter:
         self._state = "stopped"
         self._time_us = 0
         self._rate = 1.0
+        self._volume = 256
         self.connected = False
 
     def connect(self) -> None:
@@ -82,6 +83,9 @@ class MockPlaybackAdapter:
 
     def set_rate(self, rate: float) -> None:
         self._rate = rate
+
+    def set_volume(self, level: int) -> None:
+        self._volume = level
 
     # -- test-only helpers, not part of the PlaybackAdapter protocol --
 

@@ -68,3 +68,6 @@ class EnhancedLuaPlaybackAdapter:
 
     def set_rate(self, rate: float) -> None:
         self._client.set_rate(rate)
+
+    def set_volume(self, level: int) -> None:
+        self._client.control("volume", val=level)

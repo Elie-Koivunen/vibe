@@ -78,12 +78,22 @@ class Application(QObject):
         adapter: PlaybackAdapter,
         ffmpeg_path: str,
         waveform_cache_dir: Path,
+        mute_on_connect: bool = False,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._log = get_logger("APP")
         self._conn = conn
         self._adapter = adapter
+        # Only true when this Application spawned its own VLC process (see
+        # vlc_launcher.launch_managed_vlc): forcing volume to 0 on an existing VLC the
+        # user already had open with their own volume set would be an unwelcome
+        # surprise. --start-paused (see vlc_launcher._COMMON_ARGS) already stops it
+        # from autoplaying; this handles the "muted" half of that same request. Sent
+        # once, on the first successful status poll, since the HTTP interface takes a
+        # moment to come up after the process starts (same self-healing pattern as the
+        # rest of this polling loop -- see STATUS_POLL_MS comment above).
+        self._mute_pending = mute_on_connect
 
         self._bookmark_repository = BookmarkRepository(conn)
         self._media_repository = MediaRepository(conn)
@@ -257,6 +267,9 @@ class Application(QObject):
     def _on_status_result(self, status: object) -> None:
         self._status_inflight = False
         try:
+            if self._mute_pending:
+                self._mute_pending = False
+                self._fire_and_forget(lambda: self._adapter.set_volume(0))
             self._clock.update(status)
             self._last_playback_state = status.state
             self.window._waveform_scene.set_playhead_time_us(status.time_us)

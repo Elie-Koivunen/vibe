@@ -96,6 +96,10 @@ class StandardHttpPlaybackAdapter:
     def set_rate(self, rate: float) -> None:
         self._command("rate", {"val": rate})
 
+    def set_volume(self, level: int) -> None:
+        # VLC's built-in interface takes 0-256 (256 = 100%), not a percentage.
+        self._command("volume", {"val": max(0, min(256, level))})
+
     def _command(self, command: str, params: dict | None = None) -> None:
         query = {"command": command, **(params or {})}
         response = self._session.get(

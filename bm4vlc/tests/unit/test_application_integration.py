@@ -36,11 +36,12 @@ def running_app(qtbot, tmp_path: Path):
     """
     state: dict = {}
 
-    def _make(adapter, ffmpeg_path: str = FFMPEG_PATH) -> Application:
+    def _make(adapter, ffmpeg_path: str = FFMPEG_PATH, mute_on_connect: bool = False) -> Application:
         conn = connect(tmp_path / "test.db")
         migrate(conn)
         app = Application(
-            conn=conn, adapter=adapter, ffmpeg_path=ffmpeg_path, waveform_cache_dir=tmp_path / "cache"
+            conn=conn, adapter=adapter, ffmpeg_path=ffmpeg_path, waveform_cache_dir=tmp_path / "cache",
+            mute_on_connect=mute_on_connect,
         )
         qtbot.addWidget(app.window)
         state["app"] = app
@@ -186,3 +187,31 @@ def test_offline_start_does_not_crash(qtbot, running_app) -> None:
     app.start()
     qtbot.wait(300)
     assert app.window._breadcrumb.text()  # never crashed, still has a valid label
+
+
+def test_mute_on_connect_zeroes_volume_once_vlc_is_reachable(qtbot, running_app) -> None:
+    """When this Application spawned its own VLC (bootstrap.launch_vlc_with_media),
+    it must come up muted per the user's explicit request -- but only once, on the
+    first successful poll, not on every tick."""
+    adapter = MockPlaybackAdapter(
+        [VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0)]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe", mute_on_connect=True)
+    app.start()
+
+    qtbot.waitUntil(lambda: adapter._volume == 0, timeout=3000)
+    assert app._mute_pending is False
+
+
+def test_mute_on_connect_false_never_touches_volume(qtbot, running_app) -> None:
+    """Attaching to a VLC the user already had open (bootstrap: dialog cancelled) must
+    never force their volume to 0 -- that's only for VLC instances this app spawned."""
+    adapter = MockPlaybackAdapter(
+        [VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0)]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe", mute_on_connect=False)
+    app.start()
+
+    qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
+    qtbot.wait(200)
+    assert adapter._volume == 256  # untouched default
