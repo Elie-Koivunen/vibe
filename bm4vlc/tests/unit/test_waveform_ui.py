@@ -135,6 +135,59 @@ def test_dragging_left_handle_resizes_start_only(qtbot) -> None:
     assert value > 1_000_000  # moved right, end boundary untouched
 
 
+def test_fit_entire_media_before_show_is_corrected_on_resize(qtbot) -> None:
+    """Calling fit_entire_media() before the widget reaches its final on-screen size
+    (e.g. a startup 'restore fitted view') must not leave click coordinates mapped
+    against a stale placeholder viewport size -- caught via a live screenshot demo
+    where a click landed on the wrong bookmark after exactly this sequence.
+
+    Deliberately does NOT use the _make_view() helper: that resizes+shows first,
+    which is exactly the ordering that hides this bug. This test reproduces the
+    real ordering: construct, fit while the view still has Qt's transient
+    un-shown placeholder size, only then resize/show to the real final size.
+    """
+    scene = WaveformScene(10_000_000)
+    view = WaveformView(scene)
+    qtbot.addWidget(view)
+
+    view.fit_entire_media()  # called before the widget has any real on-screen size
+    transform_before_resize = view.transform()
+
+    view.resize(800, 200)
+    view.show()
+    qtbot.waitExposed(view)
+
+    assert view.transform() != transform_before_resize
+    fresh_fit_transform = view.transform()
+    # A second resize must keep re-fitting (sticky fit mode), not freeze the first one.
+    view.resize(500, 200)
+    qtbot.wait(50)
+    assert view.transform() != fresh_fit_transform
+
+
+def test_manual_zoom_disables_sticky_fit_mode(qtbot) -> None:
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QWheelEvent
+    from PySide6.QtCore import QPointF
+
+    scene, view = _make_view(qtbot)
+    view.fit_entire_media()
+    fitted_transform = view.transform()
+
+    event = QWheelEvent(
+        QPointF(50, 50), QPointF(50, 50), QPoint(0, 0), QPoint(0, 120),
+        Qt.NoButton, Qt.ControlModifier, Qt.NoScrollPhase, False,
+    )
+    view.wheelEvent(event)
+    assert view.transform() != fitted_transform
+
+    zoomed_transform = view.transform()
+    view.resize(400, 150)
+    qtbot.wait(50)
+    # Once the user has manually zoomed, a resize must not snap back to "fit".
+    assert view.transform() == zoomed_transform
+
+
 def test_bookmark_click_activates_without_moving(qtbot) -> None:
     scene, view = _make_view(qtbot)
     bookmark = _segment_bookmark()

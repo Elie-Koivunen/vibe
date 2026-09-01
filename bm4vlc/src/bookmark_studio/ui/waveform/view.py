@@ -18,6 +18,7 @@ class WaveformView(QGraphicsView):
         self.setRenderHint(self.renderHints())
         self._press_time_us: int | None = None
         self._dragging_selection = False
+        self._fit_mode = False
 
     def _is_empty_space(self, view_pos) -> bool:
         item = self.itemAt(view_pos)
@@ -62,6 +63,7 @@ class WaveformView(QGraphicsView):
 
     def wheelEvent(self, event) -> None:  # noqa: N802
         if event.modifiers() & Qt.ControlModifier:
+            self._fit_mode = False  # manual zoom overrides a prior "fit entire media"
             factor = 1.25 if event.angleDelta().y() > 0 else 0.8
             anchor = self.transformationAnchor()
             self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
@@ -79,6 +81,22 @@ class WaveformView(QGraphicsView):
         super().keyPressEvent(event)
 
     def fit_entire_media(self) -> None:
-        """Ctrl+0 (spec #84)."""
+        """Ctrl+0 (spec #84). Sticky: re-applied on resize (see resizeEvent) so a
+        fit computed before the widget reaches its final on-screen size -- e.g. a
+        startup "restore fitted view" -- doesn't silently go stale. Confirmed live:
+        calling this immediately after construction, before the widget is shown,
+        computed its scale against a transient ~638x461 placeholder viewport size
+        that Qt's layout later resized to the real ~1200x750, leaving click/drag
+        coordinate mapping silently off from what was visually rendered.
+        """
+        self._fit_mode = True
+        self._apply_fit()
+
+    def _apply_fit(self) -> None:
         self.resetTransform()
-        self.fitInView(self.scene().sceneRect().adjusted(0, 0, 0, 0), Qt.IgnoreAspectRatio)
+        self.fitInView(self.scene().sceneRect(), Qt.IgnoreAspectRatio)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._fit_mode:
+            self._apply_fit()
