@@ -1,9 +1,6 @@
 -- Initial schema (spec #72-#77, #185).
-
-CREATE TABLE schema_migrations (
-    version INTEGER PRIMARY KEY,
-    applied_at TEXT NOT NULL
-);
+-- schema_migrations itself is created by persistence/migrations.py before
+-- any migration file runs, so it is not repeated here.
 
 CREATE TABLE playlists (
     id TEXT PRIMARY KEY,
