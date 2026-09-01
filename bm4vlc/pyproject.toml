@@ -1,0 +1,40 @@
+[project]
+name = "bookmark-studio"
+version = "0.1.0"
+description = "VLC Bookmark Studio — playlist-aware visual bookmarking and looping for VLC Media Player"
+requires-python = ">=3.13"
+dependencies = [
+    "PySide6",
+    "numpy",
+    "requests",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-qt",
+    "coverage",
+    "ruff",
+    "mypy",
+]
+
+[project.scripts]
+bookmark-studio = "bookmark_studio.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bookmark_studio"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
