@@ -1,0 +1,3 @@
+GitHub: https://github.com/Elie-Koivunen/vibe/buzz2vlc
+Email: Elie.Koivunen@Gmail.com
+License: MIT License
