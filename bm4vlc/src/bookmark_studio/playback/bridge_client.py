@@ -9,19 +9,34 @@ see app/waveform_orchestrator.py).
 The raw socket is not a style choice: verified live against a real VLC 3.0.23,
 `vlc.httpd():handler()`'s response is NOT RFC 7230 compliant -- it sends a bare status
 line (`HTTP/1.0 200 OK\r\n`) immediately followed by the body, with no header-terminating
-blank line, no Content-Length, and no Connection: close (the socket is never closed by
-the server either). Every standard client (`requests`, `http.client`, `curl`) hangs
-indefinitely waiting for headers that will never arrive, even though the correct,
-complete body is actually delivered in a single packet within milliseconds. `_get()`
-below reads raw bytes until a short idle gap instead of waiting for a header terminator
-or connection close, and tolerates a real header block if the peer sends one (VLC's
-built-in HTTP interface, and every test fixture in tests/unit/test_playback_adapters.py,
-both use a real, RFC-compliant httpd -- this same code path handles both.
+blank line and no Content-Length. Every standard client (`requests`, `http.client`,
+`curl`) hangs indefinitely waiting for headers that will never arrive, even though the
+correct, complete body is actually delivered in a single packet within milliseconds.
+`_get()` reads raw bytes until a short idle gap instead of waiting for a header
+terminator, and tolerates a real header block if the peer sends one (VLC's built-in
+HTTP interface, and every test fixture in tests/unit/test_playback_adapters.py, both
+use a real, RFC-compliant httpd -- this same code path handles both).
+
+THE CONNECTION IS PERSISTENT AND REUSED ACROSS CALLS -- this is not an optimization,
+it is required for correctness. Verified live: `vlc.httpd():handler()` never closes its
+side of a connection after responding (confirmed via `netstat`: every request-per-call
+design left the socket in CLOSE_WAIT on VLC's side, a server-side leak). At this app's
+normal status-polling cadence (every ~150ms) that leaked several hundred sockets within
+minutes of real use, after which VLC stopped accepting new connections at all --
+the exact "it just doesn't work" failure mode a live user session hit. Reusing one
+connection for the client's whole lifetime, confirmed live, leaves zero leaked sockets
+no matter how many requests are made. A `threading.Lock` serializes access since
+multiple requests can be dispatched from different QThreadPool workers concurrently
+(app/application.py) and this transport has no way to distinguish interleaved
+request/response bytes from two requests in flight at once.
 """
 from __future__ import annotations
 
+import base64
 import json
 import socket
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
@@ -29,15 +44,25 @@ from urllib.parse import urlencode
 MIN_PROTOCOL_VERSION = 1
 MAX_PROTOCOL_VERSION = 1
 
-HEALTH_TIMEOUT_S = 1.0
-STATUS_TIMEOUT_S = 0.5
-COMMAND_TIMEOUT_S = 1.0
-PLAYLIST_TIMEOUT_S = 1.5
+
+# spec #109 suggests 0.5-1.5s here; verified live these are unrealistic for VLC's
+# actual Lua httpd. It runs on VLC's single-threaded interface loop, which is not
+# always free to service an HTTP request immediately -- real requests sometimes took
+# several seconds to get a response even though a *typical* one arrives in well under
+# 100ms. Every timeout this client hits forces a reconnect (see class docstring), which
+# leaks a socket on VLC's side; the original spec-sized timeouts made this common
+# enough that a live session degraded to fully broken within about 15 seconds of normal
+# ~150ms status polling. These wider budgets trade a slower worst-case UI update for a
+# dramatically lower reconnect (and thus leak) rate -- confirmed live.
+HEALTH_TIMEOUT_S = 3.0
+STATUS_TIMEOUT_S = 3.0
+COMMAND_TIMEOUT_S = 3.0
+PLAYLIST_TIMEOUT_S = 4.0
 
 # How long to wait, after the most recent chunk, before deciding the response is
 # complete. VLC's malformed response arrives in one shot; this just needs to be
 # comfortably longer than that single round trip, not longer than a real timeout.
-_IDLE_GAP_S = 0.2
+_IDLE_GAP_S = 0.3
 
 
 class BridgeError(Exception):
@@ -74,15 +99,31 @@ class BridgeHealth:
 
 
 class BridgeClient:
-    """Thin JSON client for bookmarkstudio.lua's /bookmarkstudio/v1/ endpoints."""
+    """Thin JSON client for bookmarkstudio.lua's /bookmarkstudio/v1/ endpoints.
+
+    Holds one persistent, lazily-(re)connected socket for its whole lifetime -- see the
+    module docstring for why that's required, not optional. Thread-safe: a lock
+    serializes concurrent callers onto that single connection.
+    """
 
     def __init__(self, host: str, port: int, token: str) -> None:
         self._host = host
         self._port = port
         self._token = token
+        self._lock = threading.Lock()
+        self._sock: socket.socket | None = None
 
     def close(self) -> None:
-        pass  # no persistent connection to close; kept for API parity with callers
+        with self._lock:
+            self._close_locked()
+
+    def _close_locked(self) -> None:
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
 
     def health(self) -> BridgeHealth:
         data = self._get("/health", timeout=HEALTH_TIMEOUT_S)
@@ -117,9 +158,11 @@ class BridgeClient:
     def _get(self, path: str, *, timeout: float, params: dict[str, Any] | None = None) -> dict[str, Any]:
         query = f"?{urlencode(params)}" if params else ""
         target = f"/bookmarkstudio/v1{path}{query}"
-        raw = _raw_http_get(
-            self._host, self._port, target, username="bookmarkstudio", password=self._token, timeout=timeout
-        )
+        request = self._build_request(target)
+
+        with self._lock:
+            raw = self._request_locked(request, target, timeout)
+
         status_code, body = _split_status_and_body(raw)
         if status_code >= 400:
             raise BridgeHTTPError(status_code)
@@ -132,46 +175,60 @@ class BridgeClient:
             raise BridgeError(error.get("code", "UNKNOWN"), error.get("message", ""))
         return data
 
+    def _build_request(self, target: str) -> bytes:
+        auth = base64.b64encode(f"bookmarkstudio:{self._token}".encode()).decode()
+        # No "Connection: close": the whole point is to keep this connection alive
+        # across many calls (see module docstring).
+        return (
+            f"GET {target} HTTP/1.1\r\n"
+            f"Host: {self._host}:{self._port}\r\n"
+            f"Authorization: Basic {auth}\r\n\r\n"
+        ).encode()
 
-def _raw_http_get(
-    host: str, port: int, target: str, *, username: str, password: str, timeout: float
-) -> bytes:
-    import base64
-    import time
+    def _request_locked(self, request: bytes, target: str, timeout: float) -> bytes:
+        """Caller holds self._lock. Tries the existing connection first; on any
+        failure, reconnects once and retries -- the shared connection can go stale
+        (VLC restarted, network hiccup) without this client finding out until it tries
+        to use it.
+        """
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                if self._sock is None:
+                    self._sock = socket.create_connection((self._host, self._port), timeout=timeout)
+                return _send_and_read(self._sock, request, target, timeout)
+            except OSError as exc:
+                last_error = exc
+                self._close_locked()
+        raise BridgeConnectionError(f"cannot reach {self._host}:{self._port}{target}: {last_error}")
 
-    auth = base64.b64encode(f"{username}:{password}".encode()).decode()
-    request = (
-        f"GET {target} HTTP/1.1\r\n"
-        f"Host: {host}:{port}\r\n"
-        f"Authorization: Basic {auth}\r\n"
-        f"Connection: close\r\n\r\n"
-    ).encode()
 
-    try:
-        sock = socket.create_connection((host, port), timeout=timeout)
-    except OSError as exc:
-        raise BridgeConnectionError(f"cannot connect to {host}:{port}: {exc}") from exc
-
+def _send_and_read(sock: socket.socket, request: bytes, target: str, timeout: float) -> bytes:
+    """sendall() is the actual staleness probe: if a previous response left the shared
+    socket half-dead (e.g. a non-VLC RFC-compliant peer that closes after one
+    response -- see the test fixtures), the write itself raises (broken pipe/reset),
+    which the caller (_request_locked) catches and reconnects on. Here, a clean peer
+    close mid-read (chunk == b"") is a NORMAL end-of-response signal, same as before
+    this class started reusing connections -- not every peer is VLC, which never
+    closes at all; a well-behaved one without Content-Length closes to mark the end.
+    """
+    sock.sendall(request)
+    sock.settimeout(min(_IDLE_GAP_S, timeout))
     chunks: list[bytes] = []
     deadline = time.monotonic() + timeout
-    try:
-        sock.sendall(request)
-        sock.settimeout(min(_IDLE_GAP_S, timeout))
-        while time.monotonic() < deadline:
-            try:
-                chunk = sock.recv(65536)
-            except (socket.timeout, TimeoutError):
-                if chunks:
-                    break  # got a full burst, then a quiet gap -- treat as done
-                continue  # nothing yet at all; keep waiting until the deadline
-            if not chunk:
-                break  # peer closed the connection -- a well-behaved server
-            chunks.append(chunk)
-    finally:
-        sock.close()
+    while time.monotonic() < deadline:
+        try:
+            chunk = sock.recv(65536)
+        except (socket.timeout, TimeoutError):
+            if chunks:
+                break  # got a full burst, then a quiet gap -- treat as done
+            continue  # nothing yet at all; keep waiting until the deadline
+        if not chunk:
+            break  # peer closed after responding -- a valid end-of-response signal
+        chunks.append(chunk)
 
     if not chunks:
-        raise BridgeConnectionError(f"no response from {host}:{port}{target} within {timeout}s")
+        raise OSError(f"no response from {target} within {timeout}s")
     return b"".join(chunks)
 
 

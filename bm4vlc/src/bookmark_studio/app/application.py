@@ -29,8 +29,17 @@ from bookmark_studio.playlist.synchronizer import PlaylistSynchronizer
 from bookmark_studio.ui.main_window import MainWindow
 from bookmark_studio.waveform.service import WaveformService
 
-STATUS_POLL_MS = 150  # spec #32: 100-200ms normal state
-PLAYLIST_POLL_MS = 750  # spec #32: 500-1000ms
+# spec #32 suggests 100-200ms status / 500-1000ms playlist. Verified live these are too
+# aggressive for VLC's real Lua httpd: every request that doesn't get a response within
+# its timeout forces BridgeClient to reconnect, and each reconnect leaks a socket on
+# VLC's side (see bridge_client.py's module docstring -- VLC's httpd never closes its
+# end). At spec's suggested cadence, a live session degraded from "connects fine" to
+# "completely unresponsive" within about 15-20 seconds of normal use. Slower polling
+# directly cuts total request volume and, with it, the absolute leak rate -- this is a
+# mitigation that meaningfully extends real session lifetime, not a fix for the
+# underlying VLC-side leak, which nothing on this side of the socket can eliminate.
+STATUS_POLL_MS = 400
+PLAYLIST_POLL_MS = 2000
 
 
 class _CallSignals(QObject):

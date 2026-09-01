@@ -183,6 +183,52 @@ def test_standard_http_adapter_reads_status_and_playlist(vlc_server) -> None:
     assert playlist[0].duration_s == 10.0
 
 
+class _VlcStyleNeverClosingHandler(BaseHTTPRequestHandler):
+    """Mimics VLC's actual httpd():handler() behavior (verified live, see
+    bridge_client.py's module docstring): a bare status line immediately followed by
+    the body, no header terminator, no Content-Length -- and it never closes the
+    connection, so a client MUST reuse it or leak a socket per request.
+    """
+
+    protocol_version = "HTTP/1.1"  # keep the underlying socket open between requests
+
+    def do_GET(self) -> None:  # noqa: N802
+        _VlcStyleNeverClosingHandler.request_count += 1
+        _VlcStyleNeverClosingHandler.client_ports.add(self.client_address[1])
+        body = json.dumps({"ok": True, "protocol_version": 1, "vlc_version": "x", "bridge_version": "x"})
+        # Deliberately malformed like real VLC: status line + body, no blank line.
+        self.wfile.write(f"HTTP/1.0 200 OK\r\n{body}".encode())
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+def test_bridge_client_reuses_one_connection_across_many_requests(qtbot) -> None:
+    """Regression: an earlier per-call-socket design left VLC's real httpd leaking a
+    connection into CLOSE_WAIT on every single request -- confirmed live via netstat,
+    several hundred accumulate within minutes of normal ~150ms status polling, after
+    which VLC stops accepting new connections at all. This is the actual, most severe
+    root cause behind a live user session going from "works" to "just doesn't work"."""
+    _VlcStyleNeverClosingHandler.request_count = 0
+    _VlcStyleNeverClosingHandler.client_ports = set()
+    server = HTTPServer(("127.0.0.1", 0), _VlcStyleNeverClosingHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        client = BridgeClient(host, port, "any-token")
+        for _ in range(10):
+            client.health()
+        assert _VlcStyleNeverClosingHandler.request_count == 10
+        # A new TCP connection per request would show 10 distinct ephemeral client
+        # ports; connection reuse shows exactly one.
+        assert len(_VlcStyleNeverClosingHandler.client_ports) == 1
+        client.close()
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_standard_http_adapter_transport_commands_do_not_raise(vlc_server) -> None:
     host, port = vlc_server
     adapter = StandardHttpPlaybackAdapter(host, port, VLC_PASSWORD)
