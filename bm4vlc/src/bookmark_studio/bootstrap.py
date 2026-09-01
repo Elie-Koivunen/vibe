@@ -77,17 +77,32 @@ def build_main_window(bookmark_repository: BookmarkRepository) -> MainWindow:
 def select_playback_adapter(settings: SettingsService) -> tuple[PlaybackAdapter, str | None]:
     """spec #178 'probe enhanced bridge -> fallback probe -> connected? / offline mode'.
 
-    Returns (adapter, vlc_path). Falls back to an inert MockPlaybackAdapter([]) when
-    nothing is reachable, rather than the standard-HTTP fallback (spec #28) -- that
-    adapter needs a known host/port/password the settings UI doesn't collect yet, so
-    wiring it in is left as a documented next step rather than guessed at here.
+    Returns (adapter, vlc_path). Whenever VLC is found at all, this returns the
+    EnhancedLuaPlaybackAdapter -- it does NOT gate that choice on a one-shot
+    probe_bridge() success/failure the way an earlier version did.
+
+    That earlier version was a real, serious bug, not just a missed optimization:
+    VLC's Lua bridge takes several seconds to finish loading after the VLC process
+    starts (confirmed live -- a health probe attempted ~3-4s after launch failed, the
+    same probe ~7s after launch succeeded). A single failed probe at app startup
+    permanently locked the whole session onto an inert MockPlaybackAdapter([]) with an
+    empty playlist that can never populate, no waveform, and nothing ever updating --
+    which looks indistinguishable from "the app is broken," and there is no reconnect
+    path back to a real adapter once Mock is chosen no matter how long VLC keeps
+    running afterward. Application's own per-tick polling already tolerates a
+    not-yet-reachable (or never-reachable) bridge gracefully (spec #104) -- each failed
+    poll is logged and skipped, not fatal -- so it will self-heal automatically the
+    moment the bridge actually comes up, which Mock could never do. Only fall back to
+    Mock when VLC itself isn't installed/found at all, since there is then nothing to
+    ever reconnect to.
+
+    probe_bridge() is kept and still used by bootstrap.main() purely for an informative
+    startup log line, not for this decision.
     """
     vlc_path = find_vlc_path(settings)
     if vlc_path is not None:
-        reachable = probe_bridge("127.0.0.1", settings.bridge_port(), settings.bridge_token())
-        if reachable:
-            client = BridgeClient("127.0.0.1", settings.bridge_port(), settings.bridge_token())
-            return EnhancedLuaPlaybackAdapter(client), vlc_path
+        client = BridgeClient("127.0.0.1", settings.bridge_port(), settings.bridge_token())
+        return EnhancedLuaPlaybackAdapter(client), vlc_path
     return MockPlaybackAdapter([]), vlc_path
 
 
@@ -105,6 +120,13 @@ def main(argv: list[str] | None = None) -> int:
     conn = open_database()
     adapter, vlc_path = select_playback_adapter(settings)
     log.info("VLC path: %s; adapter: %s", vlc_path, type(adapter).__name__)
+    if vlc_path is not None:
+        reachable = probe_bridge("127.0.0.1", settings.bridge_port(), settings.bridge_token())
+        log.info(
+            "Bridge reachable at startup: %s (a 'no' here is not fatal -- polling "
+            "keeps retrying and will connect once VLC's bridge finishes loading)",
+            reachable,
+        )
 
     ffmpeg_path = shutil.which("ffmpeg") or "ffmpeg"
     application = Application(

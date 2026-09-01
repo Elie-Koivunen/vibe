@@ -58,6 +58,9 @@ class WaveformScene(QGraphicsScene):
     def set_playhead_time_us(self, time_us: int) -> None:
         self._playhead_item.set_time_us(time_us)
 
+    def playhead_time_us(self) -> int:
+        return self._playhead_item.time_us()
+
     # -- selection --
 
     def set_selection(self, selection: Selection | None) -> None:

@@ -1,15 +1,18 @@
 """MainWindow: menu bar, QSplitter panel layout, active-context breadcrumb (spec #7-#8)."""
 from __future__ import annotations
 
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QUndoStack
-from PySide6.QtWidgets import QLabel, QMainWindow, QSplitter, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut, QUndoStack
+from PySide6.QtWidgets import (
+    QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSplitter, QVBoxLayout, QWidget,
+)
 
 from bookmark_studio.app.commands import (
     ChangeLoopCommand,
     CreateBookmarkCommand,
+    DeleteBookmarkCommand,
     MoveBookmarkCommand,
     RenameBookmarkCommand,
     ResizeBookmarkCommand,
@@ -26,6 +29,13 @@ from bookmark_studio.ui.waveform.view import WaveformView
 
 
 class MainWindow(QMainWindow):
+    # Re-exposes transport/waveform playback intents at the MainWindow level so a
+    # composition root (e.g. app/application.py) has one place to wire real VLC
+    # commands, instead of reaching into private widgets. play_selection_requested and
+    # loop_selection_requested carry (start_us, end_us).
+    play_selection_requested = Signal(int, int)
+    loop_selection_requested = Signal(int, int)
+
     def __init__(
         self,
         bookmark_repository: BookmarkRepository,
@@ -50,11 +60,53 @@ class MainWindow(QMainWindow):
         self._inspector = BookmarkInspector(self)
         self._transport = TransportBar(self)
 
+        self._build_selection_bar()
         self._build_menu_bar()
         self._build_layout()
+        self._build_shortcuts()
         self._wire_signals()
 
     # -- layout --
+
+    def _build_selection_bar(self) -> None:
+        """Visible actions for a painted selection (spec #37: 'floating actions appear:
+        Bookmark / Play / Loop / Clear'). Not a floating popup -- a persistent, always
+        visible row that enables when a selection exists -- simpler and, per direct
+        user feedback ('no buttons to save highlighted areas'), the actual bug was that
+        no such control existed at all, floating or otherwise.
+        """
+        self._selection_bar = QWidget(self)
+        layout = QHBoxLayout(self._selection_bar)
+        layout.setContentsMargins(4, 2, 4, 2)
+
+        self._selection_label = QLabel("No selection", self)
+        layout.addWidget(self._selection_label)
+        layout.addStretch(1)
+
+        self._bookmark_selection_button = QPushButton("Bookmark Selection (Ctrl+B)", self)
+        self._bookmark_selection_button.clicked.connect(self._on_bookmark_selection_clicked)
+        layout.addWidget(self._bookmark_selection_button)
+
+        self._play_selection_button = QPushButton("Play Selection", self)
+        self._play_selection_button.clicked.connect(self._on_play_selection_clicked)
+        layout.addWidget(self._play_selection_button)
+
+        self._loop_selection_button = QPushButton("Loop Selection", self)
+        self._loop_selection_button.clicked.connect(self._on_loop_selection_clicked)
+        layout.addWidget(self._loop_selection_button)
+
+        self._clear_selection_button = QPushButton("Clear", self)
+        self._clear_selection_button.clicked.connect(lambda: self._waveform_scene.clear_selection())
+        layout.addWidget(self._clear_selection_button)
+
+        self._set_selection_buttons_enabled(False)
+
+    def _set_selection_buttons_enabled(self, enabled: bool) -> None:
+        for button in (
+            self._bookmark_selection_button, self._play_selection_button,
+            self._loop_selection_button, self._clear_selection_button,
+        ):
+            button.setEnabled(enabled)
 
     def _build_layout(self) -> None:
         top_splitter = QSplitter(Qt.Horizontal, self)
@@ -75,23 +127,86 @@ class MainWindow(QMainWindow):
         central = QWidget(self)
         layout = QVBoxLayout(central)
         layout.addWidget(self._breadcrumb)
+        layout.addWidget(self._selection_bar)
         layout.addWidget(main_splitter)
         layout.addWidget(self._transport)
         self.setCentralWidget(central)
 
     def _build_menu_bar(self) -> None:
         menu_bar = self.menuBar()
-        for title in ("File", "Edit", "View", "Bookmark", "Playback", "Playlist", "Tools", "Help"):
-            menu_bar.addMenu(title)
 
-        # Wire Undo/Redo into the "Edit" menu added above (File=0, Edit=1).
-        edit_menu = menu_bar.actions()[1].menu()
+        file_menu = menu_bar.addMenu("File")
+        export_action = file_menu.addAction("Export Project...")
+        export_action.triggered.connect(self._on_export_project)
+        import_action = file_menu.addAction("Import Project...")
+        import_action.triggered.connect(self._on_import_project)
+        file_menu.addSeparator()
+        exit_action = file_menu.addAction("Exit")
+        exit_action.triggered.connect(self.close)
+
+        edit_menu = menu_bar.addMenu("Edit")
         undo_action = self._undo_stack.createUndoAction(self, "Undo")
         undo_action.setShortcut("Ctrl+Z")
         redo_action = self._undo_stack.createRedoAction(self, "Redo")
         redo_action.setShortcut("Ctrl+Y")
         edit_menu.addAction(undo_action)
         edit_menu.addAction(redo_action)
+
+        view_menu = menu_bar.addMenu("View")
+        zoom_in_action = view_menu.addAction("Zoom In")
+        zoom_in_action.setShortcut("Ctrl++")
+        zoom_in_action.triggered.connect(lambda: self._waveform_view.scale(1.25, 1.0))
+        zoom_out_action = view_menu.addAction("Zoom Out")
+        zoom_out_action.setShortcut("Ctrl+-")
+        zoom_out_action.triggered.connect(lambda: self._waveform_view.scale(0.8, 1.0))
+        fit_action = view_menu.addAction("Fit Entire Media")
+        fit_action.setShortcut("Ctrl+0")
+        fit_action.triggered.connect(self._waveform_view.fit_entire_media)
+
+        bookmark_menu = menu_bar.addMenu("Bookmark")
+        bookmark_selection_action = bookmark_menu.addAction("Bookmark Selection")
+        bookmark_selection_action.setShortcut("Ctrl+B")
+        bookmark_selection_action.triggered.connect(self._on_bookmark_selection_clicked)
+        point_action = bookmark_menu.addAction("Point Bookmark at Playhead")
+        point_action.setShortcut("Ctrl+Shift+B")
+        point_action.triggered.connect(lambda: self._on_point_bookmark_requested(self._playhead_time_us()))
+        rename_action = bookmark_menu.addAction("Rename Selected Bookmark")
+        rename_action.setShortcut("F2")
+        rename_action.triggered.connect(self._on_rename_shortcut)
+        delete_action = bookmark_menu.addAction("Delete Selected Bookmark")
+        delete_action.setShortcut("Delete")
+        delete_action.triggered.connect(self._on_delete_shortcut)
+
+        playback_menu = menu_bar.addMenu("Playback")
+        play_pause_action = playback_menu.addAction("Play/Pause")
+        play_pause_action.setShortcut("Space")
+        play_pause_action.triggered.connect(self._transport.play_pause_clicked.emit)
+        stop_action = playback_menu.addAction("Stop")
+        stop_action.triggered.connect(self._transport.stop_clicked.emit)
+        seek_back_action = playback_menu.addAction("Seek -5s")
+        seek_back_action.setShortcut("Left")
+        seek_back_action.triggered.connect(self._transport.seek_back_clicked.emit)
+        seek_forward_action = playback_menu.addAction("Seek +5s")
+        seek_forward_action.setShortcut("Right")
+        seek_forward_action.triggered.connect(self._transport.seek_forward_clicked.emit)
+
+        playlist_menu = menu_bar.addMenu("Playlist")
+        refresh_action = playlist_menu.addAction("Refresh")
+        refresh_action.setShortcut("F5")
+        # Application (if wired) connects to refresh_requested; harmless no-op otherwise.
+        self.playlist_refresh_requested = refresh_action.triggered
+
+        tools_menu = menu_bar.addMenu("Tools")
+        diagnostics_action = tools_menu.addAction("Diagnostics...")
+        diagnostics_action.triggered.connect(self._on_show_diagnostics)
+
+        help_menu = menu_bar.addMenu("Help")
+        about_action = help_menu.addAction("About")
+        about_action.triggered.connect(self._on_show_about)
+
+    def _build_shortcuts(self) -> None:
+        QShortcut(QKeySequence("["), self, activated=self._on_mark_selection_start)
+        QShortcut(QKeySequence("]"), self, activated=self._on_mark_selection_end)
 
     # -- wiring --
 
@@ -101,6 +216,7 @@ class MainWindow(QMainWindow):
         self._waveform_scene.bookmark_activated.connect(self._on_bookmark_activated)
         self._waveform_scene.bookmark_move_finished.connect(self._on_bookmark_move_finished)
         self._waveform_scene.bookmark_resize_finished.connect(self._on_bookmark_resize_finished)
+        self._waveform_scene.selection_changed.connect(self._on_selection_changed)
 
         self._bookmark_panel.bookmark_selected.connect(self._on_bookmark_activated)
 
@@ -120,16 +236,81 @@ class MainWindow(QMainWindow):
         self._waveform_scene.set_bookmarks(bookmarks)
         self._bookmark_panel.set_bookmarks(bookmarks)
 
-    # -- handlers --
-
-    def _on_seek_requested(self, time_us: int) -> None:
+    def set_playhead_time_us(self, time_us: int) -> None:
         self._waveform_scene.set_playhead_time_us(time_us)
+
+    # -- handlers: selection bar --
+
+    def _on_selection_changed(self, selection: object) -> None:
+        from bookmark_studio.domain.selection import Selection
+        from bookmark_studio.ui.transport import format_timecode
+
+        if isinstance(selection, Selection):
+            self._selection_label.setText(
+                f"Selection: {format_timecode(selection.start_us)} → "
+                f"{format_timecode(selection.end_us)} ({format_timecode(selection.duration_us)})"
+            )
+            self._set_selection_buttons_enabled(True)
+        else:
+            self._selection_label.setText("No selection")
+            self._set_selection_buttons_enabled(False)
+
+    def _on_bookmark_selection_clicked(self) -> None:
+        selection = self._waveform_scene.selection()
+        if selection is None or self._current_media_id is None:
+            return
+        bookmark = Bookmark(
+            id=uuid4(),
+            playlist_id=self._current_playlist_id,
+            media_id=self._current_media_id,
+            scope=BookmarkScope.PLAYLIST_MEDIA if self._current_playlist_id else BookmarkScope.GLOBAL_MEDIA,
+            lane_id=None,
+            bookmark_type=BookmarkType.SEGMENT,
+            name="New bookmark",
+            start_us=selection.start_us,
+            end_us=selection.end_us,
+            loop_enabled=False,
+            repeat_count=None,
+            loop_gap_ms=0,
+            completion_action=CompletionAction.CONTINUE,
+        )
+        self._create_bookmark_and_focus_name(bookmark)
+        self._waveform_scene.clear_selection()
+
+    def _on_play_selection_clicked(self) -> None:
+        selection = self._waveform_scene.selection()
+        if selection is not None:
+            self.play_selection_requested.emit(selection.start_us, selection.end_us)
+
+    def _on_loop_selection_clicked(self) -> None:
+        selection = self._waveform_scene.selection()
+        if selection is not None:
+            self.loop_selection_requested.emit(selection.start_us, selection.end_us)
+
+    def _on_mark_selection_start(self) -> None:
+        from bookmark_studio.domain.selection import Selection
+
+        time_us = self._playhead_time_us()
+        current = self._waveform_scene.selection()
+        end_us = current.end_us if current and current.end_us > time_us else time_us + 1
+        self._waveform_scene.set_selection(Selection(start_us=time_us, end_us=end_us))
+
+    def _on_mark_selection_end(self) -> None:
+        from bookmark_studio.domain.selection import Selection
+
+        time_us = self._playhead_time_us()
+        current = self._waveform_scene.selection()
+        start_us = current.start_us if current and current.start_us < time_us else max(0, time_us - 1)
+        self._waveform_scene.set_selection(Selection(start_us=start_us, end_us=time_us))
+
+    def _playhead_time_us(self) -> int:
+        return self._waveform_scene.playhead_time_us()
+
+    # -- handlers: bookmark lifecycle --
 
     def _on_point_bookmark_requested(self, time_us: int) -> None:
         if self._current_media_id is None:
             return
-        from uuid import uuid4
-
         bookmark = Bookmark(
             id=uuid4(),
             playlist_id=self._current_playlist_id,
@@ -145,8 +326,16 @@ class MainWindow(QMainWindow):
             loop_gap_ms=0,
             completion_action=CompletionAction.CONTINUE,
         )
+        self._create_bookmark_and_focus_name(bookmark)
+
+    def _create_bookmark_and_focus_name(self, bookmark: Bookmark) -> None:
         self._undo_stack.push(CreateBookmarkCommand(self._bookmark_repository, bookmark))
         self._refresh_bookmarks()
+        # spec #46: inline name editor appears immediately after creation, no modal.
+        self._inspector.load_bookmark(bookmark)
+        self._bookmark_panel.select_bookmark(bookmark.id)
+        self._inspector._name_edit.setFocus()
+        self._inspector._name_edit.selectAll()
 
     def _on_bookmark_activated(self, bookmark_id: UUID) -> None:
         bookmark = self._bookmark_repository.get(bookmark_id)
@@ -195,6 +384,19 @@ class MainWindow(QMainWindow):
         )
         self._refresh_bookmarks()
 
+    def _on_rename_shortcut(self) -> None:
+        if self._current_inspected_bookmark() is not None:
+            self._inspector._name_edit.setFocus()
+            self._inspector._name_edit.selectAll()
+
+    def _on_delete_shortcut(self) -> None:
+        bookmark = self._current_inspected_bookmark()
+        if bookmark is None:
+            return
+        self._undo_stack.push(DeleteBookmarkCommand(self._bookmark_repository, bookmark))
+        self._inspector.clear()
+        self._refresh_bookmarks()
+
     def _current_inspected_bookmark(self) -> Bookmark | None:
         return self._inspector.current_bookmark()
 
@@ -207,3 +409,69 @@ class MainWindow(QMainWindow):
             self._current_playlist_id, self._current_media_id
         ) if self._current_playlist_id else self._bookmark_repository.list_global_for_media(self._current_media_id)
         self.load_bookmarks(bookmarks)
+
+    def _on_seek_requested(self, time_us: int) -> None:
+        self._waveform_scene.set_playhead_time_us(time_us)
+
+    # -- menu action bodies --
+
+    def _on_export_project(self) -> None:
+        from pathlib import Path
+
+        from PySide6.QtWidgets import QFileDialog
+
+        from bookmark_studio.persistence.lane_repository import LaneRepository
+        from bookmark_studio.persistence.media_repository import MediaRepository
+        from bookmark_studio.persistence.playlist_repository import PlaylistRepository
+        from bookmark_studio.project.export_service import ProjectData, export_project
+
+        path_str, _filter = QFileDialog.getSaveFileName(self, "Export Project", "", "Bookmark Studio Project (*.vlcbmk)")
+        if not path_str:
+            return
+        conn = self._bookmark_repository.connection
+        playlists = [r.playlist for r in PlaylistRepository(conn).list_recent(limit=10_000)]
+        media = []
+        bookmarks = []
+        if self._current_media_id is not None:
+            media_record = MediaRepository(conn).get(self._current_media_id)
+            if media_record:
+                media.append(media_record)
+            bookmarks = self._bookmark_repository.list_for_playlist_media(
+                self._current_playlist_id, self._current_media_id
+            ) if self._current_playlist_id else self._bookmark_repository.list_global_for_media(self._current_media_id)
+        lanes = LaneRepository(conn).list_for_playlist(self._current_playlist_id) if self._current_playlist_id else []
+        export_project(Path(path_str), ProjectData(playlists=playlists, media=media, bookmarks=bookmarks, lanes=lanes))
+        QMessageBox.information(self, "Export Project", f"Exported to {path_str}")
+
+    def _on_import_project(self) -> None:
+        from pathlib import Path
+
+        from PySide6.QtWidgets import QFileDialog
+
+        from bookmark_studio.project.import_service import import_project
+
+        path_str, _filter = QFileDialog.getOpenFileName(self, "Import Project", "", "Bookmark Studio Project (*.vlcbmk)")
+        if not path_str:
+            return
+        try:
+            plan = import_project(self._bookmark_repository.connection, Path(path_str))
+        except Exception as exc:  # noqa: BLE001 - shown to the user, not a crash
+            QMessageBox.critical(self, "Import Project", f"Import failed: {exc}")
+            return
+        QMessageBox.information(self, "Import Project", f"Imported {len(plan.bookmarks)} bookmarks.")
+        self._refresh_bookmarks()
+
+    def _on_show_diagnostics(self) -> None:
+        lines = [
+            f"Current playlist: {self._current_playlist_id or '(none)'}",
+            f"Current media: {self._current_media_id or '(none)'}",
+            f"Bookmarks loaded: {self._bookmark_panel._tree.topLevelItemCount()}",
+        ]
+        QMessageBox.information(self, "Diagnostics", "\n".join(lines))
+
+    def _on_show_about(self) -> None:
+        QMessageBox.about(
+            self, "About VLC Bookmark Studio",
+            "VLC Bookmark Studio\n\nA playlist-aware visual bookmarking and looping "
+            "tool for VLC Media Player.",
+        )

@@ -25,6 +25,9 @@ class PlayheadItem(QGraphicsItem):
         self._time_us = time_us
         self.setX(time_us_to_scene_x(time_us))
 
+    def time_us(self) -> int:
+        return self._time_us
+
     def boundingRect(self) -> QRectF:  # noqa: N802 - Qt override
         return QRectF(-1, 0, 2, self._height)
 

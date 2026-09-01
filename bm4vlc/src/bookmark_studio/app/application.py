@@ -100,6 +100,8 @@ class Application(QObject):
 
         self._current_media_id: UUID | None = None
         self._current_vlc_item_id: int | None = None
+        self._last_playback_state: str = "stopped"
+        self._playlist_items: list = []
 
         self._thread_pool = QThreadPool(self)
         self._status_inflight = False
@@ -116,6 +118,8 @@ class Application(QObject):
         self._playlist_timer = QTimer(self)
         self._playlist_timer.timeout.connect(self._poll_playlist)
 
+        self._wire_transport()
+
     def start(self) -> None:
         try:
             self._adapter.connect()
@@ -125,6 +129,99 @@ class Application(QObject):
         self._playlist_timer.start(PLAYLIST_POLL_MS)
         self._poll_playlist()
         self.window.show()
+
+    # -- transport wiring --
+    #
+    # Found live, from direct user testing: none of this existed. The transport bar's
+    # buttons emitted signals into the void, waveform click-to-seek only moved a local
+    # cosmetic playhead without ever telling VLC to seek, and the playlist panel was
+    # never populated by the running app at all (only by throwaway demo scripts). This
+    # is the missing connection layer between the UI widgets and the real adapter.
+
+    def _wire_transport(self) -> None:
+        transport = self.window._transport
+        transport.play_pause_clicked.connect(self._on_play_pause_clicked)
+        transport.stop_clicked.connect(lambda: self._fire_and_forget(self._adapter.stop))
+        transport.seek_back_clicked.connect(
+            lambda: self._fire_and_forget(lambda: self._adapter.seek_relative_us(-5_000_000))
+        )
+        transport.seek_forward_clicked.connect(
+            lambda: self._fire_and_forget(lambda: self._adapter.seek_relative_us(5_000_000))
+        )
+        transport.previous_track_clicked.connect(lambda: self._fire_and_forget(self._adapter.previous_track))
+        transport.next_track_clicked.connect(lambda: self._fire_and_forget(self._adapter.next_track))
+        transport.previous_bookmark_clicked.connect(self._on_previous_bookmark)
+        transport.next_bookmark_clicked.connect(self._on_next_bookmark)
+
+        self.window._waveform_scene.seek_requested.connect(
+            lambda time_us: self._fire_and_forget(lambda: self._adapter.seek_absolute_us(time_us))
+        )
+        self.window._playlist_panel.item_double_clicked.connect(
+            lambda vlc_id: self._fire_and_forget(lambda: self._adapter.goto_item(vlc_id))
+        )
+        self.window.play_selection_requested.connect(self._on_play_selection_requested)
+        self.window.loop_selection_requested.connect(self._on_loop_selection_requested)
+
+    def _fire_and_forget(self, fn) -> None:
+        """Dispatches a one-off adapter command off the main thread (spec #108), same
+        pattern as the polling workers -- a command like seek/rate can take long enough
+        (confirmed live: up to several hundred ms against real VLC) that calling it
+        directly from a button click would visibly stall the GUI.
+        """
+        signals = _CallSignals(self)
+        signals.failed.connect(lambda msg: self._log.debug("command failed: %s", msg))
+        self._thread_pool.start(_CallWorker(fn, signals))
+
+    def _on_play_pause_clicked(self) -> None:
+        if self._last_playback_state == "playing":
+            self._fire_and_forget(self._adapter.pause)
+        else:
+            self._fire_and_forget(self._adapter.play)
+
+    def _on_play_selection_requested(self, start_us: int, end_us: int) -> None:
+        def _play() -> None:
+            self._adapter.seek_absolute_us(start_us)
+            self._adapter.play()
+
+        self._fire_and_forget(_play)
+
+    def _on_loop_selection_requested(self, start_us: int, end_us: int) -> None:
+        from bookmark_studio.domain.enums import CompletionAction
+        from bookmark_studio.domain.loop import LoopSpec
+
+        self._loop_controller.start(
+            LoopSpec(start_us=start_us, end_us=end_us, repeat_count=None, gap_ms=0,
+                      completion_action=CompletionAction.CONTINUE)
+        )
+
+    def _current_bookmarks_sorted(self) -> list:
+        if self._current_media_id is None:
+            return []
+        playlist_id = self._synchronizer.active_playlist_id
+        bookmarks = (
+            self._bookmark_repository.list_for_playlist_media(playlist_id, self._current_media_id)
+            if playlist_id is not None
+            else self._bookmark_repository.list_global_for_media(self._current_media_id)
+        )
+        return sorted(bookmarks, key=lambda b: b.start_us)
+
+    def _on_previous_bookmark(self) -> None:
+        bookmarks = self._current_bookmarks_sorted()
+        if not bookmarks:
+            return
+        current_time = self._clock.estimated_position_us()
+        candidates = [b for b in bookmarks if b.start_us < current_time - 500_000]
+        target = candidates[-1] if candidates else bookmarks[-1]
+        self._fire_and_forget(lambda: self._adapter.seek_absolute_us(target.start_us))
+
+    def _on_next_bookmark(self) -> None:
+        bookmarks = self._current_bookmarks_sorted()
+        if not bookmarks:
+            return
+        current_time = self._clock.estimated_position_us()
+        candidates = [b for b in bookmarks if b.start_us > current_time + 500_000]
+        target = candidates[0] if candidates else bookmarks[0]
+        self._fire_and_forget(lambda: self._adapter.seek_absolute_us(target.start_us))
 
     def stop(self) -> None:
         self._status_timer.stop()
@@ -151,8 +248,10 @@ class Application(QObject):
     def _on_status_result(self, status: object) -> None:
         self._status_inflight = False
         self._clock.update(status)
+        self._last_playback_state = status.state
         self.window._waveform_scene.set_playhead_time_us(status.time_us)
         self.window._transport.set_time(status.time_us, status.duration_us)
+        self.window._playlist_panel.set_current_playing(status.current_playlist_item_id)
         self._loop_controller.on_tick()
 
         if status.current_playlist_item_id != self._current_vlc_item_id:
@@ -171,13 +270,26 @@ class Application(QObject):
 
     def _on_playlist_result(self, items: object) -> None:
         self._playlist_inflight = False
-        ordered_media_ids = [
-            self._media_resolver.resolve(item.uri).id for item in items if item.uri
-        ]
-        if not ordered_media_ids:
+        self._playlist_items = list(items)
+        resolved = [(item, self._media_resolver.resolve(item.uri)) for item in items if item.uri]
+        if not resolved:
+            self.window._playlist_panel.set_playlist([], {})
             return
+
+        ordered_media_ids = [media.id for _item, media in resolved]
         result = self._synchronizer.on_snapshot(source_uri=None, ordered_media_ids=ordered_media_ids)
         self._log.debug("playlist sync: %s -> %s", result.action, result.playlist_id)
+
+        playlist_id = self._synchronizer.active_playlist_id
+        bookmark_counts = {}
+        for item, media in resolved:
+            bookmarks = (
+                self._bookmark_repository.list_for_playlist_media(playlist_id, media.id)
+                if playlist_id is not None
+                else self._bookmark_repository.list_global_for_media(media.id)
+            )
+            bookmark_counts[item.vlc_id] = len(bookmarks)
+        self.window._playlist_panel.set_playlist([item for item, _media in resolved], bookmark_counts)
 
     def _on_playlist_failed(self, message: str) -> None:
         self._playlist_inflight = False

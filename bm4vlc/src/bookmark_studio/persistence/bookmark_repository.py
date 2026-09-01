@@ -17,6 +17,12 @@ class BookmarkRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """Exposed for callers (e.g. project export) that need the raw connection to
+        query other repositories sharing the same database, not just bookmarks."""
+        return self._conn
+
     def get(self, bookmark_id: UUID) -> Bookmark | None:
         row = self._conn.execute(self._select_sql() + " WHERE id = ?", (str(bookmark_id),)).fetchone()
         return self._row_to_bookmark(row) if row else None
