@@ -9,7 +9,9 @@ import sqlite3
 from pathlib import Path
 from uuid import UUID
 
-from PySide6.QtCore import QObject, QTimer
+from typing import Callable
+
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QUndoStack
 
 from bookmark_studio.app.waveform_orchestrator import WaveformOrchestrator
@@ -29,6 +31,32 @@ from bookmark_studio.waveform.service import WaveformService
 
 STATUS_POLL_MS = 150  # spec #32: 100-200ms normal state
 PLAYLIST_POLL_MS = 750  # spec #32: 500-1000ms
+
+
+class _CallSignals(QObject):
+    finished = Signal(object)
+    failed = Signal(str)
+
+
+class _CallWorker(QRunnable):
+    """Runs one blocking PlaybackAdapter call on a QThreadPool worker (spec #108: no
+    network calls on a UI-blocking thread). Found live: without this, a single slow or
+    stalled bridge response froze the entire GUI event loop for the call's whole
+    timeout, since QTimer callbacks run on the main thread by default.
+    """
+
+    def __init__(self, fn: Callable[[], object], signals: _CallSignals) -> None:
+        super().__init__()
+        self._fn = fn
+        self._signals = signals
+
+    def run(self) -> None:
+        try:
+            result = self._fn()
+        except Exception as exc:  # noqa: BLE001 - reported to the main thread via signal
+            self._signals.failed.emit(str(exc))
+            return
+        self._signals.finished.emit(result)
 
 
 class Application(QObject):
@@ -73,6 +101,16 @@ class Application(QObject):
         self._current_media_id: UUID | None = None
         self._current_vlc_item_id: int | None = None
 
+        self._thread_pool = QThreadPool(self)
+        self._status_inflight = False
+        self._playlist_inflight = False
+        self._status_signals = _CallSignals(self)
+        self._status_signals.finished.connect(self._on_status_result)
+        self._status_signals.failed.connect(self._on_status_failed)
+        self._playlist_signals = _CallSignals(self)
+        self._playlist_signals.finished.connect(self._on_playlist_result)
+        self._playlist_signals.failed.connect(self._on_playlist_failed)
+
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._poll_status)
         self._playlist_timer = QTimer(self)
@@ -97,14 +135,21 @@ class Application(QObject):
             pass
 
     # -- polling --
+    #
+    # Each tick dispatches the adapter call to a QThreadPool worker instead of calling
+    # it directly (spec #108). An in-flight guard skips a tick rather than queuing a
+    # second overlapping call if the previous one hasn't returned yet -- with a slow or
+    # stalled bridge, piling up unbounded overlapping requests would be worse than
+    # just catching up on the next tick.
 
     def _poll_status(self) -> None:
-        try:
-            status = self._adapter.get_status()
-        except Exception as exc:  # noqa: BLE001 - spec #104: never crash the UI on a drop
-            self._log.debug("status poll failed: %s", exc)
+        if self._status_inflight:
             return
+        self._status_inflight = True
+        self._thread_pool.start(_CallWorker(self._adapter.get_status, self._status_signals))
 
+    def _on_status_result(self, status: object) -> None:
+        self._status_inflight = False
         self._clock.update(status)
         self.window._waveform_scene.set_playhead_time_us(status.time_us)
         self.window._transport.set_time(status.time_us, status.duration_us)
@@ -114,13 +159,18 @@ class Application(QObject):
             self._current_vlc_item_id = status.current_playlist_item_id
             self._on_current_item_changed(status.media_uri, status.duration_us)
 
-    def _poll_playlist(self) -> None:
-        try:
-            items = self._adapter.get_playlist()
-        except Exception as exc:  # noqa: BLE001
-            self._log.debug("playlist poll failed: %s", exc)
-            return
+    def _on_status_failed(self, message: str) -> None:
+        self._status_inflight = False
+        self._log.debug("status poll failed: %s", message)  # spec #104: never crash the UI
 
+    def _poll_playlist(self) -> None:
+        if self._playlist_inflight:
+            return
+        self._playlist_inflight = True
+        self._thread_pool.start(_CallWorker(self._adapter.get_playlist, self._playlist_signals))
+
+    def _on_playlist_result(self, items: object) -> None:
+        self._playlist_inflight = False
         ordered_media_ids = [
             self._media_resolver.resolve(item.uri).id for item in items if item.uri
         ]
@@ -128,6 +178,10 @@ class Application(QObject):
             return
         result = self._synchronizer.on_snapshot(source_uri=None, ordered_media_ids=ordered_media_ids)
         self._log.debug("playlist sync: %s -> %s", result.action, result.playlist_id)
+
+    def _on_playlist_failed(self, message: str) -> None:
+        self._playlist_inflight = False
+        self._log.debug("playlist poll failed: %s", message)
 
     # -- reactions --
 

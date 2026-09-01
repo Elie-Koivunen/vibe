@@ -6,18 +6,27 @@ for the full design and engineering specification (198 sections).
 
 ## Status
 
-MVP core is implemented and tested (106 tests, all passing): domain
+MVP core is implemented and tested (108 tests, all passing): domain
 model, SQLite persistence + migrations, media fingerprint/resolution,
 playlist recognition/similarity/mutation-tracking, the full FFmpeg
 waveform pipeline (real decode/peaks/pyramid/cache, verified against
 real `ffmpeg`), three playback adapters (Mock / VLC's built-in HTTP /
-the custom Lua bridge — the last verified live against a real running
-VLC 3.0.23), the software loop controller, undo/redo commands with
-drag-compression, project export/import (atomic, transactional), and a
-working PySide6 UI (waveform paint-to-select/drag/resize, playlist and
-bookmark panels, inspector, transport bar) wired end-to-end through a
-live polling `Application` composition root. `python -m bookmark_studio`
-starts, discovers VLC, connects or falls back to offline mode, and runs.
+the custom Lua bridge), the software loop controller, undo/redo
+commands with drag-compression, project export/import (atomic,
+transactional), and a working PySide6 UI (waveform paint-to-select/
+drag/resize, playlist and bookmark panels, inspector, transport bar)
+wired end-to-end through a live polling `Application` composition
+root. `python -m bookmark_studio` starts, discovers VLC, connects or
+falls back to offline mode, and runs.
+
+**The full live loop was confirmed working end-to-end against a real,
+locally installed, running VLC 3.0.23**: launch a managed VLC instance,
+connect over the Lua bridge, resolve the current track, load its
+waveform via real `ffmpeg`, and stream live playback position back
+into the UI's transport bar and playhead every ~150ms — not mocked,
+not simulated. See "Verified live against real VLC" below for the six
+real bugs this surfaced and fixed, several of which directly
+contradicted the spec's own assumptions about VLC's Lua API.
 
 **Known simplifications / not yet built:**
 - `StandardHttpPlaybackAdapter` (spec #28) exists and is tested, but
@@ -43,30 +52,48 @@ starts, discovers VLC, connects or falls back to offline mode, and runs.
 
 `vlc/bookmarkstudio.lua` was iteratively debugged against a real,
 locally installed VLC 3.0.23 (not just written and assumed correct).
-Three real bugs were caught this way and are documented inline in the
-script and in `app/vlc_launcher.py`:
+Six real bugs were caught this way, several directly contradicting
+spec #196's own claims about VLC's Lua API:
 
 1. `obj:method and obj:method()` is invalid Lua (colon-call syntax
    needs immediate parens) — rejected at script-load time.
-2. `vlc.getenv(...)` does not exist in VLC's Lua API. Config now comes
-   from a file at `vlc.config.configdir()` (verified live: resolves to
-   `%APPDATA%\vlc`, i.e. exactly the "VLC user config" directory spec
-   #153 refers to).
+2. `vlc.getenv(...)` does not exist in VLC's Lua API. Config comes from
+   a file at `vlc.config.configdir()` instead (verified live: resolves
+   to `%APPDATA%\vlc`, exactly spec #153's "VLC user config" directory).
 3. `vlc.httpd()` does not let a script pick its own host/port — it
    binds according to VLC's own `--http-host`/`--http-port` startup
    flags (default, unset: **all interfaces**, port 8080 — confirmed
    live). `app/vlc_launcher.py`'s `launch_managed_vlc()` always passes
    `--http-host=127.0.0.1` explicitly for this reason (spec #20).
+4. **`vlc.httpd():handler()`'s response is not RFC 7230 compliant** —
+   it sends a bare status line straight into the body with no
+   header-terminating blank line, no `Content-Length`, and never
+   closes the connection. Every standard HTTP client (`requests`,
+   `curl`, browsers) hangs forever waiting for headers that never
+   arrive, even though the correct body is delivered in milliseconds.
+   `playback/bridge_client.py` reads over a raw socket with an
+   idle-gap heuristic instead of relying on a header terminator or
+   connection close, which handles both this and a normal
+   RFC-compliant server (VLC's built-in HTTP interface, and every test
+   fixture, use the latter).
+5. `vlc.player.seek_by_time_absolute` (spec #196's own reference)
+   **does not exist** in VLC 3.0.23's Lua API at all (`vlc.player` is
+   `nil`) — every `/seek` request hung with no response. Seeking is
+   instead `vlc.var.set(input, "time", us)`, the same mechanism already
+   used to *read* time/length/rate.
+6. `vlc.playlist.get("playlist", false)` has no `.current` field —
+   there is no built-in "which item is playing" indicator. The bridge
+   now matches the currently-playing input item's URI against each
+   playlist child's `.path` instead.
 
-The full HTTP round-trip through a VLC instance launched with those
-exact flags was attempted but not conclusively confirmed in this
-session (VLC's own log output went silent under that specific flag
-combination for reasons not fully diagnosed) — flagged here rather
-than claimed, per this project's own convention (see
-[buzz2vlc](../buzz2vlc)'s PROJECT_SPEC.md for the origin of that
-convention). The Lua bridge's endpoint logic itself, and the Python
-`BridgeClient`/`EnhancedLuaPlaybackAdapter` pair, are separately
-verified against a real HTTP server in `tests/unit/test_playback_adapters.py`.
+Also found and fixed while closing this out: `Application`'s status/
+playlist polling called the adapter's blocking network I/O directly
+from a `QTimer` callback on the Qt main thread — a slow or stalled
+bridge response froze the entire GUI for the call's timeout window,
+contradicting spec #108's "no network calls on a UI-blocking thread."
+Polling now dispatches through a `QThreadPool` worker with an in-flight
+guard per poll kind, mirroring the pattern already used for waveform
+generation.
 
 ## Architecture
 

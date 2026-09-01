@@ -7,9 +7,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-import requests
 
-from bookmark_studio.playback.bridge_client import BridgeClient, BridgeError
+from bookmark_studio.playback.bridge_client import BridgeClient, BridgeError, BridgeHTTPError
 from bookmark_studio.playback.enhanced_adapter import EnhancedLuaPlaybackAdapter
 from bookmark_studio.playback.http_fallback import StandardHttpPlaybackAdapter
 
@@ -135,7 +134,7 @@ def test_bridge_client_health_and_status(bridge_server) -> None:
 def test_bridge_client_rejects_wrong_token(bridge_server) -> None:
     host, port = bridge_server
     client = BridgeClient(host, port, "wrong-token")
-    with pytest.raises(requests.HTTPError):
+    with pytest.raises(BridgeHTTPError):
         client.health()
 
 

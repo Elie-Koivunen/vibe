@@ -31,6 +31,22 @@ Security (spec #20-#21, #158-#159):
     when this used "\\" -- also caught live.
   - a fixed whitelist of /control commands only; every numeric parameter is validated
     before being handed to a vlc.* call
+
+Response API (verified live against VLC 3.0.23, replacing an earlier version that
+guessed wrong -- see PROJECT_SPEC.md-adjacent debug notes in README.md):
+  - httpd:handler()'s callback signature is `function(data, url, request, type,
+    in_data)`. `request` is NOT a table/object -- it is `nil` when the request has no
+    query string, or the raw query string itself (e.g. "command=play&id=3") when it
+    does. There is no `request.client` and no `request.psz_args`; the original code
+    assumed both and crashed every real request with "attempt to index a nil value"
+    (an uncaught error that reset the TCP connection, which read from curl/Python as a
+    bare connection-reset with no HTTP response at all).
+  - The callback's return value is the plain response BODY STRING. There is no way to
+    set an HTTP status code or Content-Type header found through this API in testing
+    (a second return value is silently ignored) -- every response is HTTP 200, and
+    success/failure is carried in the JSON body's "ok" field instead, which is exactly
+    what BridgeClient (playback/bridge_client.py) already checks first, so no error
+    ever gets misread as success on the Python side.
 ]]
 
 local httpd = vlc.httpd()
@@ -106,22 +122,14 @@ end
 -- Response helpers
 -- ---------------------------------------------------------------------------
 
-local function send_json(client, status_code, body_table)
-    local body = json_encode(body_table)
-    client:set_status(status_code)
-    client:add_header("Content-Type", "application/json")
-    client:add_header("Cache-Control", "no-store")
-    return body
-end
-
-local function ok_json(client, body_table)
+local function ok_json(body_table)
     body_table = body_table or {}
     body_table.ok = true
-    return send_json(client, 200, body_table)
+    return json_encode(body_table)
 end
 
-local function error_json(client, http_status, code, message)
-    return send_json(client, http_status, { ok = false, error = { code = code, message = message } })
+local function error_json(code, message)
+    return json_encode({ ok = false, error = { code = code, message = message } })
 end
 
 -- ---------------------------------------------------------------------------
@@ -148,71 +156,86 @@ end
 -- JSON body string via ok_json/error_json.
 -- ---------------------------------------------------------------------------
 
-local function handle_health(client, _query)
-    return ok_json(client, {
+local function handle_health(_query)
+    return ok_json({
         protocol_version = PROTOCOL_VERSION,
         vlc_version = vlc.misc.version(),
         bridge_version = BRIDGE_VERSION,
     })
 end
 
-local function handle_status(client, _query)
+-- vlc.playlist.get("playlist", false) has NO `.current` field (confirmed live by
+-- dumping the whole table -- it has .flags/.name/.item/.id/.duration/.children/
+-- .nb_played and nothing identifying "the playing one"). The only reliable signal is
+-- matching the currently playing input item's URI against each child's `.path`.
+local function find_current_playlist_id(current_uri)
+    if current_uri == nil then
+        return nil
+    end
+    local pl = vlc.playlist.get("playlist", false)
+    if pl and pl.children then
+        for _, node in ipairs(pl.children) do
+            if node.path == current_uri then
+                return node.id
+            end
+        end
+    end
+    return nil
+end
+
+local function handle_status(_query)
     local input = vlc.object.input()
     if input == nil then
-        return error_json(client, 200, "NO_MEDIA", "no media is currently loaded")
+        return error_json("NO_MEDIA", "no media is currently loaded")
     end
 
     local item = vlc.input.item()
+    local current_uri = item and item:uri() or nil
     local state = vlc.playlist.status()
     local time_us = vlc.var.get(input, "time")       -- microseconds (spec #24)
     local length_us = vlc.var.get(input, "length")
     local position = vlc.var.get(input, "position")
     local rate = vlc.var.get(input, "rate")
-    local playlist_status = vlc.playlist.get("playlist", false)
-    local current_id = playlist_status and playlist_status.current or nil
 
-    return ok_json(client, {
+    return ok_json({
         state = state,
         time_us = time_us or 0,
         position = position or 0.0,
         rate = rate or 1.0,
-        current_playlist_item_id = current_id,
+        current_playlist_item_id = find_current_playlist_id(current_uri),
         duration_us = (length_us and length_us > 0) and length_us or nil,
-        media_uri = item and item:uri() or nil,
+        media_uri = current_uri,
     })
 end
 
-local function handle_playlist(client, _query)
+local function handle_playlist(_query)
     local pl = vlc.playlist.get("playlist", false)
     local items = {}
     if pl and pl.children then
         for _, node in ipairs(pl.children) do
             if node.item then
-                -- ':duration and :duration()' is invalid Lua (colon-call syntax needs
-                -- immediate parens) and pcall guards against it not existing/erroring
-                -- on every VLC build regardless -- verified live against VLC 3.0.23,
-                -- which rejected the naive version with a parse error at load time.
-                local duration_s = nil
-                local called_ok, duration_value = pcall(function() return node.item:duration() end)
-                if called_ok then
-                    duration_s = duration_value
-                end
+                -- node.duration (a plain number, seconds) is a real, verified-live
+                -- field on each playlist child -- simpler and more reliable than
+                -- calling node.item:duration(), which needed a pcall guard because
+                -- ':duration and :duration()' (an earlier version) is invalid Lua
+                -- colon-call syntax and errored at script-load time.
+                local duration_s = (type(node.duration) == "number" and node.duration >= 0) and node.duration or nil
                 table.insert(items, {
                     vlc_id = node.id,
-                    uri = node.item:uri() or "",
-                    name = node.item:name() or "",
+                    uri = node.path or (node.item:uri() or ""),
+                    name = node.name or (node.item:name() or ""),
                     duration_s = duration_s,
                 })
             end
         end
     end
-    return ok_json(client, { current_id = pl and pl.current or nil, items = items })
+    return ok_json({ current_id = pl and pl.current or nil, items = items })
 end
 
-local function handle_control(client, query)
+local function handle_control(query)
     local command = query["command"]
     if command == nil or not ALLOWED_COMMANDS[command] then
-        return error_json(client, 400, "INVALID_REQUEST", "unknown or missing command")
+        return error_json("INVALID_REQUEST", "unknown or missing command")
     end
 
     if command == "play" then
@@ -228,23 +251,23 @@ local function handle_control(client, query)
     elseif command == "goto" then
         local id = parse_int(query["id"])
         if id == nil then
-            return error_json(client, 400, "INVALID_ITEM", "id must be a non-negative integer")
+            return error_json("INVALID_ITEM", "id must be a non-negative integer")
         end
         vlc.playlist.goto(id)
     end
 
-    return ok_json(client)
+    return ok_json()
 end
 
-local function handle_seek(client, query)
+local function handle_seek(query)
     local time_us = parse_int(query["time_us"])
     if time_us == nil or time_us < 0 then
-        return error_json(client, 400, "INVALID_TIME", "time_us must be a non-negative integer")
+        return error_json("INVALID_TIME", "time_us must be a non-negative integer")
     end
 
     local input = vlc.object.input()
     if input == nil then
-        return error_json(client, 200, "NO_MEDIA", "no media is currently loaded")
+        return error_json("NO_MEDIA", "no media is currently loaded")
     end
 
     -- Clamp to known duration if available (spec #159), rather than passing an
@@ -254,21 +277,27 @@ local function handle_seek(client, query)
         time_us = length_us
     end
 
-    vlc.player.seek_by_time_absolute(time_us)
-    return ok_json(client)
+    -- `vlc.player.seek_by_time_absolute` (spec #196's own reference) does not exist in
+    -- VLC 3.0.23's Lua API at all (confirmed live: `vlc.player` is nil) -- every /seek
+    -- request silently hung with no response at all until this was found. Setting the
+    -- "time" input variable directly is VLC's actual seek mechanism and is already used
+    -- the same way to *read* time/length/rate elsewhere in this file; confirmed live
+    -- that vlc.var.set(input, "time", us) immediately moves playback position.
+    vlc.var.set(input, "time", time_us)
+    return ok_json()
 end
 
-local function handle_rate(client, query)
+local function handle_rate(query)
     local value = tonumber(query["value"])
     if value == nil or value <= 0 then
-        return error_json(client, 400, "INVALID_REQUEST", "value must be a positive number")
+        return error_json("INVALID_REQUEST", "value must be a positive number")
     end
     local input = vlc.object.input()
     if input == nil then
-        return error_json(client, 200, "NO_MEDIA", "no media is currently loaded")
+        return error_json("NO_MEDIA", "no media is currently loaded")
     end
     vlc.var.set(input, "rate", value)
-    return ok_json(client)
+    return ok_json()
 end
 
 -- ---------------------------------------------------------------------------
@@ -284,35 +313,40 @@ local ROUTES = {
     ["/bookmarkstudio/v1/rate"] = handle_rate,
 }
 
-local function dispatch(client, url, query)
+local function dispatch(url, query)
     local handler = ROUTES[url]
     if handler == nil then
-        return error_json(client, 404, "INVALID_REQUEST", "unknown endpoint: " .. tostring(url))
+        return error_json("INVALID_REQUEST", "unknown endpoint: " .. tostring(url))
     end
-    local success, result = pcall(handler, client, query or {})
+    local success, result = pcall(handler, query or {})
     if not success then
-        return error_json(client, 500, "INTERNAL_ERROR", tostring(result))
+        return error_json("INTERNAL_ERROR", tostring(result))
     end
     return result
 end
 
--- vlc.httpd()'s handler callback signature: (data, url, request, type, in_data)
--- request/in_data query-string parsing is handled by VLC's own request object; if
--- that facility isn't available in a given VLC build, query values simply come back
--- nil and every handler's own validation already rejects nil/missing parameters.
+-- Query string parsing: `request` is nil (no query) or the raw query string itself,
+-- e.g. "command=play&id=3" -- NOT a table/object with a .psz_args field. Confirmed
+-- live by dumping the callback's real arguments against VLC 3.0.23; an earlier
+-- version assumed a request object with a nested .client, which does not exist and
+-- crashed (uncaught "attempt to index a nil value") on every single real request.
+local function parse_query_string(request)
+    local query = {}
+    if type(request) == "string" then
+        for key, value in string.gmatch(request, "([^&=?]+)=([^&]*)") do
+            query[key] = value
+        end
+    end
+    return query
+end
+
 for url, _ in pairs(ROUTES) do
     httpd:handler(
         url,
         USERNAME,
         TOKEN,
-        function(data, request_url, request, request_type, in_data)
-            local query = {}
-            if request and request.psz_args then
-                for key, value in string.gmatch(request.psz_args, "([^&=?]+)=([^&]*)") do
-                    query[key] = value
-                end
-            end
-            return dispatch(request.client, request_url, query)
+        function(_data, request_url, request, _request_type, _in_data)
+            return dispatch(request_url, parse_query_string(request))
         end,
         nil
     )
