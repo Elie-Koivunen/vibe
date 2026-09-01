@@ -256,16 +256,22 @@ class Application(QObject):
 
     def _on_status_result(self, status: object) -> None:
         self._status_inflight = False
-        self._clock.update(status)
-        self._last_playback_state = status.state
-        self.window._waveform_scene.set_playhead_time_us(status.time_us)
-        self.window._transport.set_time(status.time_us, status.duration_us)
-        self.window._playlist_panel.set_current_playing(status.current_playlist_item_id)
-        self._loop_controller.on_tick()
+        try:
+            self._clock.update(status)
+            self._last_playback_state = status.state
+            self.window._waveform_scene.set_playhead_time_us(status.time_us)
+            self.window._transport.set_time(status.time_us, status.duration_us)
+            self.window._playlist_panel.set_current_playing(status.current_playlist_item_id)
+            self._loop_controller.on_tick()
 
-        if status.current_playlist_item_id != self._current_vlc_item_id:
-            self._current_vlc_item_id = status.current_playlist_item_id
-            self._on_current_item_changed(status.media_uri, status.duration_us)
+            if status.current_playlist_item_id != self._current_vlc_item_id:
+                self._current_vlc_item_id = status.current_playlist_item_id
+                self._on_current_item_changed(status.media_uri, status.duration_us)
+        except Exception:  # noqa: BLE001 - spec #104: never crash the UI over one poll
+            # A bare `except: pass` here would be exactly the kind of silent failure
+            # that made a real bug (see _on_playlist_result) invisible for an entire
+            # debugging session -- log the full traceback, don't swallow it quietly.
+            self._log.exception("status result handling failed")
 
     def _on_status_failed(self, message: str) -> None:
         self._status_inflight = False
@@ -279,26 +285,43 @@ class Application(QObject):
 
     def _on_playlist_result(self, items: object) -> None:
         self._playlist_inflight = False
-        self._playlist_items = list(items)
-        resolved = [(item, self._media_resolver.resolve(item.uri)) for item in items if item.uri]
-        if not resolved:
-            self.window._playlist_panel.set_playlist([], {})
-            return
+        try:
+            self._playlist_items = list(items)
+            resolved: list[tuple[object, object]] = []
+            for item in items:
+                if not item.uri:
+                    continue
+                try:
+                    resolved.append((item, self._media_resolver.resolve(item.uri)))
+                except Exception:  # noqa: BLE001
+                    # One unresolvable item (bad path, permissions, an exotic
+                    # filename) must not hide every OTHER item from the playlist
+                    # panel -- an earlier version let a single failure here abort
+                    # the whole list comprehension, so a newly added song with a
+                    # problem silently made the panel stop updating at all, forever
+                    # (every subsequent poll hit the exact same failure).
+                    self._log.exception("failed to resolve playlist item %r", item.uri)
 
-        ordered_media_ids = [media.id for _item, media in resolved]
-        result = self._synchronizer.on_snapshot(source_uri=None, ordered_media_ids=ordered_media_ids)
-        self._log.debug("playlist sync: %s -> %s", result.action, result.playlist_id)
+            if not resolved:
+                self.window._playlist_panel.set_playlist([], {})
+                return
 
-        playlist_id = self._synchronizer.active_playlist_id
-        bookmark_counts = {}
-        for item, media in resolved:
-            bookmarks = (
-                self._bookmark_repository.list_for_playlist_media(playlist_id, media.id)
-                if playlist_id is not None
-                else self._bookmark_repository.list_global_for_media(media.id)
-            )
-            bookmark_counts[item.vlc_id] = len(bookmarks)
-        self.window._playlist_panel.set_playlist([item for item, _media in resolved], bookmark_counts)
+            ordered_media_ids = [media.id for _item, media in resolved]
+            result = self._synchronizer.on_snapshot(source_uri=None, ordered_media_ids=ordered_media_ids)
+            self._log.debug("playlist sync: %s -> %s", result.action, result.playlist_id)
+
+            playlist_id = self._synchronizer.active_playlist_id
+            bookmark_counts = {}
+            for item, media in resolved:
+                bookmarks = (
+                    self._bookmark_repository.list_for_playlist_media(playlist_id, media.id)
+                    if playlist_id is not None
+                    else self._bookmark_repository.list_global_for_media(media.id)
+                )
+                bookmark_counts[item.vlc_id] = len(bookmarks)
+            self.window._playlist_panel.set_playlist([item for item, _media in resolved], bookmark_counts)
+        except Exception:  # noqa: BLE001 - spec #104: never crash the UI over one poll
+            self._log.exception("playlist result handling failed")
 
     def _on_playlist_failed(self, message: str) -> None:
         self._playlist_inflight = False

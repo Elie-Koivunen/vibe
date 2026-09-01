@@ -101,6 +101,43 @@ def test_playlist_panel_populates_from_live_polling(qtbot, running_app) -> None:
     assert titles == {"Song A", "Song B"}
 
 
+def test_one_bad_playlist_item_does_not_hide_all_others(qtbot, running_app, monkeypatch) -> None:
+    """Regression: an earlier version resolved every playlist item inside a single
+    list comprehension, so one item raising (a bad path, an exotic filename VLC
+    reported oddly -- confirmed live with a real non-ASCII-named file added to VLC's
+    playlist mid-session) aborted the whole update. Every subsequent poll hit the
+    exact same failure, so the playlist panel silently never updated again for the
+    rest of the session -- not just skipping the bad item, hiding every good one too.
+    """
+    from bookmark_studio.media.resolver import MediaResolver
+
+    original_resolve = MediaResolver.resolve
+
+    def flaky_resolve(self, uri, **kwargs):
+        if "bad" in uri:
+            raise RuntimeError("simulated resolution failure for an exotic filename")
+        return original_resolve(self, uri, **kwargs)
+
+    monkeypatch.setattr(MediaResolver, "resolve", flaky_resolve)
+
+    adapter = MockPlaybackAdapter(
+        [
+            VlcPlaylistItem(vlc_id=1, uri="file:///good.mp3", name="Good Song", duration_s=10.0),
+            VlcPlaylistItem(vlc_id=2, uri="file:///bad_song.mp3", name="Bad Song", duration_s=5.0),
+        ]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+
+    qtbot.waitUntil(lambda: app.window._playlist_panel._tree.topLevelItemCount() >= 1, timeout=5000)
+    titles = {
+        app.window._playlist_panel._tree.topLevelItem(i).text(1)
+        for i in range(app.window._playlist_panel._tree.topLevelItemCount())
+    }
+    assert "Good Song" in titles
+    assert "Bad Song" not in titles
+
+
 def test_transport_play_pause_button_commands_the_real_adapter(qtbot, running_app) -> None:
     """Regression: TransportBar's buttons emitted signals that nothing listened to --
     clicking Play/Pause, Stop, or seek did nothing to the actual VLC connection."""
