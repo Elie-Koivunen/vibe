@@ -64,16 +64,31 @@ class WaveformView(QGraphicsView):
         super().mouseDoubleClickEvent(event)
 
     def wheelEvent(self, event) -> None:  # noqa: N802
-        if event.modifiers() & Qt.ControlModifier:
-            self._fit_mode = False  # manual zoom overrides a prior "fit entire media"
-            factor = 1.25 if event.angleDelta().y() > 0 else 0.8
+        # Plain wheel zooms (the natural gesture in a waveform editor -- Audacity,
+        # Adobe Audition, etc. all bind bare scroll to horizontal zoom here since
+        # there's nothing useful to vertically scroll in a single waveform lane).
+        # Reported live as "unable to zoom in/out": requiring Ctrl for every wheel
+        # tick meant a plain scroll silently did nothing (no vertical content to move
+        # either), which reads as a broken control, not an undiscovered modifier.
+        # Shift+wheel still pans horizontally for anyone used to that combo.
+        if event.modifiers() & Qt.ShiftModifier:
+            super().wheelEvent(event)
+            return
+        self.zoom(1.25 if event.angleDelta().y() > 0 else 0.8, anchor_under_mouse=True)
+        event.accept()
+
+    def zoom(self, factor: float, *, anchor_under_mouse: bool = False) -> None:
+        """Shared by wheel-zoom and the toolbar Zoom In/Out buttons (spec #84) so both
+        paths behave identically, including dropping out of sticky fit mode.
+        """
+        self._fit_mode = False  # manual zoom overrides a prior "fit entire media"
+        if anchor_under_mouse:
             anchor = self.transformationAnchor()
             self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
             self.scale(factor, 1.0)
             self.setTransformationAnchor(anchor)
-            event.accept()
         else:
-            super().wheelEvent(event)
+            self.scale(factor, 1.0)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         if event.key() == Qt.Key_Escape:

@@ -203,6 +203,58 @@ def test_mute_on_connect_zeroes_volume_once_vlc_is_reachable(qtbot, running_app)
     assert app._mute_pending is False
 
 
+def test_swap_adapter_retargets_session_at_a_new_instance(qtbot, running_app) -> None:
+    """Covers the core of _attach_to_vlc/_launch_new_vlc without spawning a real VLC
+    process or driving VlcLaunchDialog's UI: both just delegate to _swap_adapter."""
+    old_adapter = MockPlaybackAdapter(
+        [VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0)]
+    )
+    app = running_app(old_adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
+    assert old_adapter.connected is True
+
+    new_adapter = MockPlaybackAdapter(
+        [VlcPlaylistItem(vlc_id=2, uri="file:///b.mp3", name="Song B", duration_s=5.0)]
+    )
+    app._swap_adapter(new_adapter, mute_on_connect=True, new_vlc_process=None)
+
+    assert app._adapter is new_adapter
+    assert new_adapter.connected is True
+    assert old_adapter.connected is False
+    assert app._loop_controller._adapter is new_adapter
+    assert app._mute_pending is True
+    assert app._current_media_id is None
+    assert app._current_vlc_item_id is None
+    assert app._status_timer.isActive()
+    assert app._playlist_timer.isActive()
+
+    qtbot.waitUntil(lambda: new_adapter._volume == 0, timeout=3000)
+
+
+def test_prompt_vlc_launch_dialog_without_settings_shows_message_and_does_not_touch_adapter(
+    qtbot, running_app, monkeypatch
+) -> None:
+    """Application constructed without settings/vlc_path (e.g. every other test in this
+    file) must degrade to an informative message, not a crash -- this is the path any
+    test-constructed Application takes if something ever calls the launch button."""
+    from bookmark_studio.app import application as application_module
+
+    shown = []
+    monkeypatch.setattr(
+        application_module.QMessageBox, "information", lambda *a, **k: shown.append(a) or None
+    )
+
+    adapter = MockPlaybackAdapter([])
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+
+    app.prompt_vlc_launch_dialog()
+
+    assert shown  # the "not available" message was shown
+    assert app._adapter is adapter  # nothing was swapped
+
+
 def test_mute_on_connect_false_never_touches_volume(qtbot, running_app) -> None:
     """Attaching to a VLC the user already had open (bootstrap: dialog cancelled) must
     never force their volume to 0 -- that's only for VLC instances this app spawned."""

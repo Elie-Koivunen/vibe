@@ -5,6 +5,7 @@ playlist-change sequences.
 """
 from __future__ import annotations
 
+import subprocess
 import sqlite3
 from pathlib import Path
 from uuid import UUID
@@ -13,7 +14,9 @@ from typing import Callable
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QUndoStack
+from PySide6.QtWidgets import QDialog, QMessageBox
 
+from bookmark_studio.app.vlc_launcher import discover_vlc_instances, find_free_http_port, launch_managed_vlc
 from bookmark_studio.app.waveform_orchestrator import WaveformOrchestrator
 from bookmark_studio.logging.setup import get_logger
 from bookmark_studio.media.resolver import MediaResolver
@@ -22,10 +25,13 @@ from bookmark_studio.persistence.media_repository import MediaRepository
 from bookmark_studio.persistence.playlist_repository import PlaylistRepository
 from bookmark_studio.persistence.waveform_repository import WaveformCacheRepository
 from bookmark_studio.playback.adapter import PlaybackAdapter
+from bookmark_studio.playback.http_fallback import StandardHttpPlaybackAdapter
 from bookmark_studio.playback.loop_controller import LoopController
 from bookmark_studio.playback.playback_clock import PlaybackClock
 from bookmark_studio.playlist.recognition import PlaylistRecognitionService
 from bookmark_studio.playlist.synchronizer import PlaylistSynchronizer
+from bookmark_studio.settings.settings_service import SettingsService
+from bookmark_studio.ui.dialogs.vlc_launch_dialog import VlcLaunchDialog
 from bookmark_studio.ui.main_window import MainWindow
 from bookmark_studio.waveform.service import WaveformService
 
@@ -79,12 +85,24 @@ class Application(QObject):
         ffmpeg_path: str,
         waveform_cache_dir: Path,
         mute_on_connect: bool = False,
+        settings: SettingsService | None = None,
+        vlc_path: str | None = None,
+        vlc_process: subprocess.Popen | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._log = get_logger("APP")
         self._conn = conn
         self._adapter = adapter
+        # Needed for the "Launch VLC..." picker (prompt_vlc_launch_dialog): which VLC
+        # binary to spawn, where to persist/discover known instance ports, and the
+        # subprocess handle of whichever instance THIS app most recently spawned (so
+        # stop() can clean it up -- never set for an attached-to, not-spawned-by-us
+        # instance). None outside of a real bootstrap.main() run (e.g. in tests that
+        # construct Application directly) simply disables that picker.
+        self._settings = settings
+        self._vlc_path = vlc_path
+        self._vlc_process = vlc_process
         # Only true when this Application spawned its own VLC process (see
         # vlc_launcher.launch_managed_vlc): forcing volume to 0 on an existing VLC the
         # user already had open with their own volume set would be an unwelcome
@@ -121,6 +139,12 @@ class Application(QObject):
         self._current_vlc_item_id: int | None = None
         self._last_playback_state: str = "stopped"
         self._playlist_items: list = []
+        # Every media_id ever handed to the waveform orchestrator this session, current
+        # track or not -- see _preload_playlist_waveforms. Prevents re-dispatching a
+        # decode job on every ~2s playlist poll once a track has already been
+        # requested once (the orchestrator's own cache lookup would just no-op a
+        # repeat request, but skipping it here avoids the pointless dispatch/lookup).
+        self._preload_requested: set[UUID] = set()
 
         self._thread_pool = QThreadPool(self)
         self._status_inflight = False
@@ -180,6 +204,91 @@ class Application(QObject):
         )
         self.window.play_selection_requested.connect(self._on_play_selection_requested)
         self.window.loop_selection_requested.connect(self._on_loop_selection_requested)
+        self.window.launch_vlc_requested.connect(self.prompt_vlc_launch_dialog)
+
+    # -- launch/attach picker --
+    #
+    # "add button to launch vlc and a browse button to select desired playlist ...
+    # option to select an open vlc instance, a drop box ... alternatively the user
+    # would launch a new instance with a browse button" -- direct user request. One
+    # dialog (VlcLaunchDialog) and one code path serves both bootstrap.main()'s
+    # first-run prompt and this button, so "launch a new instance" behaves identically
+    # whether it's the very first thing that happens or a mid-session re-launch.
+
+    def prompt_vlc_launch_dialog(self) -> None:
+        if self._settings is None:
+            QMessageBox.information(self.window, "Launch VLC", "VLC integration is not available in this session.")
+            return
+        if self._vlc_path is None:
+            QMessageBox.warning(self.window, "Launch VLC", "VLC was not found on this machine.")
+            return
+
+        instances = discover_vlc_instances(self._settings)
+        dialog = VlcLaunchDialog(instances, self._launch_dialog_media_filter(), parent=self.window)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        choice = dialog.choice()
+        if choice.mode == "attach":
+            self._attach_to_vlc(choice.port)
+        else:
+            self._launch_new_vlc(choice.media_paths)
+
+    @staticmethod
+    def _launch_dialog_media_filter() -> str:
+        from bookmark_studio.bootstrap import STARTUP_MEDIA_FILTER
+
+        return STARTUP_MEDIA_FILTER
+
+    def _attach_to_vlc(self, port: int) -> None:
+        assert self._settings is not None
+        adapter = StandardHttpPlaybackAdapter("127.0.0.1", port, self._settings.bridge_token())
+        self._swap_adapter(adapter, mute_on_connect=False, new_vlc_process=None)
+        self._log.info("Attached to existing VLC instance on port %d", port)
+
+    def _launch_new_vlc(self, media_paths: list[str]) -> None:
+        assert self._settings is not None and self._vlc_path is not None
+        port = find_free_http_port(self._settings.bridge_port())
+        self._settings.add_known_vlc_port(port)
+        process = launch_managed_vlc(
+            self._vlc_path, media_paths, http_port=port, http_password=self._settings.bridge_token()
+        )
+        adapter = StandardHttpPlaybackAdapter("127.0.0.1", port, self._settings.bridge_token())
+        self._swap_adapter(adapter, mute_on_connect=True, new_vlc_process=process)
+        self._log.info("Launched managed VLC (pid %s) on port %d with %d media item(s)",
+                        process.pid, port, len(media_paths))
+
+    def _swap_adapter(self, new_adapter: PlaybackAdapter, *, mute_on_connect: bool,
+                       new_vlc_process: subprocess.Popen | None) -> None:
+        """Retargets this whole running session at a different VLC instance -- used by
+        both _attach_to_vlc and _launch_new_vlc. A previously-spawned VLC process (if
+        any) is left running when attaching/re-launching: the user may still want it
+        open, and closing background processes they didn't ask to close would be an
+        unwelcome surprise (see the top-level safety rules on hard-to-reverse actions).
+        """
+        self._status_timer.stop()
+        self._playlist_timer.stop()
+        try:
+            self._adapter.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+
+        self._adapter = new_adapter
+        self._vlc_process = new_vlc_process
+        self._loop_controller.set_adapter(new_adapter)
+        self._mute_pending = mute_on_connect
+        self._current_vlc_item_id = None
+        self._current_media_id = None
+        self._preload_requested.clear()
+
+        try:
+            new_adapter.connect()
+        except Exception as exc:  # noqa: BLE001 - spec #104: self-heals via polling
+            self._log.info("Initial connect after adapter switch failed (will retry via polling): %s", exc)
+
+        self._status_timer.start(STATUS_POLL_MS)
+        self._playlist_timer.start(PLAYLIST_POLL_MS)
+        self._poll_playlist()
 
     def _fire_and_forget(self, fn) -> None:
         """Dispatches a one-off adapter command off the main thread (spec #108), same
@@ -249,6 +358,13 @@ class Application(QObject):
             self._adapter.disconnect()
         except Exception:  # noqa: BLE001
             pass
+        # Only the VLC process this Application currently owns (spawned via
+        # _launch_new_vlc, not attached to) is torn down on app exit -- matches the
+        # original bootstrap.main() behavior. An attached-to instance the user already
+        # had running, or one left behind by a since-superseded _swap_adapter call, is
+        # deliberately left alone (see _swap_adapter's docstring).
+        if self._vlc_process is not None and self._vlc_process.poll() is None:
+            self._vlc_process.terminate()
 
     # -- polling --
     #
@@ -334,8 +450,29 @@ class Application(QObject):
                 )
                 bookmark_counts[item.vlc_id] = len(bookmarks)
             self.window._playlist_panel.set_playlist([item for item, _media in resolved], bookmark_counts)
+            self._preload_playlist_waveforms(resolved)
         except Exception:  # noqa: BLE001 - spec #104: never crash the UI over one poll
             self._log.exception("playlist result handling failed")
+
+    def _preload_playlist_waveforms(self, resolved: list) -> None:
+        """Kicks off background decoding for every track in the playlist, not just the
+        one currently playing -- direct fix for "make the tool preload the waves for
+        faster operation": previously a waveform was only ever requested reactively,
+        in _on_current_item_changed, the moment a track actually started playing, so
+        switching to a not-yet-visited track always paid the full ffmpeg decode
+        latency live. WaveformOrchestrator.request() already de-dupes against its own
+        disk cache (see waveform_orchestrator.py), so this is safe to call for tracks
+        that were already decoded in a previous session -- those resolve instantly
+        from cache and cost nothing.
+        """
+        for item, media in resolved:
+            if media.id in self._preload_requested or not media.fast_fingerprint:
+                continue
+            local_path = _uri_to_path(media.canonical_uri or item.uri)
+            if local_path is None or not local_path.exists():
+                continue
+            self._preload_requested.add(media.id)
+            self._waveform_orchestrator.request(media.id, media.fast_fingerprint, str(local_path))
 
     def _on_playlist_failed(self, message: str) -> None:
         self._playlist_inflight = False

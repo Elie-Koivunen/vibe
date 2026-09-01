@@ -36,6 +36,15 @@ class LoopController(QObject):
         self._remaining: int | None = None
         self._state = LoopState.IDLE
 
+    def set_adapter(self, adapter: "PlaybackAdapter") -> None:
+        """Repoints this controller at a new adapter (spec: switching which VLC
+        instance the app talks to, mid-session, via the launch/attach picker). Any
+        loop already ARMED/PLAYING against the old adapter is dropped rather than
+        left driving a VLC process that just got disconnected.
+        """
+        self._adapter = adapter
+        self.stop()
+
     @property
     def state(self) -> LoopState:
         return self._state

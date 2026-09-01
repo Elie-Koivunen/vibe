@@ -31,6 +31,19 @@ def test_bridge_token_persists_across_instances(tmp_path: Path) -> None:
     assert service2.bridge_token() == token
 
 
+def test_known_vlc_ports_add_and_remove_round_trip(tmp_path: Path) -> None:
+    service = SettingsService(_ini_settings(tmp_path))
+    assert service.known_vlc_ports() == []
+
+    service.add_known_vlc_port(43120)
+    service.add_known_vlc_port(43121)
+    service.add_known_vlc_port(43120)  # duplicate, should not create a second entry
+    assert service.known_vlc_ports() == [43120, 43121]
+
+    service.remove_known_vlc_port(43120)
+    assert service.known_vlc_ports() == [43121]
+
+
 def test_theme_rejects_unknown_value(tmp_path: Path) -> None:
     service = SettingsService(_ini_settings(tmp_path))
     try:

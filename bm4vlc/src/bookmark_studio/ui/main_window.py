@@ -35,6 +35,7 @@ class MainWindow(QMainWindow):
     # loop_selection_requested carry (start_us, end_us).
     play_selection_requested = Signal(int, int)
     loop_selection_requested = Signal(int, int)
+    launch_vlc_requested = Signal()
 
     def __init__(
         self,
@@ -82,6 +83,25 @@ class MainWindow(QMainWindow):
         self._selection_label = QLabel("No selection", self)
         layout.addWidget(self._selection_label)
         layout.addStretch(1)
+
+        # Explicit, always-visible zoom controls (spec #84's Ctrl+wheel/Ctrl+0 still
+        # work) -- added directly next to the waveform because "unable to zoom
+        # in/out" was reported live: a hidden modifier-key gesture with no on-screen
+        # affordance at all reads as a broken feature, not an undiscovered one.
+        zoom_out_button = QPushButton("Zoom −", self)
+        zoom_out_button.setToolTip("Zoom out (Ctrl+-, or scroll wheel down)")
+        zoom_out_button.clicked.connect(lambda: self._waveform_view.zoom(0.8))
+        layout.addWidget(zoom_out_button)
+
+        zoom_in_button = QPushButton("Zoom +", self)
+        zoom_in_button.setToolTip("Zoom in (Ctrl++, or scroll wheel up)")
+        zoom_in_button.clicked.connect(lambda: self._waveform_view.zoom(1.25))
+        layout.addWidget(zoom_in_button)
+
+        zoom_fit_button = QPushButton("Fit", self)
+        zoom_fit_button.setToolTip("Fit entire track to the window (Ctrl+0)")
+        zoom_fit_button.clicked.connect(self._waveform_view.fit_entire_media)
+        layout.addWidget(zoom_fit_button)
 
         self._bookmark_selection_button = QPushButton("Bookmark Selection (Ctrl+B)", self)
         self._bookmark_selection_button.clicked.connect(self._on_bookmark_selection_clicked)
@@ -136,6 +156,9 @@ class MainWindow(QMainWindow):
         menu_bar = self.menuBar()
 
         file_menu = menu_bar.addMenu("File")
+        launch_vlc_action = file_menu.addAction("Launch VLC...")
+        launch_vlc_action.triggered.connect(self.launch_vlc_requested.emit)
+        file_menu.addSeparator()
         export_action = file_menu.addAction("Export Project...")
         export_action.triggered.connect(self._on_export_project)
         import_action = file_menu.addAction("Import Project...")
@@ -155,10 +178,10 @@ class MainWindow(QMainWindow):
         view_menu = menu_bar.addMenu("View")
         zoom_in_action = view_menu.addAction("Zoom In")
         zoom_in_action.setShortcut("Ctrl++")
-        zoom_in_action.triggered.connect(lambda: self._waveform_view.scale(1.25, 1.0))
+        zoom_in_action.triggered.connect(lambda: self._waveform_view.zoom(1.25))
         zoom_out_action = view_menu.addAction("Zoom Out")
         zoom_out_action.setShortcut("Ctrl+-")
-        zoom_out_action.triggered.connect(lambda: self._waveform_view.scale(0.8, 1.0))
+        zoom_out_action.triggered.connect(lambda: self._waveform_view.zoom(0.8))
         fit_action = view_menu.addAction("Fit Entire Media")
         fit_action.setShortcut("Ctrl+0")
         fit_action.triggered.connect(self._waveform_view.fit_entire_media)
@@ -223,6 +246,8 @@ class MainWindow(QMainWindow):
 
         self._inspector.name_committed.connect(self._on_name_committed)
         self._inspector.loop_settings_committed.connect(self._on_loop_settings_committed)
+
+        self._playlist_panel.launch_vlc_requested.connect(self.launch_vlc_requested.emit)
 
     # -- context --
 

@@ -4,15 +4,13 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
-import subprocess
 import sys
 from pathlib import Path
 
 from PySide6.QtGui import QUndoStack
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication
 
 from bookmark_studio.app.application import Application
-from bookmark_studio.app.vlc_launcher import launch_managed_vlc, resolve_startup_media
 from bookmark_studio.logging.setup import configure_logging, get_logger
 from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
 from bookmark_studio.persistence.database import connect
@@ -114,52 +112,16 @@ def select_playback_adapter(settings: SettingsService) -> tuple[PlaybackAdapter,
     return MockPlaybackAdapter([]), vlc_path
 
 
-def choose_startup_media(parent=None) -> list[str] | None:
-    """Startup file picker (the "browse and select the playlist to include when
-    launching" the user asked for): a single .m3u/.m3u8, or one or more media files
-    directly. Returns the resolved media paths, an empty list if the user explicitly
-    wants VLC to start with nothing loaded, or None if they cancelled outright -- the
-    caller treats None as "don't launch a new VLC at all, try to attach to one that's
-    already running instead", so cancelling stays a safe, non-surprising no-op for
-    anyone who already had VLC open.
-    """
-    paths, _selected_filter = QFileDialog.getOpenFileNames(
-        parent,
-        "Select a playlist or media files to launch VLC with (Cancel to attach to a running VLC instead)",
-        "",
-        STARTUP_MEDIA_FILTER,
-    )
-    if not paths:
-        return None
-    return resolve_startup_media(paths)
-
-
-def launch_vlc_with_media(
-    vlc_path: str, media_paths: list[str], settings: SettingsService
-) -> tuple[StandardHttpPlaybackAdapter, subprocess.Popen]:
-    """Spawns a VLC instance this app owns, per the user's explicit request for an
-    "independent app which itself launches the VLC instance" rather than expecting one
-    to already be running. --start-paused (see vlc_launcher._COMMON_ARGS) keeps it from
-    autoplaying; Application's mute_on_connect=True (wired in main()) mutes it as soon
-    as its HTTP interface answers.
-    """
-    process = launch_managed_vlc(
-        vlc_path, media_paths, http_port=settings.bridge_port(), http_password=settings.bridge_token()
-    )
-    adapter = StandardHttpPlaybackAdapter("127.0.0.1", settings.bridge_port(), settings.bridge_token())
-    return adapter, process
-
-
 def main(argv: list[str] | None = None) -> int:
     """Follows spec #178's sequence: settings -> DB -> UI -> VLC discovery -> connect
     or fall back to offline mode (spec #104) -- never crash just because VLC isn't
     running or the bridge isn't installed.
 
-    Also implements the "independent app" launch flow: if VLC is installed, ask the
-    user (via choose_startup_media) which playlist/media to load and spawn a fresh,
-    muted, non-autoplaying VLC process for it -- rather than passively hoping one is
-    already running. Cancelling that dialog falls back to the old attach-only behavior
-    for anyone who deliberately already has VLC open.
+    Starts the UI with a placeholder Mock adapter, then immediately runs the same
+    launch/attach picker the "Launch VLC..." button uses later (Application.
+    prompt_vlc_launch_dialog) -- one code path for both the first-run flow and any
+    later re-launch, per the user's explicit ask for a dropdown of already-open VLC
+    instances as an alternative to browsing for a playlist and launching a fresh one.
     """
     configure_logging()
     log = get_logger("APP")
@@ -169,45 +131,24 @@ def main(argv: list[str] | None = None) -> int:
 
     conn = open_database()
     vlc_path = find_vlc_path(settings)
-    mute_on_connect = False
-    vlc_process = None
-
-    if vlc_path is not None:
-        media_paths = choose_startup_media()
-        if media_paths is not None:
-            adapter, vlc_process = launch_vlc_with_media(vlc_path, media_paths, settings)
-            mute_on_connect = True
-            log.info("Launched managed VLC (pid %s) with %d media item(s)", vlc_process.pid, len(media_paths))
-        else:
-            adapter = StandardHttpPlaybackAdapter("127.0.0.1", settings.bridge_port(), settings.bridge_token())
-            log.info("Startup media dialog cancelled; attaching to an already-running VLC instead")
-    else:
-        adapter = MockPlaybackAdapter([])
-        log.info("VLC not found; starting in offline mode")
-
-    log.info("VLC path: %s; adapter: %s", vlc_path, type(adapter).__name__)
-    if vlc_path is not None:
-        reachable = probe_bridge("127.0.0.1", settings.bridge_port(), settings.bridge_token())
-        log.info(
-            "Bridge reachable at startup: %s (a 'no' here is not fatal -- polling "
-            "keeps retrying and will connect once VLC's bridge finishes loading)",
-            reachable,
-        )
+    log.info("VLC path: %s", vlc_path)
 
     ffmpeg_path = shutil.which("ffmpeg") or "ffmpeg"
     application = Application(
         conn=conn,
-        adapter=adapter,
+        adapter=MockPlaybackAdapter([]),
         ffmpeg_path=ffmpeg_path,
         waveform_cache_dir=default_data_dir().parent / "waveforms",
-        mute_on_connect=mute_on_connect,
+        settings=settings,
+        vlc_path=vlc_path,
     )
     application.start()
+    if vlc_path is not None:
+        application.prompt_vlc_launch_dialog()
+    else:
+        log.info("VLC not found; starting in offline mode")
 
-    exit_code = qt_app.exec()
-    if vlc_process is not None and vlc_process.poll() is None:
-        vlc_process.terminate()
-    return exit_code
+    return qt_app.exec()
 
 
 if __name__ == "__main__":

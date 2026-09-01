@@ -53,6 +53,28 @@ class SettingsService:
     def set_bridge_port(self, port: int) -> None:
         self._settings.setValue("bridge/port", port)
 
+    def known_vlc_ports(self) -> list[int]:
+        """Ports of VLC instances this app has itself launched with a distinct HTTP
+        port (see vlc_launcher.find_free_http_port) -- lets the "attach to a running
+        VLC" picker find them again later, including across app restarts, without
+        needing to enumerate OS processes. Entries are self-healing: discover_vlc_
+        instances() (bootstrap.py) drops any port that no longer answers.
+        """
+        raw = self._settings.value("vlc/known_ports", "")
+        if not raw:
+            return []
+        return sorted({int(p) for p in str(raw).split(",") if p.strip().isdigit()})
+
+    def add_known_vlc_port(self, port: int) -> None:
+        ports = set(self.known_vlc_ports())
+        ports.add(port)
+        self._settings.setValue("vlc/known_ports", ",".join(str(p) for p in sorted(ports)))
+
+    def remove_known_vlc_port(self, port: int) -> None:
+        ports = set(self.known_vlc_ports())
+        ports.discard(port)
+        self._settings.setValue("vlc/known_ports", ",".join(str(p) for p in sorted(ports)))
+
     def bridge_token(self) -> str:
         """Generates a random per-install token on first access (spec #21)."""
         token = self._settings.value("bridge/token")

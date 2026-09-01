@@ -19,8 +19,14 @@ it is no longer what a normal launch uses.
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from bookmark_studio.settings.settings_service import SettingsService
 
 _COMMON_ARGS = [
     # Lessons carried over from the sibling buzz2vlc project's live-VLC testing
@@ -40,6 +46,27 @@ def vlc_user_config_dir() -> Path:
     if not appdata:
         raise RuntimeError("APPDATA environment variable is not set")
     return Path(appdata) / "vlc"
+
+
+def find_free_http_port(preferred: int, *, max_attempts: int = 50) -> int:
+    """Picks a port for a new managed VLC instance, starting at `preferred` (the
+    configured default) and walking upward until one is free -- needed so a second
+    "launch a new VLC instance" doesn't try to bind the same port an already-running
+    managed instance holds. A bind-then-close probe has an inherent TOCTOU race
+    (the port could be taken again before VLC itself binds it a moment later), but
+    that's an acceptable, narrow window for a locally-launched desktop app.
+    """
+    port = preferred
+    for _ in range(max_attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind(("127.0.0.1", port))
+            except OSError:
+                port += 1
+                continue
+        return port
+    raise RuntimeError(f"no free port found starting from {preferred}")
 
 
 def parse_m3u(playlist_path: Path) -> list[str]:
@@ -69,6 +96,53 @@ def resolve_startup_media(selected_paths: list[str]) -> list[str]:
     if len(selected_paths) == 1 and selected_paths[0].lower().endswith((".m3u", ".m3u8")):
         return parse_m3u(Path(selected_paths[0]))
     return list(selected_paths)
+
+
+@dataclass
+class VlcInstance:
+    """One reachable VLC HTTP endpoint, for the launch/attach picker dialog."""
+
+    port: int
+    label: str
+
+
+def discover_vlc_instances(settings: "SettingsService") -> list[VlcInstance]:
+    """Probes every port this app might have a live VLC instance on: the configured
+    default plus any it's remembered launching before (settings.known_vlc_ports,
+    populated by the "launch a new instance" flow -- see find_free_http_port). This is
+    how the "select an open VLC instance" dropdown gets populated; a "raw" VLC the user
+    started by double-clicking a file (no --extraintf=http) can never show up here,
+    since there's no HTTP interface on it for this app to reach at all.
+
+    Self-healing: a known port that no longer answers is dropped from settings so the
+    registry doesn't grow stale entries across restarts. The current default bridge
+    port is always re-probed but never removed from settings even if unreachable,
+    since it isn't a "known extra" port to begin with -- it's the baseline default.
+    """
+    from bookmark_studio.playback.http_fallback import StandardHttpPlaybackAdapter
+
+    known = settings.known_vlc_ports()
+    candidate_ports = sorted({settings.bridge_port(), *known})
+    instances: list[VlcInstance] = []
+    for port in candidate_ports:
+        adapter = StandardHttpPlaybackAdapter("127.0.0.1", port, settings.bridge_token())
+        try:
+            adapter.connect()
+            playlist = adapter.get_playlist()
+            status = adapter.get_status()
+        except Exception:  # noqa: BLE001 - not reachable, not a real instance
+            if port in known:
+                settings.remove_known_vlc_port(port)
+            continue
+        finally:
+            adapter.disconnect()
+
+        label = f"127.0.0.1:{port} — {len(playlist)} item(s) in playlist"
+        if status.media_uri:
+            now_playing = status.media_uri.rsplit("/", 1)[-1]
+            label += f", now: {now_playing}"
+        instances.append(VlcInstance(port=port, label=label))
+    return instances
 
 
 def launch_managed_vlc(

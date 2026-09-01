@@ -4,7 +4,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QCheckBox, QLineEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 
 from bookmark_studio.playback.status import VlcPlaylistItem
 
@@ -15,6 +15,7 @@ class PlaylistPanel(QWidget):
     item_selected = Signal(int)  # vlc_id
     item_double_clicked = Signal(int)  # vlc_id -- play in VLC (spec #147)
     follow_vlc_toggled = Signal(bool)
+    launch_vlc_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -23,6 +24,20 @@ class PlaylistPanel(QWidget):
         self._current_playing_id: int | None = None
 
         layout = QVBoxLayout(self)
+
+        # Direct user request: "add button to launch vlc and a browse button to
+        # select desired playlist" / "option to select an open vlc instance, a drop
+        # box ... alternatively the user would launch a new instance with a browse
+        # button to find the playlist and launch" -- one button opens VlcLaunchDialog
+        # (app/application.py's prompt_vlc_launch_dialog), which contains both that
+        # dropdown of open instances and the browse-for-playlist flow.
+        self._launch_vlc_button = QPushButton("Launch VLC...", self)
+        self._launch_vlc_button.setToolTip(
+            "Attach to an already-open VLC instance, or launch a new one with a playlist"
+        )
+        self._launch_vlc_button.clicked.connect(self.launch_vlc_requested.emit)
+        layout.addWidget(self._launch_vlc_button)
+
         self._filter_edit = QLineEdit(self)
         self._filter_edit.setPlaceholderText("Filter...")
         self._filter_edit.textChanged.connect(self._apply_filter)

@@ -87,6 +87,13 @@ class WaveformOrchestrator(QObject):
             self.waveform_ready.emit(media_id, load_pyramid(Path(cached.file_path)))
             return
 
+        if key in self._cancellations:
+            # Already decoding (e.g. proactive playlist preload followed a moment
+            # later by the track actually becoming current) -- let the in-flight job
+            # finish rather than paying for a second concurrent ffmpeg decode of the
+            # same file.
+            return
+
         cancellation = CancellationToken()
         self._cancellations[key] = cancellation
 
