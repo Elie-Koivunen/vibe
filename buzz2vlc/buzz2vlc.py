@@ -331,7 +331,14 @@ def load_config() -> tuple[dict, list[str], list[str]]:
 
     try:
         raw_bytes = CONFIG_PATH.read_bytes()
-        raw = json.loads(raw_bytes.decode("utf-8"))
+        # utf-8-sig, not utf-8: a plain "utf-8" decode rejects a leading
+        # BOM outright (verified live) -- notepad and PowerShell's
+        # Out-File both write one by default, so a config hand-edited and
+        # resaved that way would otherwise silently revert to defaults on
+        # next load, with no obvious symptom beyond an easy-to-miss
+        # warning. utf-8-sig strips a BOM if present and is a no-op
+        # otherwise, so it's safe for files this code itself writes too.
+        raw = json.loads(raw_bytes.decode("utf-8-sig"))
     except UnicodeDecodeError as e:
         errors.append(f"config file is not valid UTF-8 ({e}); using defaults")
         return default_config(), errors, warnings
@@ -1928,6 +1935,32 @@ def cmd_selftest() -> int:
             self.assertEqual(inst["port"], 9999)
             self.assertEqual(inst["password"], "secret")
             self.assertEqual(migrated["mappings"]["1:red"], "player/pause")
+
+        def test_load_config_tolerates_utf8_bom(self):
+            # Notepad and PowerShell's Out-File both write a UTF-8 BOM by
+            # default -- verified live that a plain "utf-8" decode rejects
+            # it outright, silently reverting a hand-edited config to
+            # defaults. See load_config()'s "utf-8-sig" comment.
+            import tempfile
+            global CONFIG_PATH
+            fd, path = tempfile.mkstemp(suffix=".json")
+            os.close(fd)
+            try:
+                with open(path, "wb") as f:
+                    f.write(b"\xef\xbb\xbf" + json.dumps(
+                        {"vlc_instances": {"x": {"host": "127.0.0.1", "port": 1,
+                                                  "password": "p", "playlist": None}}}
+                    ).encode("utf-8"))
+                original_path = CONFIG_PATH
+                CONFIG_PATH = Path(path)
+                try:
+                    cfg, errors, _ = load_config()
+                finally:
+                    CONFIG_PATH = original_path
+                self.assertEqual(errors, [])
+                self.assertEqual(list(cfg["vlc_instances"].keys()), ["x"])
+            finally:
+                os.unlink(path)
 
         def test_playlist_to_target_converts_bare_path_to_uri(self):
             target = _playlist_to_target(str(Path(__file__)))

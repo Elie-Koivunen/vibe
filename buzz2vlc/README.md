@@ -19,6 +19,25 @@ transport controls per player.
 > `button_byte` and colour order -- are still unverified for your specific
 > unit. Run `python buzz2vlc.py --diagnose` before trusting the defaults.
 
+## Screenshots
+
+The GUI (`buzz2vlc_gui.py`) has three tabs. Data shown below is a demo
+config, not a real setup.
+
+**VLC instances** — add/edit/launch each VLC player and its playlist:
+
+![VLC instances tab](screenshots/vlc_instances.png)
+
+**Button mappings** — per-controller, per-button actions for tap, hold,
+double-tap, and triple-tap:
+
+![Button mappings tab](screenshots/button_mappings.png)
+
+**Live buttons** — shows presses in real time, including double/triple-tap
+detection, useful for testing a controller without touching VLC:
+
+![Live buttons tab](screenshots/live_buttons.png)
+
 ## Why a Python plugin instead of a VLC Lua extension
 
 VLC's extension system is Lua-only, and Lua extensions have no USB/HID

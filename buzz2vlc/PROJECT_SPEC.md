@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 36fd5770-3673-4d5f-98d2-b57e0fb92f5b
-  modified: 2026-09-01T10:13:49.698Z
+  modified: 2026-09-01T10:42:15.454Z
 ---
 
 # buzz2vlc — full rebuild specification
@@ -412,6 +412,23 @@ reasonable first-draft assumptions:
     regressions. Per standing convention (see below), the code was
     archived to a zip before this pass began even though it turned out
     no changes were needed.
+17. **`load_config()` silently discarded any config file saved with a
+    UTF-8 BOM, reverting to defaults with no obvious symptom.** Found
+    live while building a demo config for README screenshots: PowerShell's
+    `Out-File -Encoding utf8` (and Notepad's default "UTF-8" save) both
+    write a leading BOM; `raw_bytes.decode("utf-8")` rejects that BOM as
+    invalid UTF-8, hits the `UnicodeDecodeError` branch, and falls back to
+    `default_config()` — the GUI then shows the built-in sample instances
+    instead of the user's real config, with the mismatch logged only as
+    an easy-to-miss warning string, not a visible error. Fixed by
+    decoding with `"utf-8-sig"` instead of `"utf-8"` (strips a BOM if
+    present, no-op otherwise — safe for files buzz2vlc's own
+    `save_config()` writes, which never include one). Added
+    `test_load_config_tolerates_utf8_bom` to the `--selftest` suite so
+    this can't silently regress. Verified live both ways: reproduced the
+    original failure with a real BOM'd file before the fix, then
+    confirmed the same file loads cleanly after it. `--selftest`: 13/13
+    passing.
 
 ## Known unverified items (flag if asked, don't claim otherwise)
 
