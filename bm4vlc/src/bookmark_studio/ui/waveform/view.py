@@ -5,9 +5,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QGraphicsView
 
 from bookmark_studio.ui.waveform.scene import WaveformScene
-from bookmark_studio.ui.waveform.waveform_item import scene_x_to_time_us
+from bookmark_studio.ui.waveform.waveform_item import scene_x_to_time_us, time_us_to_scene_x
 
 CLICK_VS_DRAG_THRESHOLD_US = 20_000  # 20ms of pointer movement before it counts as a drag
+FOLLOW_THRESHOLD_FRACTION = 0.8  # spec #55: "follow when playhead reaches 80% of viewport"
+FOLLOW_RECENTER_FRACTION = 0.2  # where the playhead lands after a follow-jump
 
 
 class WaveformView(QGraphicsView):
@@ -22,7 +24,7 @@ class WaveformView(QGraphicsView):
 
     def _is_empty_space(self, view_pos) -> bool:
         item = self.itemAt(view_pos)
-        return item is None or item is self._waveform_scene._waveform_item
+        return item is None or item in (self._waveform_scene._waveform_item, self._waveform_scene._ruler_item)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.LeftButton and self._is_empty_space(event.position().toPoint()):
@@ -100,3 +102,21 @@ class WaveformView(QGraphicsView):
         super().resizeEvent(event)
         if self._fit_mode:
             self._apply_fit()
+
+    def follow_playhead(self, time_us: int) -> None:
+        """spec #55: auto-scroll once the playhead nears the right edge, so playback
+        of a track wider than the viewport (i.e. not in fit_entire_media mode) keeps
+        the moving position visible without the user manually scrolling. A no-op in
+        fit mode, where the whole track -- and thus the playhead -- is always visible.
+        """
+        if self._fit_mode:
+            return
+        x = time_us_to_scene_x(time_us)
+        viewport_rect = self.mapToScene(self.viewport().rect()).boundingRect()
+        width = viewport_rect.width()
+        if width <= 0:
+            return
+        threshold_x = viewport_rect.left() + width * FOLLOW_THRESHOLD_FRACTION
+        if x >= threshold_x or x < viewport_rect.left():
+            target_center_x = x - width * FOLLOW_RECENTER_FRACTION + width / 2
+            self.centerOn(target_center_x, viewport_rect.center().y())

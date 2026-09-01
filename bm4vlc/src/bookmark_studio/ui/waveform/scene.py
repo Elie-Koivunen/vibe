@@ -14,6 +14,7 @@ from bookmark_studio.domain.selection import Selection
 from bookmark_studio.ui.waveform.bookmark_item import BookmarkPointItem, BookmarkRegionItem
 from bookmark_studio.ui.waveform.playhead_item import PlayheadItem
 from bookmark_studio.ui.waveform.selection_item import SelectionItem
+from bookmark_studio.ui.waveform.time_ruler_item import RULER_HEIGHT, TimeRulerItem
 from bookmark_studio.ui.waveform.waveform_item import WaveformItem, scene_x_to_time_us, time_us_to_scene_x
 from bookmark_studio.waveform.pyramid import WaveformPyramid
 
@@ -33,13 +34,20 @@ class WaveformScene(QGraphicsScene):
         super().__init__()
         self._duration_us = duration_us
         self._height = TRACK_HEIGHT
+        # Audacity-style layout: a time ruler strip above the track, everything else
+        # shifted down by RULER_HEIGHT so each item's own paint() can keep drawing in
+        # its native 0..height coordinate space.
+        self._ruler_item = TimeRulerItem(duration_us)
+        self.addItem(self._ruler_item)
         self._waveform_item = WaveformItem(_empty_pyramid(), duration_us, self._height)
+        self._waveform_item.setY(RULER_HEIGHT)
         self.addItem(self._waveform_item)
         self._playhead_item = PlayheadItem(self._height)
+        self._playhead_item.setY(RULER_HEIGHT)
         self.addItem(self._playhead_item)
         self._selection_item: SelectionItem | None = None
         self._bookmark_items: dict[UUID, BookmarkRegionItem | BookmarkPointItem] = {}
-        self.setSceneRect(QRectF(0, 0, time_us_to_scene_x(max(duration_us, 1)), self._height))
+        self.setSceneRect(QRectF(0, 0, time_us_to_scene_x(max(duration_us, 1)), RULER_HEIGHT + self._height))
 
     # -- waveform / duration --
 
@@ -49,7 +57,8 @@ class WaveformScene(QGraphicsScene):
         """
         self._duration_us = duration_us
         self._waveform_item.set_pyramid(self._waveform_item._pyramid, duration_us)
-        self.setSceneRect(QRectF(0, 0, time_us_to_scene_x(max(duration_us, 1)), self._height))
+        self._ruler_item.set_duration_us(duration_us)
+        self.setSceneRect(QRectF(0, 0, time_us_to_scene_x(max(duration_us, 1)), RULER_HEIGHT + self._height))
 
     def set_waveform(self, pyramid: WaveformPyramid, duration_us: int) -> None:
         self.set_duration_us(duration_us)
@@ -69,6 +78,7 @@ class WaveformScene(QGraphicsScene):
             self._selection_item = None
         if selection is not None:
             self._selection_item = SelectionItem(self._height, selection)
+            self._selection_item.setY(RULER_HEIGHT)
             self.addItem(self._selection_item)
         self.selection_changed.emit(selection)
 
@@ -105,6 +115,7 @@ class WaveformScene(QGraphicsScene):
         item.context_menu_requested.connect(
             lambda pos, bid=bookmark.id: self.bookmark_context_menu_requested.emit(bid, pos)
         )
+        item.setY(RULER_HEIGHT)
         self.addItem(item)
         self._bookmark_items[bookmark.id] = item
 

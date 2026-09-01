@@ -4,7 +4,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 
 from bookmark_studio.domain.bookmark import Bookmark
 from bookmark_studio.ui.transport import format_timecode
@@ -15,10 +15,22 @@ USER_ROLE = 32
 
 class BookmarkPanel(QWidget):
     bookmark_selected = Signal(object)  # UUID
+    export_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
+
+        toolbar = QHBoxLayout()
+        toolbar.addStretch(1)
+        # Direct user feedback: "add a button to save bookmark catalogue" -- the
+        # equivalent File > Export Project menu item existed but wasn't discoverable.
+        self._export_button = QPushButton("Save Bookmarks...", self)
+        self._export_button.setToolTip("Export this playlist's bookmarks to a .vlcbmk file")
+        self._export_button.clicked.connect(self.export_requested.emit)
+        toolbar.addWidget(self._export_button)
+        layout.addLayout(toolbar)
+
         self._tree = QTreeWidget(self)
         self._tree.setColumnCount(len(COLUMNS))
         self._tree.setHeaderLabels(COLUMNS)

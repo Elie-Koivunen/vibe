@@ -219,6 +219,7 @@ class MainWindow(QMainWindow):
         self._waveform_scene.selection_changed.connect(self._on_selection_changed)
 
         self._bookmark_panel.bookmark_selected.connect(self._on_bookmark_activated)
+        self._bookmark_panel.export_requested.connect(self._on_export_project)
 
         self._inspector.name_committed.connect(self._on_name_committed)
         self._inspector.loop_settings_committed.connect(self._on_loop_settings_committed)

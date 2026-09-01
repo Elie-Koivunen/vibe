@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 
@@ -186,6 +187,42 @@ def test_manual_zoom_disables_sticky_fit_mode(qtbot) -> None:
     qtbot.wait(50)
     # Once the user has manually zoomed, a resize must not snap back to "fit".
     assert view.transform() == zoomed_transform
+
+
+def test_follow_playhead_scrolls_once_past_threshold_when_not_fitted(qtbot) -> None:
+    scene, view = _make_view(qtbot, duration_us=120_000_000)  # 2 minutes, wider than any viewport
+    # Deliberately NOT calling fit_entire_media(): follow_playhead is a no-op in fit
+    # mode since the whole track (and thus the playhead) is always on screen there.
+    # Qt centers an oversized scene in the viewport by default (not aligned to x=0),
+    # so compute what's actually visible rather than assuming a fixed start position.
+    before = view.transform()
+    before_h_scroll = view.horizontalScrollBar().value()
+    visible_rect = view.mapToScene(view.viewport().rect()).boundingRect()
+    inside_time_us = int((visible_rect.left() + visible_rect.width() / 2) * 1000)
+    far_outside_time_us = int(visible_rect.right() * 1000) + 50_000_000
+
+    view.follow_playhead(inside_time_us)
+    assert view.horizontalScrollBar().value() == before_h_scroll  # no scroll needed yet
+
+    view.follow_playhead(far_outside_time_us)
+    assert view.horizontalScrollBar().value() != before_h_scroll  # now it followed
+    assert view.transform() == before  # follow scrolls, it never rescales
+
+
+def test_follow_playhead_is_noop_in_fit_mode(qtbot) -> None:
+    scene, view = _make_view(qtbot, duration_us=120_000_000)
+    view.fit_entire_media()
+    scroll_before = view.horizontalScrollBar().value()
+    view.follow_playhead(90_000_000)
+    assert view.horizontalScrollBar().value() == scroll_before
+
+
+def test_ruler_item_present_and_sized_to_duration(qtbot) -> None:
+    scene, view = _make_view(qtbot, duration_us=10_000_000)
+    ruler = scene._ruler_item
+    assert ruler.boundingRect().width() == pytest.approx(time_us_to_scene_x(10_000_000))
+    scene.set_duration_us(20_000_000)
+    assert ruler.boundingRect().width() == pytest.approx(time_us_to_scene_x(20_000_000))
 
 
 def test_bookmark_click_activates_without_moving(qtbot) -> None:

@@ -4,7 +4,11 @@ from __future__ import annotations
 import re
 
 from PySide6.QtCore import Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
+
+BUTTON_FONT_POINT_SIZE = 16
+BUTTON_MIN_SIZE = 44
 
 _TIMECODE_RE = re.compile(
     r"^(?:(?:(\d+):)?(\d+):)?(\d+)(?:\.(\d{1,3}))?$"
@@ -51,23 +55,31 @@ class TransportBar(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QHBoxLayout(self)
+        button_font = QFont()
+        button_font.setPointSize(BUTTON_FONT_POINT_SIZE)
 
-        def add_button(text: str, signal: Signal) -> QPushButton:
+        def add_button(text: str, signal: Signal, *, tooltip: str) -> QPushButton:
             button = QPushButton(text, self)
+            button.setFont(button_font)
+            button.setMinimumSize(BUTTON_MIN_SIZE, BUTTON_MIN_SIZE)
+            button.setToolTip(tooltip)
             button.clicked.connect(signal.emit)
             layout.addWidget(button)
             return button
 
-        self.previous_bookmark_button = add_button("B◀", self.previous_bookmark_clicked)
-        self.previous_track_button = add_button("◀ Track", self.previous_track_clicked)
-        self.seek_back_button = add_button("-5s", self.seek_back_clicked)
-        self.stop_button = add_button("■", self.stop_clicked)
-        self.play_pause_button = add_button("▶/Ⅱ", self.play_pause_clicked)
-        self.seek_forward_button = add_button("+5s", self.seek_forward_clicked)
-        self.next_track_button = add_button("Track ▶", self.next_track_clicked)
-        self.next_bookmark_button = add_button("▶B", self.next_bookmark_clicked)
+        # Larger, more standard media-control glyphs per direct user feedback
+        # ("use better icons in the control button, larger ones").
+        self.previous_bookmark_button = add_button("⏮", self.previous_bookmark_clicked, tooltip="Previous bookmark")
+        self.previous_track_button = add_button("⏪", self.previous_track_clicked, tooltip="Previous track")
+        self.seek_back_button = add_button("−5s", self.seek_back_clicked, tooltip="Seek back 5 seconds")
+        self.stop_button = add_button("⏹", self.stop_clicked, tooltip="Stop")
+        self.play_pause_button = add_button("▶ ⏸", self.play_pause_clicked, tooltip="Play / Pause")
+        self.seek_forward_button = add_button("+5s", self.seek_forward_clicked, tooltip="Seek forward 5 seconds")
+        self.next_track_button = add_button("⏩", self.next_track_clicked, tooltip="Next track")
+        self.next_bookmark_button = add_button("⏭", self.next_bookmark_clicked, tooltip="Next bookmark")
 
         self._time_label = QLabel("00:00:00.000 / 00:00:00.000", self)
+        self._time_label.setFont(button_font)
         layout.addWidget(self._time_label)
 
     def set_time(self, position_us: int, duration_us: int | None) -> None:

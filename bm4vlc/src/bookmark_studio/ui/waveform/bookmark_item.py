@@ -4,17 +4,38 @@ directly (spec #113) -- emits intent signals; a controller decides what to persi
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QPainter, QPen
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QTransform
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject
 
 from bookmark_studio.domain.bookmark import MIN_SEGMENT_DURATION_US, Bookmark
 from bookmark_studio.ui.waveform.waveform_item import scene_x_to_time_us, time_us_to_scene_x
 
-HANDLE_WIDTH = 8.0
+HANDLE_WIDTH_PX = 8.0  # target on-screen handle width, in real device pixels
 REGION_FILL = QColor(240, 180, 60, 130)
 REGION_BORDER = QColor(200, 140, 30)
 HANDLE_COLOR = QColor(180, 110, 10)
 POINT_COLOR = QColor(60, 170, 90)
+
+
+def _view_scale_x(item: QGraphicsItem) -> float:
+    """A fixed scene-unit handle width only corresponds to a constant number of real
+    screen pixels when the view's zoom happens to be 1:1. Once fit_entire_media()
+    zooms out to show a whole multi-minute track, 8 scene-ms became sub-pixel --
+    confirmed live: the resize handles were reported as effectively impossible to grab
+    ("make it so the highlighting box can be resized"). Handles (and hit-testing) now
+    size themselves in real screen pixels by dividing through the view's current
+    horizontal scale, the same fix applied to ruler/waveform text elsewhere in this
+    package. Falls back to 1.0 (no view attached yet, e.g. mid-construction) so this
+    never raises.
+    """
+    scene = item.scene()
+    if scene is None:
+        return 1.0
+    views = scene.views()
+    if not views:
+        return 1.0
+    scale = views[0].transform().m11()
+    return scale if scale > 0 else 1.0
 
 
 class BookmarkRegionItem(QGraphicsObject):
@@ -57,28 +78,43 @@ class BookmarkRegionItem(QGraphicsObject):
         self._orig_end_us = self._live_end_us = bookmark.end_us
         self._sync_position()
 
+    def _handle_width_scene(self) -> float:
+        return HANDLE_WIDTH_PX / _view_scale_x(self)
+
     def boundingRect(self) -> QRectF:  # noqa: N802
         width = time_us_to_scene_x(self._live_end_us) - time_us_to_scene_x(self._live_start_us)
-        return QRectF(0, 0, max(width, HANDLE_WIDTH * 2), self._height)
+        return QRectF(0, 0, max(width, self._handle_width_scene() * 2), self._height)
 
     def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: N802
         rect = self.boundingRect()
+        handle_width = self._handle_width_scene()
         painter.setBrush(QBrush(REGION_FILL))
         painter.setPen(QPen(REGION_BORDER, 1))
         painter.drawRect(rect)
-        painter.fillRect(QRectF(rect.left(), 0, HANDLE_WIDTH, self._height), HANDLE_COLOR)
-        painter.fillRect(QRectF(rect.right() - HANDLE_WIDTH, 0, HANDLE_WIDTH, self._height), HANDLE_COLOR)
-        text_rect = rect.adjusted(HANDLE_WIDTH + 2, 2, -HANDLE_WIDTH - 2, -2)
+        painter.fillRect(QRectF(rect.left(), 0, handle_width, self._height), HANDLE_COLOR)
+        painter.fillRect(QRectF(rect.right() - handle_width, 0, handle_width, self._height), HANDLE_COLOR)
+
+        # Same scene-vs-device-pixel bug as TimeRulerItem (see waveform_item.device_pixel_width):
+        # a font drawn in scene coordinates shrinks to invisible once the view is zoomed
+        # out via fit_entire_media(). Map the label anchor through the world transform,
+        # reset to identity, and draw at the real device position.
+        world_transform = painter.worldTransform()
+        anchor_scene = QPointF(rect.left() + handle_width + 2, rect.top() + 2)
+        device_anchor = world_transform.map(anchor_scene)
+        painter.save()
+        painter.setWorldTransform(QTransform())
         painter.setPen(QPen(QColor(30, 20, 0)))
-        painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, self._bookmark.name)
+        painter.drawText(device_anchor + QPointF(0, 10), self._bookmark.name)
+        painter.restore()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         local_x = event.pos().x()
         width = self.boundingRect().width()
-        if local_x <= HANDLE_WIDTH:
+        handle_width = self._handle_width_scene()
+        if local_x <= handle_width:
             self._drag_mode = "resize-start"
             self.resize_started.emit("start")
-        elif local_x >= width - HANDLE_WIDTH:
+        elif local_x >= width - handle_width:
             self._drag_mode = "resize-end"
             self.resize_started.emit("end")
         else:

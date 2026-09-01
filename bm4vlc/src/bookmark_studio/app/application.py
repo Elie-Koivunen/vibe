@@ -260,6 +260,7 @@ class Application(QObject):
             self._clock.update(status)
             self._last_playback_state = status.state
             self.window._waveform_scene.set_playhead_time_us(status.time_us)
+            self.window._waveform_view.follow_playhead(status.time_us)
             self.window._transport.set_time(status.time_us, status.duration_us)
             self.window._playlist_panel.set_current_playing(status.current_playlist_item_id)
             self._loop_controller.on_tick()
@@ -356,6 +357,12 @@ class Application(QObject):
             duration_us=duration_us or media.duration_us or 0,
         )
         self.window.load_bookmarks(bookmarks)
+        # Without this, the view stays at its raw 1ms-per-pixel default zoom, so a
+        # multi-minute track shows only its first fraction of a second -- everything
+        # else (waveform peaks, the playhead, most bookmarks) is simply off-screen,
+        # not actually broken. Confirmed live: reported as "the waveform doesn't show
+        # up" / "no moving bar" when the real cause was zoom, not missing rendering.
+        self.window._waveform_view.fit_entire_media()
 
         local_path = _uri_to_path(media.canonical_uri or media_uri)
         if local_path is not None and local_path.exists() and media.fast_fingerprint:
