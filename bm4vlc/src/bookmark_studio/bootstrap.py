@@ -16,8 +16,7 @@ from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
 from bookmark_studio.persistence.database import connect
 from bookmark_studio.persistence.migrations import migrate
 from bookmark_studio.playback.adapter import PlaybackAdapter
-from bookmark_studio.playback.bridge_client import BridgeClient
-from bookmark_studio.playback.enhanced_adapter import EnhancedLuaPlaybackAdapter
+from bookmark_studio.playback.http_fallback import StandardHttpPlaybackAdapter
 from bookmark_studio.playback.mock_adapter import MockPlaybackAdapter
 from bookmark_studio.settings.settings_service import SettingsService
 from bookmark_studio.ui.main_window import MainWindow
@@ -51,16 +50,21 @@ def find_vlc_path(settings: SettingsService) -> str | None:
     return None
 
 
-def probe_bridge(host: str, port: int, token: str, *, timeout_s: float = 1.0) -> bool:
-    """spec #178 'probe enhanced bridge': True if bookmarkstudio.lua answers health."""
-    client = BridgeClient(host, port, token)
+def probe_bridge(host: str, port: int, password: str, *, timeout_s: float = 1.0) -> bool:
+    """spec #178 'probe enhanced bridge': True if VLC's built-in HTTP interface answers.
+
+    Despite the name (kept for continuity with spec #178's terminology), this probes
+    VLC's built-in HTTP interface, not the custom Lua bridge -- see vlc_launcher.py's
+    module docstring for why that's the reliable default now.
+    """
+    adapter = StandardHttpPlaybackAdapter(host, port, password)
     try:
-        health = client.health()
-        return health.ok
+        adapter.connect()
+        return True
     except Exception:  # noqa: BLE001 - any failure here just means "not available"
         return False
     finally:
-        client.close()
+        adapter.disconnect()
 
 
 def open_database(db_path: Path | None = None) -> sqlite3.Connection:
@@ -77,32 +81,28 @@ def build_main_window(bookmark_repository: BookmarkRepository) -> MainWindow:
 def select_playback_adapter(settings: SettingsService) -> tuple[PlaybackAdapter, str | None]:
     """spec #178 'probe enhanced bridge -> fallback probe -> connected? / offline mode'.
 
-    Returns (adapter, vlc_path). Whenever VLC is found at all, this returns the
-    EnhancedLuaPlaybackAdapter -- it does NOT gate that choice on a one-shot
-    probe_bridge() success/failure the way an earlier version did.
+    Returns (adapter, vlc_path). Whenever VLC is found at all, this returns a
+    StandardHttpPlaybackAdapter (VLC's built-in HTTP interface, spec #28) -- not the
+    custom Lua bridge spec #196 named as primary. See vlc_launcher.py's module
+    docstring for why: the Lua bridge leaks a socket on every request and degrades a
+    real session to fully unresponsive within minutes, confirmed live; the built-in
+    interface, also confirmed live (100 requests over ~45s of realistic polling),
+    leaks nothing.
 
-    That earlier version was a real, serious bug, not just a missed optimization:
-    VLC's Lua bridge takes several seconds to finish loading after the VLC process
-    starts (confirmed live -- a health probe attempted ~3-4s after launch failed, the
-    same probe ~7s after launch succeeded). A single failed probe at app startup
-    permanently locked the whole session onto an inert MockPlaybackAdapter([]) with an
-    empty playlist that can never populate, no waveform, and nothing ever updating --
-    which looks indistinguishable from "the app is broken," and there is no reconnect
-    path back to a real adapter once Mock is chosen no matter how long VLC keeps
-    running afterward. Application's own per-tick polling already tolerates a
-    not-yet-reachable (or never-reachable) bridge gracefully (spec #104) -- each failed
-    poll is logged and skipped, not fatal -- so it will self-heal automatically the
-    moment the bridge actually comes up, which Mock could never do. Only fall back to
-    Mock when VLC itself isn't installed/found at all, since there is then nothing to
-    ever reconnect to.
+    This does NOT gate the choice on a one-shot probe_bridge() success/failure. VLC's
+    HTTP interface takes a little while to finish loading after the VLC process
+    starts, and Application's own per-tick polling already tolerates a not-yet-
+    reachable adapter gracefully (spec #104) -- each failed poll is logged and
+    skipped, not fatal -- so it self-heals automatically once the interface comes up.
+    Only fall back to Mock when VLC itself isn't installed/found at all, since there
+    is then nothing to ever reconnect to.
 
-    probe_bridge() is kept and still used by bootstrap.main() purely for an informative
-    startup log line, not for this decision.
+    probe_bridge() is kept and still used by bootstrap.main() purely for an
+    informative startup log line, not for this decision.
     """
     vlc_path = find_vlc_path(settings)
     if vlc_path is not None:
-        client = BridgeClient("127.0.0.1", settings.bridge_port(), settings.bridge_token())
-        return EnhancedLuaPlaybackAdapter(client), vlc_path
+        return StandardHttpPlaybackAdapter("127.0.0.1", settings.bridge_port(), settings.bridge_token()), vlc_path
     return MockPlaybackAdapter([]), vlc_path
 
 

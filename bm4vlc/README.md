@@ -21,18 +21,19 @@ falls back to offline mode, and runs.
 
 **The full live loop was confirmed working end-to-end against a real,
 locally installed, running VLC 3.0.23**: launch a managed VLC instance,
-connect over the Lua bridge, resolve the current track, load its
-waveform via real `ffmpeg`, and stream live playback position back
-into the UI's transport bar and playhead every ~150ms — not mocked,
-not simulated. See "Verified live against real VLC" below for the six
-real bugs this surfaced and fixed, several of which directly
-contradicted the spec's own assumptions about VLC's Lua API.
+connect, resolve the current track, load its waveform via real
+`ffmpeg`, and stream live playback position back into the UI's
+transport bar and playhead — not mocked, not simulated. **The default
+connection is VLC's built-in HTTP interface (`StandardHttpPlaybackAdapter`,
+spec #28), not the custom Lua bridge spec #196 named as primary** —
+see "The Lua bridge vs. VLC's built-in HTTP interface" below for why
+that reversal happened and what it cost to find out.
 
 **Known simplifications / not yet built:**
-- `StandardHttpPlaybackAdapter` (spec #28) exists and is tested, but
-  `bootstrap.py` doesn't wire it in as a fallback yet — an unreachable
-  enhanced bridge currently falls back to an inert `MockPlaybackAdapter`
-  rather than VLC's plain built-in HTTP interface.
+- The custom Lua bridge (`vlc/bookmarkstudio.lua`, `EnhancedLuaPlaybackAdapter`)
+  is fully implemented, live-debugged, and still available via
+  `app/vlc_launcher.py`'s `launch_managed_vlc_with_lua_bridge()`, but is
+  no longer the default a normal launch uses — see below.
 - `PlaylistSynchronizer`'s similarity scoring against *other* known
   playlists always sees an empty candidate list (`_list_ordered_media_ids_for_playlist`
   in `app/application.py` is a documented stub) — ad-hoc context
@@ -47,6 +48,31 @@ contradicted the spec's own assumptions about VLC's Lua API.
 - P1/P2 features (Segment Queue, Loop Trainer, clip export, Audacity
   label import/export, beat detection, video thumbnails) are out of
   scope for this pass — see PROJECT_SPEC.md #175-176.
+
+## The Lua bridge vs. VLC's built-in HTTP interface
+
+Spec #196 calls for the custom Lua bridge as the primary connection,
+with VLC's built-in HTTP interface as a coarser fallback (spec #28).
+Live testing reversed that. `vlc.httpd():handler()` — what the Lua
+bridge is built on — **never closes its side of a connection after
+responding**, confirmed via `netstat`: every request leaked one socket
+into `CLOSE_WAIT` on VLC's side. At the app's polling cadence that was
+enough to degrade a real session from "works" to "VLC refuses every
+new connection" within about 15-20 seconds. Client-side mitigations
+(reusing one persistent connection, widening timeouts to 3-4s, slowing
+polling to 400ms/2000ms) cut the leak rate substantially but never to
+zero — a live session still degraded within a few minutes.
+
+VLC's *built-in* HTTP interface is different, more mature code and
+does not share the bug: verified live, 100 requests over ~45 seconds
+of realistic polling left **zero** leaked sockets, using a plain
+`requests.Session()` with no raw-socket workaround needed at all (it's
+also fully RFC 7230 compliant, unlike the Lua bridge's malformed
+responses — see point 4 below). `bootstrap.select_playback_adapter()`
+and `app/vlc_launcher.py`'s `launch_managed_vlc()` now default to this
+adapter. The Lua bridge remains fully working and available for its
+microsecond seek precision (`launch_managed_vlc_with_lua_bridge()`),
+for anyone willing to trade reliability for that.
 
 ## Verified live against real VLC
 
@@ -102,7 +128,8 @@ PySide6 UI  +  Domain Logic  +  SQLite
                     |
              Playback Adapter
               /            \
-   Enhanced Lua Bridge   VLC HTTP fallback
+  VLC built-in HTTP    Enhanced Lua Bridge
+  (default, spec #28)  (opt-in, spec #196)
               \            /
                VLC Media Player
 ```
