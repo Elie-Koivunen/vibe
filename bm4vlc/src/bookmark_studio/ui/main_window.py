@@ -288,6 +288,8 @@ class MainWindow(QMainWindow):
 
         self._inspector.name_committed.connect(self._on_name_committed)
         self._inspector.loop_settings_committed.connect(self._on_loop_settings_committed)
+        self._inspector.start_committed.connect(self._on_inspector_start_committed)
+        self._inspector.end_committed.connect(self._on_inspector_end_committed)
 
         self._playlist_panel.launch_vlc_requested.connect(self.launch_vlc_requested.emit)
 
@@ -399,7 +401,10 @@ class MainWindow(QMainWindow):
             name=default_bookmark_name(),
             start_us=selection.start_us,
             end_us=selection.end_us,
-            loop_enabled=False,
+            # Direct user request: "per default, bookmark loop should be enabled
+            # (infinite)". repeat_count=None already means "forever" throughout this
+            # codebase (see e.g. inspector.py's Repeat spinbox special value).
+            loop_enabled=True,
             repeat_count=None,
             loop_gap_ms=0,
             completion_action=CompletionAction.CONTINUE,
@@ -481,6 +486,7 @@ class MainWindow(QMainWindow):
             MoveBookmarkCommand(self._bookmark_repository, bookmark_id, bookmark.start_us, bookmark.end_us, start_us, end_us)
         )
         self._refresh_bookmarks()
+        self._refresh_inspector_if_current(bookmark_id)
 
     def _on_bookmark_resize_finished(self, bookmark_id: UUID, handle: str, value_us: int) -> None:
         bookmark = self._bookmark_repository.get(bookmark_id)
@@ -491,6 +497,21 @@ class MainWindow(QMainWindow):
             ResizeBookmarkCommand(self._bookmark_repository, bookmark_id, handle, old_value, value_us)
         )
         self._refresh_bookmarks()
+        self._refresh_inspector_if_current(bookmark_id)
+
+    def _refresh_inspector_if_current(self, bookmark_id: UUID) -> None:
+        """Direct user request: "if the bookmark is adjusted, it should automatically
+        update the bookmark values" -- dragging/resizing a bookmark region on the
+        waveform already persisted correctly, but the Inspector's Start/End fields
+        (if that same bookmark happened to be loaded there) stayed stuck showing the
+        pre-drag values until the user clicked away and back.
+        """
+        current = self._current_inspected_bookmark()
+        if current is None or current.id != bookmark_id:
+            return
+        updated = self._bookmark_repository.get(bookmark_id)
+        if updated is not None:
+            self._inspector.load_bookmark(updated)
 
     def _on_name_committed(self, new_name: str) -> None:
         bookmark = self._current_inspected_bookmark()
@@ -513,6 +534,37 @@ class MainWindow(QMainWindow):
             )
         )
         self._refresh_bookmarks()
+
+    def _on_inspector_start_committed(self, start_us: int) -> None:
+        """Direct user request: "the begin/end time fields should be manually
+        editable for refined adjustment" -- the Inspector's Start/End QLineEdits
+        already existed and emitted these signals, but nothing was connected to
+        them, so typing a new value and pressing Enter silently did nothing.
+        """
+        bookmark = self._current_inspected_bookmark()
+        if bookmark is None:
+            return
+        if start_us < 0 or (bookmark.end_us is not None and start_us >= bookmark.end_us):
+            self._inspector.load_bookmark(bookmark)  # reject and revert the field
+            return
+        self._undo_stack.push(
+            ResizeBookmarkCommand(self._bookmark_repository, bookmark.id, "start", bookmark.start_us, start_us)
+        )
+        self._refresh_bookmarks()
+        self._refresh_inspector_if_current(bookmark.id)
+
+    def _on_inspector_end_committed(self, end_us: int) -> None:
+        bookmark = self._current_inspected_bookmark()
+        if bookmark is None or bookmark.end_us is None:
+            return  # a point bookmark has no end to edit; the field is disabled anyway
+        if end_us <= bookmark.start_us:
+            self._inspector.load_bookmark(bookmark)  # reject and revert the field
+            return
+        self._undo_stack.push(
+            ResizeBookmarkCommand(self._bookmark_repository, bookmark.id, "end", bookmark.end_us, end_us)
+        )
+        self._refresh_bookmarks()
+        self._refresh_inspector_if_current(bookmark.id)
 
     def _on_rename_shortcut(self) -> None:
         if self._current_inspected_bookmark() is not None:

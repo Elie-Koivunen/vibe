@@ -248,6 +248,53 @@ def test_bookmark_selection_button_creates_segment_bookmark_and_populates_inspec
 
     # Selection is cleared after committing it as a bookmark.
     assert window._waveform_scene.selection() is None
+    # Direct user request: "per default, bookmark loop should be enabled (infinite)".
+    assert bookmarks[0].loop_enabled is True
+    assert bookmarks[0].repeat_count is None  # None means "forever" throughout this codebase
+
+
+def test_inspector_start_end_fields_are_editable_and_persist(qtbot) -> None:
+    """Direct user request: "the begin/end time fields should be manually editable
+    for refined adjustment" -- the fields existed and emitted commit signals, but
+    nothing was connected to them."""
+    window, repo, playlist, media = _build_window(qtbot)
+    from bookmark_studio.domain.selection import Selection
+
+    window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=3_000_000))
+    window._bookmark_selection_button.click()
+    bookmark = repo.list_for_playlist_media(playlist.id, media.id)[0]
+
+    window._inspector._start_edit.setText("00:00:00.500")
+    window._inspector._on_start_committed()
+    assert repo.get(bookmark.id).start_us == 500_000
+
+    window._inspector._end_edit.setText("00:00:04.000")
+    window._inspector._on_end_committed()
+    assert repo.get(bookmark.id).end_us == 4_000_000
+
+    # An edit that would make start >= end is rejected and the field reverts.
+    window._inspector._start_edit.setText("00:00:10.000")
+    window._inspector._on_start_committed()
+    assert repo.get(bookmark.id).start_us == 500_000
+
+
+def test_dragging_a_bookmark_on_the_waveform_refreshes_the_open_inspector(qtbot) -> None:
+    """Direct user request: "if the bookmark is adjusted, it should automatically
+    update the bookmark values" -- dragging/resizing a bookmark on the waveform
+    already persisted to the database, but the Inspector's Start/End fields (if that
+    same bookmark was loaded there) stayed stuck on the pre-drag values."""
+    window, repo, playlist, media = _build_window(qtbot)
+    from bookmark_studio.domain.selection import Selection
+
+    window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=3_000_000))
+    window._bookmark_selection_button.click()
+    bookmark = repo.list_for_playlist_media(playlist.id, media.id)[0]
+    assert window._inspector.current_bookmark().id == bookmark.id
+
+    window._on_bookmark_resize_finished(bookmark.id, "end", 5_000_000)
+
+    assert repo.get(bookmark.id).end_us == 5_000_000
+    assert window._inspector._end_edit.text() == "00:00:05.000"
 
 
 def test_ctrl_b_menu_action_creates_bookmark_from_selection(qtbot) -> None:
