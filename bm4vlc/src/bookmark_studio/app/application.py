@@ -619,6 +619,17 @@ class Application(QObject):
             return
         media = self._media_resolver.resolve(media_uri, duration_us=duration_us)
         self._current_media_id = media.id
+        # A drag-selection is just a pair of raw microsecond offsets on the waveform's
+        # x-axis, with nothing tying it to a particular track -- reported live as
+        # "if i paint an area ... and then swap to another song, the paint is not song
+        # specific and ends up showing up on other songs". Worse than a cosmetic
+        # leftover: with Bookmark Now/Bookmark Selection now preferring an active
+        # selection (see main_window._on_bookmark_now_clicked), a stale selection left
+        # over from a previous track could be committed as a bookmark on the NEW
+        # track at meaningless start/end times. Clearing it on every track switch --
+        # actual playback change, single-click preview, or re-enabling follow -- is
+        # what makes a selection actually song-specific.
+        self.window._waveform_scene.clear_selection()
 
         playlist_id = self._synchronizer.active_playlist_id
         playlist_name = "Unknown playlist"

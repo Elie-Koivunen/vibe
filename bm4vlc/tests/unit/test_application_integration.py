@@ -401,6 +401,33 @@ def test_double_click_playlist_item_plays_it_and_the_view_follows(qtbot, running
     qtbot.waitUntil(lambda: app._current_vlc_item_id == 2, timeout=3000)
 
 
+def test_selection_is_cleared_when_the_displayed_track_changes(qtbot, running_app) -> None:
+    """Regression, reported live: "if i paint an area to bookmark, and then swap to
+    another song, the paint is not song specific and ends up showing up on other
+    songs" -- a selection is just raw microsecond offsets with nothing tying it to a
+    track, so it visually (and, worse, bookmark-committably) carried over unless
+    explicitly cleared on every track switch.
+    """
+    from bookmark_studio.domain.selection import Selection
+
+    adapter = MockPlaybackAdapter(
+        [
+            VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0),
+            VlcPlaylistItem(vlc_id=2, uri="file:///b.mp3", name="Song B", duration_s=20.0),
+        ]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
+
+    app.window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=2_000_000))
+    assert app.window._waveform_scene.selection() is not None
+
+    app._on_playlist_item_selected(2)  # single-click preview of a different song
+
+    assert app.window._waveform_scene.selection() is None
+
+
 def test_offline_start_does_not_crash(qtbot, running_app) -> None:
     """spec #104: VLC unreachable must not prevent the app from starting."""
     adapter = MockPlaybackAdapter([])
