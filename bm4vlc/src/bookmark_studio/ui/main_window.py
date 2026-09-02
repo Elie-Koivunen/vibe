@@ -579,19 +579,23 @@ class MainWindow(QMainWindow):
         self._inspector.clear()
         self._refresh_bookmarks()
 
-    def _on_delete_bookmark_requested(self, bookmark_id: UUID) -> None:
-        """"there is no button to select and delete a bookmark" -- deletion already
-        worked via the Delete key/Bookmark menu once loaded into the Inspector, but
-        with no visible button it read as a missing feature. This deletes whatever
-        row is selected in the bookmark LIST directly, independent of Inspector state.
+    def _on_delete_bookmark_requested(self, bookmark_ids: list) -> None:
+        """"there is no button to select and delete a bookmark" (later: "i should be
+        able to multiple select and delete or move") -- deletion already worked via
+        the Delete key/Bookmark menu once loaded into the Inspector, but with no
+        visible button, and no way to act on more than one row, it read as missing.
+        Deletes whatever rows are selected in the bookmark LIST directly, independent
+        of Inspector state. One undo-stack push per bookmark, so each is individually
+        undoable/redoable, same granularity as every other bookmark command here.
         """
-        bookmark = self._bookmark_repository.get(bookmark_id)
-        if bookmark is None:
-            return
-        self._undo_stack.push(DeleteBookmarkCommand(self._bookmark_repository, bookmark))
         inspected = self._current_inspected_bookmark()
-        if inspected is not None and inspected.id == bookmark_id:
-            self._inspector.clear()
+        for bookmark_id in bookmark_ids:
+            bookmark = self._bookmark_repository.get(bookmark_id)
+            if bookmark is None:
+                continue
+            self._undo_stack.push(DeleteBookmarkCommand(self._bookmark_repository, bookmark))
+            if inspected is not None and inspected.id == bookmark_id:
+                self._inspector.clear()
         self._refresh_bookmarks()
 
     def _current_inspected_bookmark(self) -> Bookmark | None:

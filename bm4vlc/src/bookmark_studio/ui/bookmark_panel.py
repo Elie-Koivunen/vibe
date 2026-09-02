@@ -5,7 +5,7 @@ from uuid import UUID
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QHBoxLayout, QHeaderView, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QHBoxLayout, QHeaderView, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from bookmark_studio.domain.bookmark import Bookmark
@@ -18,12 +18,12 @@ USER_ROLE = 32
 
 
 class BookmarkPanel(QWidget):
-    bookmark_selected = Signal(object)  # UUID
+    bookmark_selected = Signal(object)  # UUID -- only emitted when exactly one row is selected
     export_requested = Signal()
     play_bookmark_requested = Signal(object)  # UUID
     loop_bookmark_requested = Signal(object)  # UUID
-    delete_bookmark_requested = Signal(object)  # UUID
-    reorder_requested = Signal(list)  # ordered list of bookmark UUIDs
+    delete_bookmark_requested = Signal(list)  # list of UUIDs -- one or more
+    reorder_requested = Signal(list)  # ordered list of every bookmark UUID in the list
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -36,6 +36,8 @@ class BookmarkPanel(QWidget):
         # from the bookmark listing itself" -- distinct from the transport bar (which
         # drives the live VLC playlist) and from "Play/Loop Selection" above the
         # waveform (which needs a fresh drag-selection, not a saved bookmark row).
+        # Play/Loop only ever act on ONE bookmark (playing several at once isn't a
+        # thing), so they stay enabled only when the selection is exactly one row.
         self._play_bookmark_button = QPushButton("Play Bookmark", self)
         self._play_bookmark_button.setToolTip("Seek VLC to the selected bookmark and play")
         self._play_bookmark_button.clicked.connect(self._on_play_bookmark_clicked)
@@ -46,23 +48,25 @@ class BookmarkPanel(QWidget):
         self._loop_bookmark_button.clicked.connect(self._on_loop_bookmark_clicked)
         toolbar.addWidget(self._loop_bookmark_button)
 
-        # Direct user request: "there is no button to select and delete a bookmark" --
-        # Delete already worked via the Delete key/Bookmark menu once a row was loaded
-        # into the Inspector, but with no visible button it read as a missing feature.
+        # Direct user request: "there is no button to select and delete a bookmark"
+        # (later: "i should be able to multiple select and delete or move") -- Delete
+        # already worked via the Delete key/Bookmark menu once a row was loaded into
+        # the Inspector, but with no visible button, and no multi-select support, it
+        # read as a missing feature.
         self._delete_bookmark_button = QPushButton("Delete Bookmark", self)
-        self._delete_bookmark_button.setToolTip("Delete the selected bookmark")
+        self._delete_bookmark_button.setToolTip("Delete every selected bookmark")
         self._delete_bookmark_button.clicked.connect(self._on_delete_bookmark_clicked)
         toolbar.addWidget(self._delete_bookmark_button)
 
         # Direct user request: "the row entries should also be possible to manually
         # reorder them moving up/down".
         self._move_up_button = QPushButton("Move Up", self)
-        self._move_up_button.setToolTip("Move the selected bookmark up in this list")
+        self._move_up_button.setToolTip("Move every selected bookmark up in this list")
         self._move_up_button.clicked.connect(lambda: self._move_selected(-1))
         toolbar.addWidget(self._move_up_button)
 
         self._move_down_button = QPushButton("Move Down", self)
-        self._move_down_button.setToolTip("Move the selected bookmark down in this list")
+        self._move_down_button.setToolTip("Move every selected bookmark down in this list")
         self._move_down_button.clicked.connect(lambda: self._move_selected(1))
         toolbar.addWidget(self._move_down_button)
 
@@ -78,6 +82,9 @@ class BookmarkPanel(QWidget):
         self._tree = QTreeWidget(self)
         self._tree.setColumnCount(len(COLUMNS))
         self._tree.setHeaderLabels(COLUMNS)
+        # Direct user request: "i should be able to multiple select and delete or
+        # move" -- Ctrl/Shift-click or a rubber-band drag selects more than one row.
+        self._tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         # Direct user request: "nice to have all columns adjustable and reorderable".
         # Interactive (drag-to-resize) is QHeaderView's default already; Movable adds
         # drag-to-reorder.
@@ -86,7 +93,8 @@ class BookmarkPanel(QWidget):
         header.setSectionResizeMode(QHeaderView.Interactive)
         # Direct user request: "i should be able to just click and drag the entry up
         # and down instead of relying on separate buttons" -- Move Up/Down (below)
-        # stay as a fallback, but this is the primary way to reorder now.
+        # stay as a fallback, but this is the primary way to reorder now. Qt's
+        # InternalMove drags the whole current selection together, multi-select included.
         self._tree.setDragDropMode(QTreeWidget.InternalMove)
         self._tree.setDragEnabled(True)
         self._tree.setAcceptDrops(True)
@@ -97,26 +105,33 @@ class BookmarkPanel(QWidget):
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         layout.addWidget(self._tree)
 
-        self._set_playback_buttons_enabled(False, allow_loop=False)
+        self._set_playback_buttons_enabled(0, allow_loop=False)
 
-    def _set_playback_buttons_enabled(self, play_enabled: bool, *, allow_loop: bool) -> None:
-        self._play_bookmark_button.setEnabled(play_enabled)
-        self._loop_bookmark_button.setEnabled(play_enabled and allow_loop)
-        self._delete_bookmark_button.setEnabled(play_enabled)
+    def _set_playback_buttons_enabled(self, selected_count: int, *, allow_loop: bool) -> None:
+        self._play_bookmark_button.setEnabled(selected_count == 1)
+        self._loop_bookmark_button.setEnabled(selected_count == 1 and allow_loop)
+        self._delete_bookmark_button.setEnabled(selected_count > 0)
         self._update_move_buttons_enabled()
 
-    def _update_move_buttons_enabled(self) -> None:
-        index = self._tree.indexOfTopLevelItem(self._current_item()) if self._current_item() else -1
-        self._move_up_button.setEnabled(index > 0)
-        self._move_down_button.setEnabled(0 <= index < self._tree.topLevelItemCount() - 1)
+    def _selected_indices(self) -> list[int]:
+        return sorted(self._tree.indexOfTopLevelItem(item) for item in self._tree.selectedItems())
 
-    def _current_item(self) -> QTreeWidgetItem | None:
-        selected = self._tree.selectedItems()
-        return selected[0] if selected else None
+    def _update_move_buttons_enabled(self) -> None:
+        indices = self._selected_indices()
+        if not indices:
+            self._move_up_button.setEnabled(False)
+            self._move_down_button.setEnabled(False)
+            return
+        self._move_up_button.setEnabled(indices[0] > 0)
+        self._move_down_button.setEnabled(indices[-1] < self._tree.topLevelItemCount() - 1)
+
+    def _selected_bookmark_ids(self) -> list[UUID]:
+        return [item.data(0, USER_ROLE) for item in self._tree.selectedItems()]
 
     def _selected_bookmark_id(self) -> UUID | None:
-        item = self._current_item()
-        return item.data(0, USER_ROLE) if item is not None else None
+        """Single-selection convenience for Play/Loop, which only ever act on one row."""
+        ids = self._selected_bookmark_ids()
+        return ids[0] if len(ids) == 1 else None
 
     def _on_play_bookmark_clicked(self) -> None:
         bookmark_id = self._selected_bookmark_id()
@@ -129,9 +144,9 @@ class BookmarkPanel(QWidget):
             self.loop_bookmark_requested.emit(bookmark_id)
 
     def _on_delete_bookmark_clicked(self) -> None:
-        bookmark_id = self._selected_bookmark_id()
-        if bookmark_id is not None:
-            self.delete_bookmark_requested.emit(bookmark_id)
+        bookmark_ids = self._selected_bookmark_ids()
+        if bookmark_ids:
+            self.delete_bookmark_requested.emit(bookmark_ids)
 
     def _on_item_double_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
         # Direct user request: "double clicking on a bookmark should play that
@@ -141,20 +156,31 @@ class BookmarkPanel(QWidget):
             self.play_bookmark_requested.emit(bookmark_id)
 
     def _move_selected(self, delta: int) -> None:
-        index = self._tree.indexOfTopLevelItem(self._current_item()) if self._current_item() else -1
-        if index < 0:
+        """Moves the whole selected block up or down by one position, keeping the
+        selected rows' relative order -- direct user request: "i should be able to
+        multiple select and ... move". Moving up swaps each selected index with its
+        upward neighbor top-to-bottom; moving down does the mirror image
+        bottom-to-top, so earlier swaps never disturb indices not yet processed.
+        """
+        indices = self._selected_indices()
+        if not indices:
             return
-        new_index = index + delta
-        if not (0 <= new_index < self._tree.topLevelItemCount()):
+        count = self._tree.topLevelItemCount()
+        if delta < 0 and indices[0] == 0:
             return
-        ordered_ids = [self._tree.topLevelItem(i).data(0, USER_ROLE) for i in range(self._tree.topLevelItemCount())]
-        ordered_ids[index], ordered_ids[new_index] = ordered_ids[new_index], ordered_ids[index]
+        if delta > 0 and indices[-1] == count - 1:
+            return
+        ordered_ids = [self._tree.topLevelItem(i).data(0, USER_ROLE) for i in range(count)]
+        ordered_indices = indices if delta < 0 else list(reversed(indices))
+        for index in ordered_indices:
+            other = index + delta
+            ordered_ids[other], ordered_ids[index] = ordered_ids[index], ordered_ids[other]
         self.reorder_requested.emit(ordered_ids)
 
     def _on_rows_moved(self, *_args) -> None:
         """Fires after Qt's own internal drag-drop reorder has already rearranged the
-        tree's rows -- just read the new order back out and ask the caller to
-        persist it, same as a Move Up/Down click.
+        tree's rows (including a multi-row drag) -- just read the new order back out
+        and ask the caller to persist it, same as a Move Up/Down click.
         """
         ordered_ids = [self._tree.topLevelItem(i).data(0, USER_ROLE) for i in range(self._tree.topLevelItemCount())]
         self.reorder_requested.emit(ordered_ids)
@@ -165,7 +191,7 @@ class BookmarkPanel(QWidget):
         manual reorder (see _move_selected/reorder_requested) actually sticks instead
         of being immediately re-sorted away by this panel re-deriving its own order.
         """
-        previously_selected = self._selected_bookmark_id()
+        previously_selected = set(self._selected_bookmark_ids())
         self._bookmarks = {b.id: b for b in bookmarks}
         self._song_names = song_names or {}
         self._tree.clear()
@@ -184,21 +210,22 @@ class BookmarkPanel(QWidget):
             )
             row.setData(0, USER_ROLE, bookmark.id)
             self._tree.addTopLevelItem(row)
-        if previously_selected is not None:
-            self.select_bookmark(previously_selected)
+        if previously_selected:
+            self.select_bookmarks(previously_selected)
 
     def select_bookmark(self, bookmark_id: UUID) -> None:
+        self.select_bookmarks({bookmark_id})
+
+    def select_bookmarks(self, bookmark_ids: set[UUID]) -> None:
         for i in range(self._tree.topLevelItemCount()):
             row = self._tree.topLevelItem(i)
-            if row.data(0, USER_ROLE) == bookmark_id:
-                self._tree.setCurrentItem(row)
-                return
+            row.setSelected(row.data(0, USER_ROLE) in bookmark_ids)
 
     def _on_selection_changed(self) -> None:
-        bookmark_id = self._selected_bookmark_id()
-        if bookmark_id is not None:
-            self.bookmark_selected.emit(bookmark_id)
-            bookmark = self._bookmarks.get(bookmark_id)
-            self._set_playback_buttons_enabled(True, allow_loop=bookmark is not None and bookmark.end_us is not None)
+        ids = self._selected_bookmark_ids()
+        if len(ids) == 1:
+            self.bookmark_selected.emit(ids[0])
+            bookmark = self._bookmarks.get(ids[0])
+            self._set_playback_buttons_enabled(1, allow_loop=bookmark is not None and bookmark.end_us is not None)
         else:
-            self._set_playback_buttons_enabled(False, allow_loop=False)
+            self._set_playback_buttons_enabled(len(ids), allow_loop=False)
