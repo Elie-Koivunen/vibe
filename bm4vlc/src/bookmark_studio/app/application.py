@@ -211,6 +211,9 @@ class Application(QObject):
         transport.next_track_clicked.connect(lambda: self._fire_and_forget(self._adapter.next_track))
         transport.previous_bookmark_clicked.connect(self._on_previous_bookmark)
         transport.next_bookmark_clicked.connect(self._on_next_bookmark)
+        transport.position_seek_requested.connect(
+            lambda time_us: self._fire_and_forget(lambda: self._adapter.seek_absolute_us(time_us))
+        )
 
         self.window._waveform_scene.seek_requested.connect(
             lambda time_us: self._fire_and_forget(lambda: self._adapter.seek_absolute_us(time_us))

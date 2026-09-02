@@ -5,7 +5,7 @@ import re
 
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPushButton, QWidget
 
 BUTTON_FONT_POINT_SIZE = 16
 BUTTON_MIN_SIZE = 44
@@ -51,6 +51,7 @@ class TransportBar(QWidget):
     seek_forward_clicked = Signal()
     next_track_clicked = Signal()
     next_bookmark_clicked = Signal()
+    position_seek_requested = Signal(int)  # microseconds -- manually typed into the position field
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -88,9 +89,20 @@ class TransportBar(QWidget):
         self.next_track_button = add_button("⏩", self.next_track_clicked, tooltip="Next track")
         self.next_bookmark_button = add_button("⏭", self.next_bookmark_clicked, tooltip="Next bookmark")
 
-        self._time_label = QLabel("00:00:00.000 / 00:00:00.000", self)
-        self._time_label.setFont(button_font)
-        layout.addWidget(self._time_label)
+        # Direct user request: "the timer are still not manually editable" -- the
+        # current-position half of the transport display is now a real editable
+        # field (type a timecode, press Enter, VLC seeks there), not just a label.
+        # Duration stays a plain label since seeking "to the duration" isn't a thing.
+        self._position_edit = QLineEdit("00:00:00.000", self)
+        self._position_edit.setFont(button_font)
+        self._position_edit.setMaximumWidth(150)
+        self._position_edit.setToolTip("Current position -- edit and press Enter to seek")
+        self._position_edit.editingFinished.connect(self._on_position_committed)
+        layout.addWidget(self._position_edit)
+
+        self._duration_label = QLabel("/ 00:00:00.000", self)
+        self._duration_label.setFont(button_font)
+        layout.addWidget(self._duration_label)
 
         # Direct fix for "the player buttons do not map to vlc player, hence not
         # functioning": set_transport_enabled() (spec #137) existed but was never once
@@ -105,8 +117,20 @@ class TransportBar(QWidget):
         self.set_connected(False)
 
     def set_time(self, position_us: int, duration_us: int | None) -> None:
+        # Never overwrite the field while the user has it focused (e.g. mid-edit) --
+        # this is called on every ~400ms status poll, which would otherwise stomp
+        # whatever they'd typed before they finished entering it.
+        if not self._position_edit.hasFocus():
+            self._position_edit.setText(format_timecode(position_us))
         duration_text = format_timecode(duration_us) if duration_us is not None else "--:--:--.---"
-        self._time_label.setText(f"{format_timecode(position_us)} / {duration_text}")
+        self._duration_label.setText(f"/ {duration_text}")
+
+    def _on_position_committed(self) -> None:
+        try:
+            time_us = parse_timecode(self._position_edit.text())
+        except ValueError:
+            return  # will be overwritten back to the real position on the next poll
+        self.position_seek_requested.emit(time_us)
 
     def set_connected(self, connected: bool) -> None:
         self.set_transport_enabled(connected)
