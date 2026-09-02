@@ -128,14 +128,17 @@ class MainWindow(QMainWindow):
         # Direct user request: "a button to explicitly bookmark". Always enabled --
         # unlike "Bookmark Selection" below, this needs no drag-selection first (which
         # was itself broken by the handle_empty_drag boundary bug -- see scene.py), so
-        # it's the one guaranteed-simple way to drop a bookmark at the playhead.
+        # it's the one guaranteed-simple way to drop a bookmark. Context-aware: reported
+        # live as "the bookmarking seems to have changed" after a user had a region
+        # highlighted, clicked this, and got a point bookmark at the playhead instead
+        # of a segment from their selection -- always ignoring an active selection was
+        # the confusing part, not a regression. Now it behaves like Bookmark Selection
+        # whenever one exists, and only falls back to a playhead point when it doesn't.
         self._bookmark_now_button = QPushButton("Bookmark Now", self)
         self._bookmark_now_button.setToolTip(
-            "Add a point bookmark at the current playhead position (Ctrl+Shift+B)"
+            "Bookmark the current selection, or the playhead position if nothing is selected"
         )
-        self._bookmark_now_button.clicked.connect(
-            lambda: self._on_point_bookmark_requested(self._playhead_time_us())
-        )
+        self._bookmark_now_button.clicked.connect(self._on_bookmark_now_clicked)
         layout.addWidget(self._bookmark_now_button)
 
         self._bookmark_selection_button = QPushButton("Bookmark Selection (Ctrl+B)", self)
@@ -173,18 +176,16 @@ class MainWindow(QMainWindow):
         bottom_splitter.addWidget(self._bookmark_panel)
         bottom_splitter.addWidget(self._inspector)
 
-        main_splitter = QSplitter(Qt.Vertical, self)
-        main_splitter.addWidget(top_splitter)
-        main_splitter.addWidget(bottom_splitter)
-        main_splitter.setStretchFactor(0, 2)
-        main_splitter.setStretchFactor(1, 1)
-
         central = QWidget(self)
         layout = QVBoxLayout(central)
         layout.addWidget(self._breadcrumb)
         layout.addWidget(self._selection_bar)
-        layout.addWidget(main_splitter)
+        layout.addWidget(top_splitter, 2)
+        # Direct user request: "i want the playback buttons to be above, not under" --
+        # previously sat at the very bottom of the window, past the bookmark list and
+        # inspector; moved directly under the waveform it controls instead.
         layout.addWidget(self._transport)
+        layout.addWidget(bottom_splitter, 1)
         self.setCentralWidget(central)
 
     def _build_menu_bar(self) -> None:
@@ -367,6 +368,12 @@ class MainWindow(QMainWindow):
             self._selection_end_edit.setText(format_timecode(selection.end_us))
             return
         self._waveform_scene.set_selection(Selection(start_us=selection.start_us, end_us=new_end_us))
+
+    def _on_bookmark_now_clicked(self) -> None:
+        if self._waveform_scene.selection() is not None:
+            self._on_bookmark_selection_clicked()
+        else:
+            self._on_point_bookmark_requested(self._playhead_time_us())
 
     def _on_bookmark_selection_clicked(self) -> None:
         selection = self._waveform_scene.selection()

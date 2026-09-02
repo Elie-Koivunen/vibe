@@ -79,6 +79,25 @@ def test_bookmark_now_button_creates_point_bookmark_without_a_selection(qtbot) -
     assert bookmarks[0].end_us is None  # a point bookmark, not a segment
 
 
+def test_bookmark_now_button_bookmarks_the_selection_when_one_exists(qtbot) -> None:
+    """Regression, reported live as "the bookmarking seems to have changed": with a
+    region highlighted, clicking "Bookmark Now" created a point bookmark at the
+    playhead and silently ignored the selection -- confusing, not a real regression,
+    since that was always its only behavior. It must now prefer the selection.
+    """
+    from bookmark_studio.domain.selection import Selection
+
+    window, repo, playlist, media = _build_window(qtbot)
+    window._waveform_scene.set_selection(Selection(start_us=5_000_000, end_us=9_000_000))
+
+    window._bookmark_now_button.click()
+
+    bookmarks = repo.list_for_playlist_media(playlist.id, media.id)
+    assert len(bookmarks) == 1
+    assert (bookmarks[0].start_us, bookmarks[0].end_us) == (5_000_000, 9_000_000)  # a segment, not a point
+    assert window._waveform_scene.selection() is None  # cleared after committing, like Bookmark Selection
+
+
 def test_bookmark_panel_play_loop_buttons_track_selection(qtbot) -> None:
     """Direct user request: dedicated controls "that would play explicitly from the
     bookmark listing itself", separate from Play/Loop Selection above the waveform."""
