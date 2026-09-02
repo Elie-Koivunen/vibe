@@ -79,6 +79,47 @@ def test_bookmark_now_button_creates_point_bookmark_without_a_selection(qtbot) -
     assert bookmarks[0].end_us is None  # a point bookmark, not a segment
 
 
+def test_bookmark_panel_play_loop_buttons_track_selection(qtbot) -> None:
+    """Direct user request: dedicated controls "that would play explicitly from the
+    bookmark listing itself", separate from Play/Loop Selection above the waveform."""
+    from bookmark_studio.domain.bookmark import Bookmark
+    from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
+
+    window, repo, playlist, media = _build_window(qtbot)
+    segment = Bookmark(
+        id=uuid4(), playlist_id=playlist.id, media_id=media.id, scope=BookmarkScope.PLAYLIST_MEDIA,
+        lane_id=None, bookmark_type=BookmarkType.SEGMENT, name="Chorus", start_us=1_000_000,
+        end_us=2_000_000, loop_enabled=False, repeat_count=None, loop_gap_ms=0,
+        completion_action=CompletionAction.CONTINUE,
+    )
+    point = Bookmark(
+        id=uuid4(), playlist_id=playlist.id, media_id=media.id, scope=BookmarkScope.PLAYLIST_MEDIA,
+        lane_id=None, bookmark_type=BookmarkType.POINT, name="Intro", start_us=500_000,
+        end_us=None, loop_enabled=False, repeat_count=None, loop_gap_ms=0,
+        completion_action=CompletionAction.CONTINUE,
+    )
+    window.load_bookmarks([segment, point])
+    panel = window._bookmark_panel
+    assert panel._play_bookmark_button.isEnabled() is False  # nothing selected yet
+
+    panel.select_bookmark(segment.id)
+    assert panel._play_bookmark_button.isEnabled() is True
+    assert panel._loop_bookmark_button.isEnabled() is True  # has an end_us
+
+    play_requests = []
+    loop_requests = []
+    window.play_bookmark_requested.connect(play_requests.append)
+    window.loop_bookmark_requested.connect(loop_requests.append)
+    panel._play_bookmark_button.click()
+    panel._loop_bookmark_button.click()
+    assert play_requests == [segment.id]
+    assert loop_requests == [segment.id]
+
+    panel.select_bookmark(point.id)
+    assert panel._play_bookmark_button.isEnabled() is True
+    assert panel._loop_bookmark_button.isEnabled() is False  # a point has nothing to loop
+
+
 def test_bookmark_selection_populates_inspector(qtbot) -> None:
     window, repo, playlist, media = _build_window(qtbot)
     view = window._waveform_view

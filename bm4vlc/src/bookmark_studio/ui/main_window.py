@@ -36,6 +36,8 @@ class MainWindow(QMainWindow):
     play_selection_requested = Signal(int, int)
     loop_selection_requested = Signal(int, int)
     launch_vlc_requested = Signal()
+    play_bookmark_requested = Signal(object)  # UUID
+    loop_bookmark_requested = Signal(object)  # UUID
 
     def __init__(
         self,
@@ -256,6 +258,8 @@ class MainWindow(QMainWindow):
 
         self._bookmark_panel.bookmark_selected.connect(self._on_bookmark_activated)
         self._bookmark_panel.export_requested.connect(self._on_export_project)
+        self._bookmark_panel.play_bookmark_requested.connect(self.play_bookmark_requested.emit)
+        self._bookmark_panel.loop_bookmark_requested.connect(self.loop_bookmark_requested.emit)
 
         self._inspector.name_committed.connect(self._on_name_committed)
         self._inspector.loop_settings_committed.connect(self._on_loop_settings_committed)

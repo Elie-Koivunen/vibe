@@ -129,6 +129,7 @@ class Application(QObject):
             service=self._waveform_service, repository=self._waveform_repository
         )
         self._waveform_orchestrator.waveform_ready.connect(self._on_waveform_ready)
+        self._waveform_orchestrator.waveform_failed.connect(self._on_waveform_failed)
 
         self._clock = PlaybackClock()
         self._loop_controller = LoopController(adapter, self._clock)
@@ -206,6 +207,8 @@ class Application(QObject):
         self.window.play_selection_requested.connect(self._on_play_selection_requested)
         self.window.loop_selection_requested.connect(self._on_loop_selection_requested)
         self.window.launch_vlc_requested.connect(self.prompt_vlc_launch_dialog)
+        self.window.play_bookmark_requested.connect(self._on_play_bookmark_requested)
+        self.window.loop_bookmark_requested.connect(self._on_loop_bookmark_requested)
 
     # -- launch/attach picker --
     #
@@ -325,6 +328,36 @@ class Application(QObject):
                       completion_action=CompletionAction.CONTINUE)
         )
 
+    def _on_play_bookmark_requested(self, bookmark_id: UUID) -> None:
+        """"another set below that would play explicitly from the bookmark listing
+        itself" -- distinct from Play/Loop Selection (which needs a fresh waveform
+        drag) and from the transport bar (which drives the live VLC playlist, not a
+        specific saved bookmark)."""
+        bookmark = self._bookmark_repository.get(bookmark_id)
+        if bookmark is None:
+            return
+
+        def _play() -> None:
+            self._adapter.seek_absolute_us(bookmark.start_us)
+            self._adapter.play()
+
+        self._fire_and_forget(_play)
+
+    def _on_loop_bookmark_requested(self, bookmark_id: UUID) -> None:
+        bookmark = self._bookmark_repository.get(bookmark_id)
+        if bookmark is None or bookmark.end_us is None:
+            return  # a point bookmark has no range to loop
+
+        from bookmark_studio.domain.loop import LoopSpec
+
+        self._loop_controller.start(
+            LoopSpec(
+                start_us=bookmark.start_us, end_us=bookmark.end_us,
+                repeat_count=bookmark.repeat_count, gap_ms=bookmark.loop_gap_ms,
+                completion_action=bookmark.completion_action,
+            )
+        )
+
     def _current_bookmarks_sorted(self) -> list:
         if self._current_media_id is None:
             return []
@@ -402,12 +435,37 @@ class Application(QObject):
 
             if status.current_playlist_item_id != self._current_vlc_item_id:
                 self._current_vlc_item_id = status.current_playlist_item_id
-                self._on_current_item_changed(status.media_uri, status.duration_us)
+                # StandardHttpPlaybackAdapter.get_status()'s media_uri comes from VLC's
+                # status.json "meta.filename" (see http_fallback._extract_media_uri) --
+                # a bare filename, NOT a resolvable file:// URI. Resolving identity
+                # from it (MediaResolver.resolve) silently created a SECOND, disconnected
+                # Media row every track change: not matched by canonical_uri to the
+                # correctly-resolved playlist entry, and un-fingerprintable (uri_to_local_
+                # path returns None for a bare filename), so _preload_playlist_waveforms'
+                # correctly-decoded-and-cached pyramid arrived under the *other* media_id
+                # and got dropped by _on_waveform_ready's `!= self._current_media_id`
+                # check -- confirmed live, this is why "each song's visual waveform"
+                # never appeared. It also meant bookmarks created while "current"
+                # pointed at this phantom id wouldn't line up with the playlist panel's
+                # bookmark counts. The playlist poll (_on_playlist_result, run at most
+                # 2s ago) already resolved every item's real URI correctly -- look the
+                # current one up there instead, and only fall back to the unreliable
+                # status field if the playlist hasn't been polled yet at all.
+                media_uri = self._resolve_current_item_uri(status.current_playlist_item_id) or status.media_uri
+                self._on_current_item_changed(media_uri, status.duration_us)
         except Exception:  # noqa: BLE001 - spec #104: never crash the UI over one poll
             # A bare `except: pass` here would be exactly the kind of silent failure
             # that made a real bug (see _on_playlist_result) invisible for an entire
             # debugging session -- log the full traceback, don't swallow it quietly.
             self._log.exception("status result handling failed")
+
+    def _resolve_current_item_uri(self, vlc_id: int | None) -> str | None:
+        if vlc_id is None:
+            return None
+        for item in self._playlist_items:
+            if item.vlc_id == vlc_id:
+                return item.uri
+        return None
 
     def _on_status_failed(self, message: str) -> None:
         self._status_inflight = False
@@ -532,6 +590,13 @@ class Application(QObject):
             return  # switched tracks again before this one finished (spec #65)
         duration_us = self.window._waveform_scene._duration_us
         self.window._waveform_scene.set_waveform(pyramid, duration_us)
+
+    def _on_waveform_failed(self, media_id: UUID, message: str) -> None:
+        # Previously connected to nothing at all -- a decode failure (bad/missing
+        # ffmpeg, an unreadable file, an unsupported codec) left the waveform lane
+        # silently blank forever, with no record anywhere of why. Reported live as
+        # "each song's visual waveform" missing.
+        self._log.info("waveform generation failed for media %s: %s", media_id, message)
 
     def _list_ordered_media_ids_for_playlist(self, playlist_id: UUID) -> list[UUID]:
         # Best-effort: uses whatever the synchronizer currently has tracked. A full
