@@ -16,7 +16,9 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QUndoStack
 from PySide6.QtWidgets import QDialog, QMessageBox
 
-from bookmark_studio.app.vlc_launcher import discover_vlc_instances, find_free_http_port, launch_managed_vlc
+from bookmark_studio.app.vlc_launcher import (
+    discover_vlc_instances, find_free_http_port, has_unmanaged_vlc_process, launch_managed_vlc,
+)
 from bookmark_studio.app.waveform_orchestrator import WaveformOrchestrator
 from bookmark_studio.logging.setup import get_logger
 from bookmark_studio.media.resolver import MediaResolver
@@ -228,7 +230,11 @@ class Application(QObject):
             return
 
         instances = discover_vlc_instances(self._settings)
-        dialog = VlcLaunchDialog(instances, self._launch_dialog_media_filter(), parent=self.window)
+        unmanaged_running = not instances and has_unmanaged_vlc_process()
+        dialog = VlcLaunchDialog(
+            instances, self._launch_dialog_media_filter(), parent=self.window,
+            unmanaged_vlc_running=unmanaged_running,
+        )
         if dialog.exec() != QDialog.Accepted:
             return
 

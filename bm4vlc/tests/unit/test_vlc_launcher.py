@@ -9,7 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import QSettings
 
 from bookmark_studio.app.vlc_launcher import (
-    discover_vlc_instances, find_free_http_port, parse_m3u, resolve_startup_media,
+    discover_vlc_instances, find_free_http_port, has_unmanaged_vlc_process, parse_m3u, resolve_startup_media,
 )
 from bookmark_studio.settings.settings_service import SettingsService
 
@@ -63,6 +63,26 @@ def test_find_free_http_port_skips_a_port_already_in_use() -> None:
         assert result != held_port
     finally:
         holder.close()
+
+
+def test_has_unmanaged_vlc_process_true_when_tasklist_lists_vlc(monkeypatch) -> None:
+    import subprocess as subprocess_module
+
+    class _FakeResult:
+        stdout = 'Image Name  PID  \n========  ===  \nvlc.exe   1234  \n'
+
+    monkeypatch.setattr(subprocess_module, "run", lambda *a, **k: _FakeResult())
+    assert has_unmanaged_vlc_process() is True
+
+
+def test_has_unmanaged_vlc_process_false_when_tasklist_finds_nothing(monkeypatch) -> None:
+    import subprocess as subprocess_module
+
+    class _FakeResult:
+        stdout = "INFO: No tasks are running which match the specified criteria.\n"
+
+    monkeypatch.setattr(subprocess_module, "run", lambda *a, **k: _FakeResult())
+    assert has_unmanaged_vlc_process() is False
 
 
 class _FakeVlcHandler(BaseHTTPRequestHandler):

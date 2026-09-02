@@ -21,7 +21,10 @@ class VlcLaunchChoice:
 
 
 class VlcLaunchDialog(QDialog):
-    def __init__(self, instances: list, media_filter: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, instances: list, media_filter: str, parent: QWidget | None = None,
+        *, unmanaged_vlc_running: bool = False,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Launch or Attach to VLC")
         self.setMinimumWidth(420)
@@ -38,6 +41,24 @@ class VlcLaunchDialog(QDialog):
         if not instances:
             self._combo.setCurrentIndex(0)  # only "Launch a new instance..." exists
         layout.addWidget(self._combo)
+
+        if not instances and unmanaged_vlc_running:
+            # Direct fix for "it doesn't recognize preopen existing vlc instances":
+            # a VLC window IS open, but this app genuinely cannot attach to it -- VLC's
+            # remote-control HTTP interface can only be turned on at process launch
+            # (--extraintf=http) or via a persistent choice in VLC's own Preferences,
+            # never toggled onto a process from the outside after the fact. Explaining
+            # that beats a dropdown that just silently has nothing in it.
+            note = QLabel(
+                "A VLC window appears to be open, but it wasn't started with remote "
+                "control enabled, so this app can't attach to it or see its playlist. "
+                "Launching a new instance below won't close it -- you'll end up with "
+                "two VLC windows unless you close the other one yourself first.",
+                self,
+            )
+            note.setWordWrap(True)
+            note.setStyleSheet("color: #866;")
+            layout.addWidget(note)
 
         browse_row = QHBoxLayout()
         self._browse_button = QPushButton("Browse for playlist/media...", self)

@@ -48,6 +48,29 @@ def vlc_user_config_dir() -> Path:
     return Path(appdata) / "vlc"
 
 
+def has_unmanaged_vlc_process() -> bool:
+    """True if a vlc.exe process is running right now, regardless of whether this app
+    can talk to it. Purely informational -- there is no way to attach to it if it
+    wasn't started with --extraintf=http (see discover_vlc_instances): VLC's HTTP
+    remote-control interface can only be enabled at process launch via that flag (or a
+    persistent choice under VLC's own Preferences > Interface > Main interfaces >
+    Web), never toggled onto an already-running instance from the outside. Used only
+    to give the "no instances found" dialog state an honest explanation instead of
+    looking like a bug -- confirmed live: a VLC window the user had open by
+    double-clicking a file has no HTTP interface at all, so it correctly never shows
+    up in discover_vlc_instances(), which was reported as "it doesn't recognize
+    preopen existing vlc instances".
+    """
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq vlc.exe"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "vlc.exe" in result.stdout.lower()
+
+
 def find_free_http_port(preferred: int, *, max_attempts: int = 50) -> int:
     """Picks a port for a new managed VLC instance, starting at `preferred` (the
     configured default) and walking upward until one is free -- needed so a second
