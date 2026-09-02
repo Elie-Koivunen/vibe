@@ -211,9 +211,7 @@ class Application(QObject):
         self.window._waveform_scene.seek_requested.connect(
             lambda time_us: self._fire_and_forget(lambda: self._adapter.seek_absolute_us(time_us))
         )
-        self.window._playlist_panel.item_double_clicked.connect(
-            lambda vlc_id: self._fire_and_forget(lambda: self._adapter.goto_item(vlc_id))
-        )
+        self.window._playlist_panel.item_double_clicked.connect(self._on_playlist_item_double_clicked)
         self.window._playlist_panel.item_selected.connect(self._on_playlist_item_selected)
         self.window._playlist_panel.follow_vlc_toggled.connect(self._on_follow_vlc_toggled)
         self.window.play_selection_requested.connect(self._on_play_selection_requested)
@@ -479,6 +477,22 @@ class Application(QObject):
         # to the unreliable status field if the playlist hasn't been polled yet at all.
         media_uri = self._resolve_current_item_uri(status.current_playlist_item_id) or status.media_uri
         self._on_current_item_changed(media_uri, status.duration_us)
+
+    def _on_playlist_item_double_clicked(self, vlc_id: int) -> None:
+        """"when i double click a song, i want it to play the song" -- goto_item()
+        already sends VLC's pl_play&id=<X>, which does start playback; what actually
+        broke the visible feedback is that Qt fires a single-click selection-changed
+        event as the first half of a double-click, which ran _on_playlist_item_selected
+        and switched off "Follow currently playing VLC song" (see that method) a
+        moment before this handler runs -- so the waveform/breadcrumb silently kept
+        showing the just-clicked song's PREVIEW instead of advancing to reflect actual
+        playback, reading as "double-click doesn't play". Explicitly re-enabling
+        follow here means a double-click always ends up watching the track it just
+        told VLC to play, even though the status poll that confirms the switch
+        happened arrives a moment later.
+        """
+        self.window._playlist_panel.set_follow_vlc(True)
+        self._fire_and_forget(lambda: self._adapter.goto_item(vlc_id))
 
     def _on_playlist_item_selected(self, vlc_id: int) -> None:
         """Direct user request: "when a user clicks through the songs, [the waveform]

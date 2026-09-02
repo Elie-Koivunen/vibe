@@ -68,10 +68,14 @@ class MockPlaybackAdapter:
             self._time_us = 0
 
     def goto_item(self, vlc_id: int) -> None:
+        # Matches real VLC: the built-in HTTP interface's pl_play&id=<X> (what
+        # StandardHttpPlaybackAdapter.goto_item sends) both switches to and starts
+        # playing that item, not just selects it.
         for index, item in enumerate(self._playlist):
             if item.vlc_id == vlc_id:
                 self._current_index = index
                 self._time_us = 0
+                self._state = "playing"
                 return
         raise ValueError(f"unknown vlc playlist item id {vlc_id}")
 

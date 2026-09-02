@@ -68,13 +68,23 @@ class TransportBar(QWidget):
             return button
 
         # Larger, more standard media-control glyphs per direct user feedback
-        # ("use better icons in the control button, larger ones").
+        # ("use better icons in the control button, larger ones"). Play/Pause/Stop
+        # (plus the seeks flanking them) are centered as their own cluster -- direct
+        # follow-up request: "moved to the middle to reflect that they control the
+        # playback of the playlist", distinct from track/bookmark navigation on the
+        # outer edges.
         self.previous_bookmark_button = add_button("⏮", self.previous_bookmark_clicked, tooltip="Previous bookmark")
         self.previous_track_button = add_button("⏪", self.previous_track_clicked, tooltip="Previous track")
+
+        layout.addStretch(1)
+
         self.seek_back_button = add_button("−5s", self.seek_back_clicked, tooltip="Seek back 5 seconds")
         self.stop_button = add_button("⏹", self.stop_clicked, tooltip="Stop")
         self.play_pause_button = add_button("▶ ⏸", self.play_pause_clicked, tooltip="Play / Pause")
         self.seek_forward_button = add_button("+5s", self.seek_forward_clicked, tooltip="Seek forward 5 seconds")
+
+        layout.addStretch(1)
+
         self.next_track_button = add_button("⏩", self.next_track_clicked, tooltip="Next track")
         self.next_bookmark_button = add_button("⏭", self.next_bookmark_clicked, tooltip="Next bookmark")
 

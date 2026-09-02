@@ -370,6 +370,37 @@ def test_re_enabling_follow_snaps_back_to_the_actually_playing_track(qtbot, runn
     assert app._current_vlc_item_id == 1
 
 
+def test_double_click_playlist_item_plays_it_and_the_view_follows(qtbot, running_app) -> None:
+    """Direct user request: "when i double click a song, i want it to play the song".
+    goto_item() already commands VLC to play; the real gap was that a single-click
+    selection-change fires as the first half of a double-click and disabled "Follow
+    currently playing VLC song" a moment before this ran, so the view silently never
+    advanced to the newly-playing track. Double-click must always end up following.
+    """
+    adapter = MockPlaybackAdapter(
+        [
+            VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0),
+            VlcPlaylistItem(vlc_id=2, uri="file:///b.mp3", name="Song B", duration_s=20.0),
+        ]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._actually_playing_vlc_item_id == 1, timeout=3000)
+
+    # Simulate the single-click half of the gesture disabling follow, exactly as a
+    # real double-click's first click does.
+    app._on_playlist_item_selected(2)
+    assert app.window._playlist_panel.follow_vlc_enabled() is False
+
+    app._on_playlist_item_double_clicked(2)
+
+    qtbot.waitUntil(lambda: adapter.get_status().state == "playing", timeout=3000)
+    assert adapter.get_status().current_playlist_item_id == 2
+    assert app.window._playlist_panel.follow_vlc_enabled() is True
+    qtbot.waitUntil(lambda: app._actually_playing_vlc_item_id == 2, timeout=3000)
+    qtbot.waitUntil(lambda: app._current_vlc_item_id == 2, timeout=3000)
+
+
 def test_offline_start_does_not_crash(qtbot, running_app) -> None:
     """spec #104: VLC unreachable must not prevent the app from starting."""
     adapter = MockPlaybackAdapter([])
