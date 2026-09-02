@@ -84,6 +84,15 @@ class BookmarkPanel(QWidget):
         header = self._tree.header()
         header.setSectionsMovable(True)
         header.setSectionResizeMode(QHeaderView.Interactive)
+        # Direct user request: "i should be able to just click and drag the entry up
+        # and down instead of relying on separate buttons" -- Move Up/Down (below)
+        # stay as a fallback, but this is the primary way to reorder now.
+        self._tree.setDragDropMode(QTreeWidget.InternalMove)
+        self._tree.setDragEnabled(True)
+        self._tree.setAcceptDrops(True)
+        self._tree.setDropIndicatorShown(True)
+        self._tree.setRootIsDecorated(False)
+        self._tree.model().rowsMoved.connect(self._on_rows_moved)
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         layout.addWidget(self._tree)
@@ -140,6 +149,14 @@ class BookmarkPanel(QWidget):
             return
         ordered_ids = [self._tree.topLevelItem(i).data(0, USER_ROLE) for i in range(self._tree.topLevelItemCount())]
         ordered_ids[index], ordered_ids[new_index] = ordered_ids[new_index], ordered_ids[index]
+        self.reorder_requested.emit(ordered_ids)
+
+    def _on_rows_moved(self, *_args) -> None:
+        """Fires after Qt's own internal drag-drop reorder has already rearranged the
+        tree's rows -- just read the new order back out and ask the caller to
+        persist it, same as a Move Up/Down click.
+        """
+        ordered_ids = [self._tree.topLevelItem(i).data(0, USER_ROLE) for i in range(self._tree.topLevelItemCount())]
         self.reorder_requested.emit(ordered_ids)
 
     def set_bookmarks(self, bookmarks: list[Bookmark], song_names: dict[UUID, str] | None = None) -> None:

@@ -270,6 +270,81 @@ def test_play_bookmark_requested_seeks_and_plays(qtbot, running_app) -> None:
     qtbot.waitUntil(lambda: adapter.get_status().state == "playing", timeout=3000)
 
 
+def test_play_bookmark_requested_switches_song_when_bookmark_belongs_to_a_different_one(
+    qtbot, running_app
+) -> None:
+    """Regression, reported live once the bookmark list started spanning every song:
+    "there is a bug as it plays only the first songs bookmarks" -- Play Bookmark only
+    ever seeked whatever VLC currently had loaded, never switching to the bookmark's
+    own song first, so a bookmark belonging to a different (not-currently-playing)
+    song silently landed at the right offset inside the WRONG track.
+    """
+    from uuid import uuid4
+
+    from bookmark_studio.domain.bookmark import Bookmark
+    from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
+
+    adapter = MockPlaybackAdapter(
+        [
+            VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=60.0),
+            VlcPlaylistItem(vlc_id=2, uri="file:///b.mp3", name="Song B", duration_s=60.0),
+        ]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
+    assert adapter.get_status().current_playlist_item_id == 1  # Song A is playing
+
+    media_b = app._media_resolver.resolve("file:///b.mp3")
+    bookmark = Bookmark(
+        id=uuid4(), playlist_id=app._synchronizer.active_playlist_id, media_id=media_b.id,
+        scope=BookmarkScope.PLAYLIST_MEDIA, lane_id=None, bookmark_type=BookmarkType.SEGMENT,
+        name="Chorus", start_us=20_000_000, end_us=30_000_000, loop_enabled=True, repeat_count=3,
+        loop_gap_ms=500, completion_action=CompletionAction.STOP,
+    )
+    app._bookmark_repository.insert(bookmark)
+
+    app._on_play_bookmark_requested(bookmark.id)
+
+    qtbot.waitUntil(lambda: adapter.get_status().current_playlist_item_id == 2, timeout=3000)
+    qtbot.waitUntil(lambda: adapter.get_status().time_us == 20_000_000, timeout=3000)
+    assert adapter.get_status().state == "playing"
+
+
+def test_loop_bookmark_requested_switches_song_when_bookmark_belongs_to_a_different_one(
+    qtbot, running_app
+) -> None:
+    from uuid import uuid4
+
+    from bookmark_studio.domain.bookmark import Bookmark
+    from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
+
+    adapter = MockPlaybackAdapter(
+        [
+            VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=60.0),
+            VlcPlaylistItem(vlc_id=2, uri="file:///b.mp3", name="Song B", duration_s=60.0),
+        ]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
+
+    media_b = app._media_resolver.resolve("file:///b.mp3")
+    bookmark = Bookmark(
+        id=uuid4(), playlist_id=app._synchronizer.active_playlist_id, media_id=media_b.id,
+        scope=BookmarkScope.PLAYLIST_MEDIA, lane_id=None, bookmark_type=BookmarkType.SEGMENT,
+        name="Chorus", start_us=20_000_000, end_us=30_000_000, loop_enabled=True, repeat_count=3,
+        loop_gap_ms=500, completion_action=CompletionAction.STOP,
+    )
+    app._bookmark_repository.insert(bookmark)
+
+    app._on_loop_bookmark_requested(bookmark.id)
+
+    assert adapter.get_status().current_playlist_item_id == 2
+    assert app._loop_controller.spec.start_us == 20_000_000
+    assert app._loop_controller.spec.end_us == 30_000_000
+
+
 def test_loop_bookmark_requested_starts_loop_with_its_own_saved_settings(qtbot, running_app) -> None:
     from uuid import uuid4
 

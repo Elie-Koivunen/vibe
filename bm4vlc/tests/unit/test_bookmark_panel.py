@@ -87,6 +87,31 @@ def test_set_bookmarks_preserves_the_given_order_not_start_us(qtbot) -> None:
     assert panel._tree.topLevelItem(1).text(1) == "Earlier"
 
 
+def test_drag_reorder_via_on_rows_moved_emits_the_new_order(qtbot) -> None:
+    """Direct user request: "i should be able to just click and drag the entry up
+    and down instead of relying on separate buttons". Qt's InternalMove drag-drop
+    already rearranges the tree's rows itself before emitting rowsMoved -- simulate
+    that by moving the item directly, then confirm the handler reads back and emits
+    the resulting order.
+    """
+    panel = BookmarkPanel()
+    qtbot.addWidget(panel)
+    media_id = uuid4()
+    first = _bookmark(media_id, "First", 1_000_000)
+    second = _bookmark(media_id, "Second", 2_000_000)
+    panel.set_bookmarks([first, second], {media_id: "Song"})
+
+    # Simulate what Qt's InternalMove drag-drop does to the tree before rowsMoved fires.
+    moved = panel._tree.takeTopLevelItem(1)
+    panel._tree.insertTopLevelItem(0, moved)
+
+    requests = []
+    panel.reorder_requested.connect(requests.append)
+    panel._on_rows_moved()
+
+    assert requests == [[second.id, first.id]]
+
+
 def test_set_bookmarks_preserves_selection_across_refresh(qtbot) -> None:
     panel = BookmarkPanel()
     qtbot.addWidget(panel)

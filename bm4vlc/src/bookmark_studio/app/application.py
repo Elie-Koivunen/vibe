@@ -349,16 +349,44 @@ class Application(QObject):
                       completion_action=CompletionAction.CONTINUE)
         )
 
+    def _vlc_id_for_media(self, media_id: UUID) -> int | None:
+        """Maps a bookmark's media_id back to the live VLC playlist item id that
+        plays it, by resolving each currently-known playlist item's URI the same way
+        _on_playlist_result already does (MediaResolver.resolve is idempotent -- an
+        already-resolved URI just returns the existing record, no new DB writes).
+        """
+        for item in self._playlist_items:
+            if not item.uri:
+                continue
+            try:
+                media = self._media_resolver.resolve(item.uri)
+            except Exception:  # noqa: BLE001 - best-effort lookup, see callers
+                continue
+            if media.id == media_id:
+                return item.vlc_id
+        return None
+
     def _on_play_bookmark_requested(self, bookmark_id: UUID) -> None:
         """"another set below that would play explicitly from the bookmark listing
         itself" -- distinct from Play/Loop Selection (which needs a fresh waveform
         drag) and from the transport bar (which drives the live VLC playlist, not a
-        specific saved bookmark)."""
+        specific saved bookmark).
+
+        Regression, reported live now that the bookmark list spans every song: this
+        only ever seeked *whatever VLC currently had loaded*, never switching to the
+        bookmark's own song first -- so playing a bookmark that belonged to a
+        different song than whatever was already playing silently landed at the
+        bookmark's start_us offset inside the WRONG track. goto_item() (VLC's
+        pl_play&id=<X>) switches song and starts playing before the seek lands.
+        """
         bookmark = self._bookmark_repository.get(bookmark_id)
         if bookmark is None:
             return
+        vlc_id = self._vlc_id_for_media(bookmark.media_id)
 
         def _play() -> None:
+            if vlc_id is not None:
+                self._adapter.goto_item(vlc_id)
             self._adapter.seek_absolute_us(bookmark.start_us)
             self._adapter.play()
 
@@ -368,6 +396,15 @@ class Application(QObject):
         bookmark = self._bookmark_repository.get(bookmark_id)
         if bookmark is None or bookmark.end_us is None:
             return  # a point bookmark has no range to loop
+
+        # Same cross-song fix as _on_play_bookmark_requested. Switches synchronously
+        # (not via _fire_and_forget) because LoopController.start() itself already
+        # runs its seek/play synchronously on the calling (main) thread -- matches
+        # the codebase's existing behavior for _on_loop_selection_requested, and
+        # guarantees the song switch has actually landed before the loop's own seek.
+        vlc_id = self._vlc_id_for_media(bookmark.media_id)
+        if vlc_id is not None:
+            self._adapter.goto_item(vlc_id)
 
         from bookmark_studio.domain.loop import LoopSpec
 
