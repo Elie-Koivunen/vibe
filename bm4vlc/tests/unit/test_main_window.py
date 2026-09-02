@@ -278,6 +278,28 @@ def test_inspector_start_end_fields_are_editable_and_persist(qtbot) -> None:
     assert repo.get(bookmark.id).start_us == 500_000
 
 
+def test_inspector_start_field_commits_on_real_enter_keypress(qtbot) -> None:
+    """Same as test_inspector_start_end_fields_are_editable_and_persist but drives
+    the field the way a real user does -- select all, type, press Enter -- to prove
+    QLineEdit.editingFinished actually reaches _on_inspector_start_committed, not
+    just that the handler is correct when called directly.
+    """
+    window, repo, playlist, media = _build_window(qtbot)
+    from bookmark_studio.domain.selection import Selection
+
+    window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=3_000_000))
+    window._bookmark_selection_button.click()
+    bookmark = repo.list_for_playlist_media(playlist.id, media.id)[0]
+
+    edit = window._inspector._start_edit
+    edit.setFocus()
+    edit.selectAll()
+    QTest.keyClicks(edit, "00:00:00.500")
+    QTest.keyClick(edit, Qt.Key_Return)
+
+    assert repo.get(bookmark.id).start_us == 500_000
+
+
 def test_dragging_a_bookmark_on_the_waveform_refreshes_the_open_inspector(qtbot) -> None:
     """Direct user request: "if the bookmark is adjusted, it should automatically
     update the bookmark values" -- dragging/resizing a bookmark on the waveform
