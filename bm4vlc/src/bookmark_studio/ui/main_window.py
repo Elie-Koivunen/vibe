@@ -17,7 +17,7 @@ from bookmark_studio.app.commands import (
     RenameBookmarkCommand,
     ResizeBookmarkCommand,
 )
-from bookmark_studio.domain.bookmark import Bookmark
+from bookmark_studio.domain.bookmark import Bookmark, default_bookmark_name
 from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
 from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
 from bookmark_studio.ui.bookmark_panel import BookmarkPanel
@@ -386,7 +386,7 @@ class MainWindow(QMainWindow):
             scope=BookmarkScope.PLAYLIST_MEDIA if self._current_playlist_id else BookmarkScope.GLOBAL_MEDIA,
             lane_id=None,
             bookmark_type=BookmarkType.SEGMENT,
-            name="New bookmark",
+            name=default_bookmark_name(),
             start_us=selection.start_us,
             end_us=selection.end_us,
             loop_enabled=False,
@@ -438,7 +438,7 @@ class MainWindow(QMainWindow):
             scope=BookmarkScope.PLAYLIST_MEDIA if self._current_playlist_id else BookmarkScope.GLOBAL_MEDIA,
             lane_id=None,
             bookmark_type=BookmarkType.POINT,
-            name="New bookmark",
+            name=default_bookmark_name(),
             start_us=time_us,
             end_us=None,
             loop_enabled=False,

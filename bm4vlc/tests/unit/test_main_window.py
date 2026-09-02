@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from uuid import uuid4
 
@@ -180,7 +181,7 @@ def test_bookmark_selection_populates_inspector(qtbot) -> None:
     bookmark = repo.list_for_playlist_media(playlist.id, media.id)[0]
 
     window._on_bookmark_activated(bookmark.id)
-    assert window._inspector._name_edit.text() == "New bookmark"
+    assert window._inspector._name_edit.text() == bookmark.name
 
 
 def test_selection_bar_disabled_until_a_selection_exists(qtbot) -> None:
@@ -214,7 +215,10 @@ def test_bookmark_selection_button_creates_segment_bookmark_and_populates_inspec
     # offscreen Qt platform used for headless testing does not fully provide, so
     # hasFocus() is unreliable in this environment regardless of correct app behavior.
     assert window._inspector.current_bookmark().id == bookmarks[0].id
-    assert window._inspector._name_edit.selectedText() == "New bookmark"
+    assert window._inspector._name_edit.selectedText() == bookmarks[0].name
+    # Direct user request: default name is "bookmark-<date>-<6 alphanumeric chars>",
+    # not a flat "New bookmark" that's identical for every bookmark in a session.
+    assert re.fullmatch(r"bookmark-\d{8}-[a-z0-9]{6}", bookmarks[0].name)
 
     # Selection is cleared after committing it as a bookmark.
     assert window._waveform_scene.selection() is None
@@ -289,6 +293,7 @@ def test_rename_via_inspector_pushes_undo_command(qtbot) -> None:
     pos = view.mapFromScene(time_us_to_scene_x(1_000_000), 40)
     QTest.mouseDClick(view.viewport(), Qt.LeftButton, pos=pos)
     bookmark = repo.list_for_playlist_media(playlist.id, media.id)[0]
+    original_name = bookmark.name
     window._on_bookmark_activated(bookmark.id)
 
     window._inspector._name_edit.setText("Renamed")
@@ -298,4 +303,4 @@ def test_rename_via_inspector_pushes_undo_command(qtbot) -> None:
     assert updated.name == "Renamed"
 
     window._undo_stack.undo()
-    assert repo.get(bookmark.id).name == "New bookmark"
+    assert repo.get(bookmark.id).name == original_name

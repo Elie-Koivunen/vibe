@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import secrets
+import string
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
@@ -11,6 +14,21 @@ class InvalidBookmarkRange(ValueError):
 
 
 MIN_SEGMENT_DURATION_US = 50_000
+
+_NAME_SUFFIX_ALPHABET = string.ascii_lowercase + string.digits
+
+
+def default_bookmark_name() -> str:
+    """"bookmark-<date>-<6 alphanumeric random unique string>" -- direct user request
+    to replace a flat, indistinguishable "New bookmark" default (every bookmark in a
+    session ended up with the identical name until manually renamed). secrets.choice
+    (not random) since this only needs to not collide within one person's bookmark
+    list, not be cryptographically unguessable -- but the module's already the right
+    tool and avoids seeding concerns.
+    """
+    date_part = datetime.now().strftime("%Y%m%d")
+    suffix = "".join(secrets.choice(_NAME_SUFFIX_ALPHABET) for _ in range(6))
+    return f"bookmark-{date_part}-{suffix}"
 
 
 @dataclass(frozen=True, slots=True)

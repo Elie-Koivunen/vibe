@@ -1,9 +1,23 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 
-from bookmark_studio.domain.bookmark import InvalidBookmarkRange, validate_bookmark_range
+from bookmark_studio.domain.bookmark import InvalidBookmarkRange, default_bookmark_name, validate_bookmark_range
 from bookmark_studio.domain.enums import BookmarkType
+
+
+def test_default_bookmark_name_matches_bookmark_date_random_format() -> None:
+    """Direct user request: default name is "bookmark-<date>-<6 alphanumeric random
+    unique string>", not a flat "New bookmark" identical across every bookmark."""
+    name = default_bookmark_name()
+    assert re.fullmatch(r"bookmark-\d{8}-[a-z0-9]{6}", name)
+
+
+def test_default_bookmark_name_is_unique_across_calls() -> None:
+    names = {default_bookmark_name() for _ in range(50)}
+    assert len(names) == 50
 
 
 def test_point_bookmark_allows_no_end() -> None:
