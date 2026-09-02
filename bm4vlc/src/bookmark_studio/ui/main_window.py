@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QUndoStack
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
 from bookmark_studio.app.commands import (
@@ -84,6 +84,26 @@ class MainWindow(QMainWindow):
 
         self._selection_label = QLabel("No selection", self)
         layout.addWidget(self._selection_label)
+
+        # Direct user request: "add additional fields to display start/end time based
+        # on how the bookmark is highlighted" -- editable, so a drag-selection can be
+        # fine-tuned numerically before turning it into a bookmark, not just read.
+        self._selection_start_edit = QLineEdit(self)
+        self._selection_start_edit.setPlaceholderText("Start")
+        self._selection_start_edit.setMaximumWidth(110)
+        self._selection_start_edit.setEnabled(False)
+        self._selection_start_edit.editingFinished.connect(self._on_selection_start_edited)
+        layout.addWidget(self._selection_start_edit)
+
+        layout.addWidget(QLabel("→", self))
+
+        self._selection_end_edit = QLineEdit(self)
+        self._selection_end_edit.setPlaceholderText("End")
+        self._selection_end_edit.setMaximumWidth(110)
+        self._selection_end_edit.setEnabled(False)
+        self._selection_end_edit.editingFinished.connect(self._on_selection_end_edited)
+        layout.addWidget(self._selection_end_edit)
+
         layout.addStretch(1)
 
         # Explicit, always-visible zoom controls (spec #84's Ctrl+wheel/Ctrl+0 still
@@ -289,14 +309,64 @@ class MainWindow(QMainWindow):
         from bookmark_studio.ui.transport import format_timecode
 
         if isinstance(selection, Selection):
-            self._selection_label.setText(
-                f"Selection: {format_timecode(selection.start_us)} → "
-                f"{format_timecode(selection.end_us)} ({format_timecode(selection.duration_us)})"
-            )
+            # Start/end now live in the dedicated fields next to this label (below) --
+            # repeating them here as well was redundant and crowded the toolbar row.
+            self._selection_label.setText(f"Selection ({format_timecode(selection.duration_us)})")
+            # Only resync from the model when the field doesn't already show this
+            # value -- editingFinished() already applied the typed value locally, and
+            # overwriting mid-edit-cycle would just echo back exactly what the user
+            # typed, but doing it unconditionally would also clobber the cursor/
+            # selection state in the field for no reason.
+            start_text = format_timecode(selection.start_us)
+            if self._selection_start_edit.text() != start_text:
+                self._selection_start_edit.setText(start_text)
+            end_text = format_timecode(selection.end_us)
+            if self._selection_end_edit.text() != end_text:
+                self._selection_end_edit.setText(end_text)
+            self._selection_start_edit.setEnabled(True)
+            self._selection_end_edit.setEnabled(True)
             self._set_selection_buttons_enabled(True)
         else:
             self._selection_label.setText("No selection")
+            self._selection_start_edit.clear()
+            self._selection_end_edit.clear()
+            self._selection_start_edit.setEnabled(False)
+            self._selection_end_edit.setEnabled(False)
             self._set_selection_buttons_enabled(False)
+
+    def _on_selection_start_edited(self) -> None:
+        from bookmark_studio.domain.selection import Selection
+        from bookmark_studio.ui.transport import format_timecode, parse_timecode
+
+        selection = self._waveform_scene.selection()
+        if selection is None:
+            return
+        try:
+            new_start_us = parse_timecode(self._selection_start_edit.text())
+        except ValueError:
+            self._selection_start_edit.setText(format_timecode(selection.start_us))
+            return
+        if new_start_us < 0 or new_start_us >= selection.end_us:
+            self._selection_start_edit.setText(format_timecode(selection.start_us))
+            return
+        self._waveform_scene.set_selection(Selection(start_us=new_start_us, end_us=selection.end_us))
+
+    def _on_selection_end_edited(self) -> None:
+        from bookmark_studio.domain.selection import Selection
+        from bookmark_studio.ui.transport import format_timecode, parse_timecode
+
+        selection = self._waveform_scene.selection()
+        if selection is None:
+            return
+        try:
+            new_end_us = parse_timecode(self._selection_end_edit.text())
+        except ValueError:
+            self._selection_end_edit.setText(format_timecode(selection.end_us))
+            return
+        if new_end_us <= selection.start_us:
+            self._selection_end_edit.setText(format_timecode(selection.end_us))
+            return
+        self._waveform_scene.set_selection(Selection(start_us=selection.start_us, end_us=new_end_us))
 
     def _on_bookmark_selection_clicked(self) -> None:
         selection = self._waveform_scene.selection()

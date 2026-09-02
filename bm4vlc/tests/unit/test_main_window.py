@@ -120,6 +120,38 @@ def test_bookmark_panel_play_loop_buttons_track_selection(qtbot) -> None:
     assert panel._loop_bookmark_button.isEnabled() is False  # a point has nothing to loop
 
 
+def test_selection_start_end_fields_track_and_edit_the_selection(qtbot) -> None:
+    """Direct user request: "add additional fields to display start/end time based on
+    how the bookmark is highlighted"."""
+    from bookmark_studio.domain.selection import Selection
+
+    window, _repo, _playlist, _media = _build_window(qtbot)
+    assert window._selection_start_edit.isEnabled() is False
+
+    window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=2_000_000))
+    assert window._selection_start_edit.text() == "00:00:01.000"
+    assert window._selection_end_edit.text() == "00:00:02.000"
+    assert window._selection_start_edit.isEnabled() is True
+
+    window._selection_start_edit.setText("00:00:00.500")
+    window._selection_start_edit.editingFinished.emit()
+    assert window._waveform_scene.selection().start_us == 500_000
+
+    window._selection_end_edit.setText("00:00:03.000")
+    window._selection_end_edit.editingFinished.emit()
+    assert window._waveform_scene.selection().end_us == 3_000_000
+
+    # An edit that would make start >= end is rejected and the field reverts.
+    window._selection_start_edit.setText("00:00:10.000")
+    window._selection_start_edit.editingFinished.emit()
+    assert window._waveform_scene.selection().start_us == 500_000
+    assert window._selection_start_edit.text() == "00:00:00.500"
+
+    window._waveform_scene.clear_selection()
+    assert window._selection_start_edit.text() == ""
+    assert window._selection_start_edit.isEnabled() is False
+
+
 def test_bookmark_selection_populates_inspector(qtbot) -> None:
     window, repo, playlist, media = _build_window(qtbot)
     view = window._waveform_view
@@ -139,7 +171,7 @@ def test_selection_bar_disabled_until_a_selection_exists(qtbot) -> None:
     from bookmark_studio.domain.selection import Selection
     window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=2_000_000))
     assert window._bookmark_selection_button.isEnabled()
-    assert "Selection:" in window._selection_label.text()
+    assert "Selection" in window._selection_label.text()
 
     window._waveform_scene.clear_selection()
     assert not window._bookmark_selection_button.isEnabled()

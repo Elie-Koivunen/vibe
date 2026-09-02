@@ -321,6 +321,55 @@ def test_loop_bookmark_requested_is_a_noop_for_a_point_bookmark(qtbot, running_a
     assert app._loop_controller.spec is None
 
 
+def test_playlist_item_selected_previews_without_disturbing_actual_playback(qtbot, running_app) -> None:
+    """Direct user request: "when a user clicks through the songs, it is instantly
+    visible" -- a single click on a DIFFERENT song than the one actually playing must
+    switch the displayed waveform/context without telling VLC to change tracks, and
+    must turn off "Follow currently playing VLC song" so a later status poll doesn't
+    immediately snap the view back.
+    """
+    adapter = MockPlaybackAdapter(
+        [
+            VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0),
+            VlcPlaylistItem(vlc_id=2, uri="file:///b.mp3", name="Song B", duration_s=20.0),
+        ]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._actually_playing_vlc_item_id == 1, timeout=3000)
+    playing_media_id = app._current_media_id
+    assert app.window._playlist_panel.follow_vlc_enabled() is True
+
+    app._on_playlist_item_selected(2)
+
+    assert app._current_vlc_item_id == 2
+    assert app._current_media_id != playing_media_id
+    assert app._actually_playing_vlc_item_id == 1  # actual playback untouched
+    assert app.window._playlist_panel.follow_vlc_enabled() is False
+
+    # A later poll must not overwrite the preview: still previewing item 2.
+    qtbot.wait(600)
+    assert app._current_vlc_item_id == 2
+
+
+def test_re_enabling_follow_snaps_back_to_the_actually_playing_track(qtbot, running_app) -> None:
+    adapter = MockPlaybackAdapter(
+        [
+            VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0),
+            VlcPlaylistItem(vlc_id=2, uri="file:///b.mp3", name="Song B", duration_s=20.0),
+        ]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._actually_playing_vlc_item_id == 1, timeout=3000)
+
+    app._on_playlist_item_selected(2)
+    assert app._current_vlc_item_id == 2
+
+    app.window._playlist_panel.set_follow_vlc(True)
+    assert app._current_vlc_item_id == 1
+
+
 def test_offline_start_does_not_crash(qtbot, running_app) -> None:
     """spec #104: VLC unreachable must not prevent the app from starting."""
     adapter = MockPlaybackAdapter([])

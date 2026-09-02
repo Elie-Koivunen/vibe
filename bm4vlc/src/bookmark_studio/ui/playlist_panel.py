@@ -66,6 +66,14 @@ class PlaylistPanel(QWidget):
         self._current_playing_id = vlc_id
         self._rebuild()
 
+    def set_follow_vlc(self, enabled: bool) -> None:
+        """Programmatic version of the checkbox -- used when previewing a different,
+        not-currently-playing song single-clicks the checkbox off (see
+        Application._on_playlist_item_selected) so live playback progression doesn't
+        yank the waveform view away from what the user just chose to look at.
+        """
+        self._follow_checkbox.setChecked(enabled)
+
     def follow_vlc_enabled(self) -> bool:
         return self._follow_checkbox.isChecked()
 

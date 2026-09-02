@@ -139,7 +139,15 @@ class Application(QObject):
         self.window = MainWindow(self._bookmark_repository, undo_stack=QUndoStack(self))
 
         self._current_media_id: UUID | None = None
-        self._current_vlc_item_id: int | None = None
+        self._current_vlc_item_id: int | None = None  # the item DISPLAYED in the waveform/bookmark panel
+        # The item VLC is actually playing right now -- tracked separately from
+        # _current_vlc_item_id so a single-click "preview a different song" (see
+        # _on_playlist_item_selected) can show that song's waveform/bookmarks without
+        # that being overwritten on the next status poll just because playback moved
+        # on. Direct user request: "when a user clicks through the songs, it is
+        # instantly visible" (click != play, matching "if the user double clicks ...
+        # it would automatically start playing" as the distinct play action).
+        self._actually_playing_vlc_item_id: int | None = None
         self._last_playback_state: str = "stopped"
         self._playlist_items: list = []
         self._connected = False
@@ -206,6 +214,8 @@ class Application(QObject):
         self.window._playlist_panel.item_double_clicked.connect(
             lambda vlc_id: self._fire_and_forget(lambda: self._adapter.goto_item(vlc_id))
         )
+        self.window._playlist_panel.item_selected.connect(self._on_playlist_item_selected)
+        self.window._playlist_panel.follow_vlc_toggled.connect(self._on_follow_vlc_toggled)
         self.window.play_selection_requested.connect(self._on_play_selection_requested)
         self.window.loop_selection_requested.connect(self._on_loop_selection_requested)
         self.window.launch_vlc_requested.connect(self.prompt_vlc_launch_dialog)
@@ -439,39 +449,76 @@ class Application(QObject):
             self.window._playlist_panel.set_current_playing(status.current_playlist_item_id)
             self._loop_controller.on_tick()
 
-            if status.current_playlist_item_id != self._current_vlc_item_id:
-                self._current_vlc_item_id = status.current_playlist_item_id
-                # StandardHttpPlaybackAdapter.get_status()'s media_uri comes from VLC's
-                # status.json "meta.filename" (see http_fallback._extract_media_uri) --
-                # a bare filename, NOT a resolvable file:// URI. Resolving identity
-                # from it (MediaResolver.resolve) silently created a SECOND, disconnected
-                # Media row every track change: not matched by canonical_uri to the
-                # correctly-resolved playlist entry, and un-fingerprintable (uri_to_local_
-                # path returns None for a bare filename), so _preload_playlist_waveforms'
-                # correctly-decoded-and-cached pyramid arrived under the *other* media_id
-                # and got dropped by _on_waveform_ready's `!= self._current_media_id`
-                # check -- confirmed live, this is why "each song's visual waveform"
-                # never appeared. It also meant bookmarks created while "current"
-                # pointed at this phantom id wouldn't line up with the playlist panel's
-                # bookmark counts. The playlist poll (_on_playlist_result, run at most
-                # 2s ago) already resolved every item's real URI correctly -- look the
-                # current one up there instead, and only fall back to the unreliable
-                # status field if the playlist hasn't been polled yet at all.
-                media_uri = self._resolve_current_item_uri(status.current_playlist_item_id) or status.media_uri
-                self._on_current_item_changed(media_uri, status.duration_us)
+            if status.current_playlist_item_id != self._actually_playing_vlc_item_id:
+                self._actually_playing_vlc_item_id = status.current_playlist_item_id
+                self._apply_actually_playing_item_if_following(status)
         except Exception:  # noqa: BLE001 - spec #104: never crash the UI over one poll
             # A bare `except: pass` here would be exactly the kind of silent failure
             # that made a real bug (see _on_playlist_result) invisible for an entire
             # debugging session -- log the full traceback, don't swallow it quietly.
             self._log.exception("status result handling failed")
 
-    def _resolve_current_item_uri(self, vlc_id: int | None) -> str | None:
+    def _apply_actually_playing_item_if_following(self, status) -> None:
+        if not self.window._playlist_panel.follow_vlc_enabled():
+            return  # user is previewing a different song -- see _on_playlist_item_selected
+        self._current_vlc_item_id = status.current_playlist_item_id
+        # StandardHttpPlaybackAdapter.get_status()'s media_uri comes from VLC's
+        # status.json "meta.filename" (see http_fallback._extract_media_uri) -- a bare
+        # filename, NOT a resolvable file:// URI. Resolving identity from it
+        # (MediaResolver.resolve) silently created a SECOND, disconnected Media row
+        # every track change: not matched by canonical_uri to the correctly-resolved
+        # playlist entry, and un-fingerprintable (uri_to_local_path returns None for a
+        # bare filename), so _preload_playlist_waveforms' correctly-decoded-and-cached
+        # pyramid arrived under the *other* media_id and got dropped by
+        # _on_waveform_ready's `!= self._current_media_id` check -- confirmed live,
+        # this is why "each song's visual waveform" never appeared. It also meant
+        # bookmarks created while "current" pointed at this phantom id wouldn't line
+        # up with the playlist panel's bookmark counts. The playlist poll
+        # (_on_playlist_result, run at most 2s ago) already resolved every item's real
+        # URI correctly -- look the current one up there instead, and only fall back
+        # to the unreliable status field if the playlist hasn't been polled yet at all.
+        media_uri = self._resolve_current_item_uri(status.current_playlist_item_id) or status.media_uri
+        self._on_current_item_changed(media_uri, status.duration_us)
+
+    def _on_playlist_item_selected(self, vlc_id: int) -> None:
+        """Direct user request: "when a user clicks through the songs, [the waveform]
+        is instantly visible" -- a single click previews that song's waveform/
+        bookmarks (already preloaded, see _preload_playlist_waveforms) without
+        commanding VLC to change what it's actually playing; double-click (already
+        wired to goto_item) is the separate, explicit "start playing" action. If the
+        previewed song isn't the one actually playing, "Follow currently playing VLC
+        song" is switched off so the next status poll doesn't yank the view back to
+        the live track -- re-checking it snaps back via _on_follow_vlc_toggled.
+        """
+        item = self._resolve_playlist_item(vlc_id)
+        if item is None or not item.uri:
+            return
+        if vlc_id != self._actually_playing_vlc_item_id:
+            self.window._playlist_panel.set_follow_vlc(False)
+        self._current_vlc_item_id = vlc_id
+        duration_us = int(item.duration_s * 1_000_000) if item.duration_s is not None else None
+        self._on_current_item_changed(item.uri, duration_us)
+
+    def _on_follow_vlc_toggled(self, enabled: bool) -> None:
+        if not enabled or self._actually_playing_vlc_item_id is None:
+            return
+        if self._actually_playing_vlc_item_id == self._current_vlc_item_id:
+            return  # already showing the actually-playing track
+        item = self._resolve_playlist_item(self._actually_playing_vlc_item_id)
+        if item is None or not item.uri:
+            return
+        self._current_vlc_item_id = self._actually_playing_vlc_item_id
+        duration_us = int(item.duration_s * 1_000_000) if item.duration_s is not None else None
+        self._on_current_item_changed(item.uri, duration_us)
+
+    def _resolve_playlist_item(self, vlc_id: int | None):
         if vlc_id is None:
             return None
-        for item in self._playlist_items:
-            if item.vlc_id == vlc_id:
-                return item.uri
-        return None
+        return next((i for i in self._playlist_items if i.vlc_id == vlc_id), None)
+
+    def _resolve_current_item_uri(self, vlc_id: int | None) -> str | None:
+        item = self._resolve_playlist_item(vlc_id)
+        return item.uri if item is not None else None
 
     def _on_status_failed(self, message: str) -> None:
         self._status_inflight = False

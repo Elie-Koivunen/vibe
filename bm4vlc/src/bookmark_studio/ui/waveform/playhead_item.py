@@ -32,5 +32,15 @@ class PlayheadItem(QGraphicsItem):
         return QRectF(-1, 0, 2, self._height)
 
     def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: N802
-        painter.setPen(QPen(PLAYHEAD_COLOR, 1.5))
+        # A non-cosmetic pen's width is in the item's own SCENE units, same device-
+        # pixel-vs-scene-coordinate bug fixed elsewhere in this package (ruler ticks,
+        # waveform pyramid selection, bookmark resize handles). fit_entire_media() on
+        # anything longer than a few seconds scales the view down so far that 1.5
+        # scene-ms of width rounds to a fraction of a real screen pixel -- the moving
+        # position marker was reported live as simply never visible. setCosmetic(True)
+        # is Qt's built-in fix for exactly this: the pen's width is then always in
+        # real device pixels, regardless of the view's current zoom.
+        pen = QPen(PLAYHEAD_COLOR, 2)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
         painter.drawLine(0, 0, 0, self._height)
