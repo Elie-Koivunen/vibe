@@ -172,6 +172,32 @@ def test_selection_start_end_fields_track_and_edit_the_selection(qtbot) -> None:
     assert window._selection_start_edit.isEnabled() is False
 
 
+def test_delete_bookmark_button_removes_the_selected_bookmark(qtbot) -> None:
+    """Direct user request: "there is no button to select and delete a bookmark"."""
+    from bookmark_studio.domain.bookmark import Bookmark
+    from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
+
+    window, repo, playlist, media = _build_window(qtbot)
+    bookmark = Bookmark(
+        id=uuid4(), playlist_id=playlist.id, media_id=media.id, scope=BookmarkScope.PLAYLIST_MEDIA,
+        lane_id=None, bookmark_type=BookmarkType.POINT, name="Intro", start_us=1_000_000,
+        end_us=None, loop_enabled=False, repeat_count=None, loop_gap_ms=0,
+        completion_action=CompletionAction.CONTINUE,
+    )
+    repo.insert(bookmark)
+    window.load_bookmarks([bookmark])
+    panel = window._bookmark_panel
+    assert panel._delete_bookmark_button.isEnabled() is False
+
+    panel.select_bookmark(bookmark.id)
+    assert panel._delete_bookmark_button.isEnabled() is True
+
+    panel._delete_bookmark_button.click()
+
+    assert repo.get(bookmark.id) is None
+    assert window._undo_stack.canUndo()
+
+
 def test_bookmark_selection_populates_inspector(qtbot) -> None:
     window, repo, playlist, media = _build_window(qtbot)
     view = window._waveform_view

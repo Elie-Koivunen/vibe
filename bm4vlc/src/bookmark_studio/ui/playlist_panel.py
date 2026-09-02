@@ -58,13 +58,37 @@ class PlaylistPanel(QWidget):
     def set_playlist(
         self, items: list[VlcPlaylistItem], bookmark_counts: dict[int, int] | None = None
     ) -> None:
+        # Skip the rebuild entirely when nothing actually changed -- called on every
+        # ~2s playlist poll regardless, and a full _tree.clear() + repopulate tears
+        # down and recreates every row, wiping the current selection and scroll
+        # position each time even when the playlist is identical. Same class of bug
+        # fixed in set_current_playing() below, just on a longer, less noticeable cycle.
+        normalized_counts = bookmark_counts or {}
+        if items == self._items and normalized_counts == self._bookmark_counts:
+            return
         self._items = items
-        self._bookmark_counts = bookmark_counts or {}
+        self._bookmark_counts = normalized_counts
         self._rebuild()
 
     def set_current_playing(self, vlc_id: int | None) -> None:
+        """Updates just the "Playing" marker column on existing rows -- direct fix for
+        "i still cant automatically play a song by double clicking the tittle": this
+        used to call _rebuild(), which does _tree.clear() + recreates every
+        QTreeWidgetItem from scratch. Called on every ~400ms status poll, that
+        destroyed and rebuilt the whole row list mid-gesture far more often than not
+        during a real double-click (whose two clicks need to land on the SAME item
+        object within Qt's double-click interval), silently breaking double-click
+        detection -- confirmed by the fact goto_item()'s VLC command itself was
+        already verified correct. It also wiped the current selection highlight and
+        scroll position on every tick, a real bug in its own right even ignoring
+        double-click. No rebuild is needed at all: only the ▶ text ever changes here.
+        """
+        if vlc_id == self._current_playing_id:
+            return
         self._current_playing_id = vlc_id
-        self._rebuild()
+        for i in range(self._tree.topLevelItemCount()):
+            row = self._tree.topLevelItem(i)
+            row.setText(0, "▶" if row.data(0, 32) == vlc_id else "")
 
     def set_follow_vlc(self, enabled: bool) -> None:
         """Programmatic version of the checkbox -- used when previewing a different,

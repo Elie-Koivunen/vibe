@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import replace
 from uuid import uuid4
@@ -203,6 +204,38 @@ def test_bookmark_delete(conn: sqlite3.Connection) -> None:
     bookmark_repo.insert(bookmark)
     bookmark_repo.delete(bookmark.id)
     assert bookmark_repo.get(bookmark.id) is None
+
+
+def test_rename_legacy_default_names(conn: sqlite3.Connection) -> None:
+    """Regression, reported live: "the first bookmark doesn't have the naming
+    convention" -- a bookmark created before default_bookmark_name() existed keeps
+    its literal old "New bookmark" name forever unless backfilled once."""
+    media_repo = MediaRepository(conn)
+    media = Media(
+        id=uuid4(), canonical_uri=None, filename=None, title=None, artist=None,
+        album=None, duration_us=None, file_size=None, mtime_ns=None, fast_fingerprint=None,
+    )
+    media_repo.insert(media)
+    bookmark_repo = BookmarkRepository(conn)
+    legacy = Bookmark(
+        id=uuid4(), playlist_id=None, media_id=media.id, scope=BookmarkScope.GLOBAL_MEDIA,
+        lane_id=None, bookmark_type=BookmarkType.POINT, name="New bookmark", start_us=0, end_us=None,
+        loop_enabled=False, repeat_count=None, loop_gap_ms=0,
+        completion_action=CompletionAction.CONTINUE,
+    )
+    already_named = replace(legacy, id=uuid4(), name="Chorus")
+    bookmark_repo.insert(legacy)
+    bookmark_repo.insert(already_named)
+
+    renamed_count = bookmark_repo.rename_legacy_default_names()
+
+    assert renamed_count == 1
+    assert bookmark_repo.get(legacy.id).name != "New bookmark"
+    assert re.fullmatch(r"bookmark-\d{8}-[a-z0-9]{6}", bookmark_repo.get(legacy.id).name)
+    assert bookmark_repo.get(already_named.id).name == "Chorus"  # untouched
+
+    # Idempotent: a second run finds nothing left to rename.
+    assert bookmark_repo.rename_legacy_default_names() == 0
 
 
 def test_waveform_cache_roundtrip(conn: sqlite3.Connection) -> None:

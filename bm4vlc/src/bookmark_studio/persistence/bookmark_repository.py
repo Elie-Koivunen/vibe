@@ -5,8 +5,10 @@ import sqlite3
 from datetime import datetime, timezone
 from uuid import UUID
 
-from bookmark_studio.domain.bookmark import Bookmark
+from bookmark_studio.domain.bookmark import Bookmark, default_bookmark_name
 from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
+
+LEGACY_DEFAULT_NAME = "New bookmark"
 
 
 def _now() -> str:
@@ -108,6 +110,27 @@ class BookmarkRepository:
         )
         self._set_tags(bookmark.id, bookmark.tags)
         self._conn.commit()
+
+    def rename_legacy_default_names(self) -> int:
+        """One-time backfill: gives every bookmark still carrying the old flat "New
+        bookmark" default (created before default_bookmark_name() existed) a fresh
+        bookmark-<date>-<random> name instead. Direct user report: "the first
+        bookmark doesn't have the naming convention" -- the fix for NEW bookmarks
+        doesn't retroactively touch ones already sitting in the database, so without
+        this the very first bookmark someone ever created stays stuck on the old
+        name forever. Idempotent and cheap: after the first run, no row will match.
+        Returns the number of rows renamed.
+        """
+        rows = self._conn.execute(
+            "SELECT id FROM bookmarks WHERE name = ?", (LEGACY_DEFAULT_NAME,)
+        ).fetchall()
+        for (bookmark_id,) in rows:
+            self._conn.execute(
+                "UPDATE bookmarks SET name = ? WHERE id = ?", (default_bookmark_name(), bookmark_id)
+            )
+        if rows:
+            self._conn.commit()
+        return len(rows)
 
     def delete(self, bookmark_id: UUID) -> None:
         self._conn.execute("DELETE FROM bookmarks WHERE id = ?", (str(bookmark_id),))

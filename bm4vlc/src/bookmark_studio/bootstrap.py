@@ -77,6 +77,7 @@ def open_database(db_path: Path | None = None) -> sqlite3.Connection:
     db_path = db_path or default_database_path()
     conn = connect(db_path)
     migrate(conn)
+    BookmarkRepository(conn).rename_legacy_default_names()
     return conn
 
 

@@ -281,6 +281,7 @@ class MainWindow(QMainWindow):
         self._bookmark_panel.export_requested.connect(self._on_export_project)
         self._bookmark_panel.play_bookmark_requested.connect(self.play_bookmark_requested.emit)
         self._bookmark_panel.loop_bookmark_requested.connect(self.loop_bookmark_requested.emit)
+        self._bookmark_panel.delete_bookmark_requested.connect(self._on_delete_bookmark_requested)
 
         self._inspector.name_committed.connect(self._on_name_committed)
         self._inspector.loop_settings_committed.connect(self._on_loop_settings_committed)
@@ -515,6 +516,21 @@ class MainWindow(QMainWindow):
             return
         self._undo_stack.push(DeleteBookmarkCommand(self._bookmark_repository, bookmark))
         self._inspector.clear()
+        self._refresh_bookmarks()
+
+    def _on_delete_bookmark_requested(self, bookmark_id: UUID) -> None:
+        """"there is no button to select and delete a bookmark" -- deletion already
+        worked via the Delete key/Bookmark menu once loaded into the Inspector, but
+        with no visible button it read as a missing feature. This deletes whatever
+        row is selected in the bookmark LIST directly, independent of Inspector state.
+        """
+        bookmark = self._bookmark_repository.get(bookmark_id)
+        if bookmark is None:
+            return
+        self._undo_stack.push(DeleteBookmarkCommand(self._bookmark_repository, bookmark))
+        inspected = self._current_inspected_bookmark()
+        if inspected is not None and inspected.id == bookmark_id:
+            self._inspector.clear()
         self._refresh_bookmarks()
 
     def _current_inspected_bookmark(self) -> Bookmark | None:
