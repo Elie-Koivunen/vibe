@@ -157,6 +157,10 @@ class Application(QObject):
         # requested once (the orchestrator's own cache lookup would just no-op a
         # repeat request, but skipping it here avoids the pointless dispatch/lookup).
         self._preload_requested: set[UUID] = set()
+        # media_id -> display name, built up as _on_playlist_result resolves each
+        # item -- reused by _refresh_bookmark_panel so it doesn't need its own extra
+        # per-media lookups just to label the bookmark panel's "Song" column.
+        self._song_names_cache: dict[UUID, str] = {}
 
         self._thread_pool = QThreadPool(self)
         self._status_inflight = False
@@ -219,6 +223,8 @@ class Application(QObject):
         self.window.launch_vlc_requested.connect(self.prompt_vlc_launch_dialog)
         self.window.play_bookmark_requested.connect(self._on_play_bookmark_requested)
         self.window.loop_bookmark_requested.connect(self._on_loop_bookmark_requested)
+        self.window.bookmark_reorder_requested.connect(self._on_bookmark_reorder_requested)
+        self.window.bookmarks_changed.connect(self._refresh_bookmark_panel)
 
     # -- launch/attach picker --
     #
@@ -298,6 +304,7 @@ class Application(QObject):
         self._current_vlc_item_id = None
         self._current_media_id = None
         self._preload_requested.clear()
+        self._song_names_cache.clear()
         self._connected = False
         self.window._transport.set_connected(False)
 
@@ -371,6 +378,12 @@ class Application(QObject):
                 completion_action=bookmark.completion_action,
             )
         )
+
+    def _on_bookmark_reorder_requested(self, ordered_bookmark_ids: list) -> None:
+        """Direct user request: "the row entries should also be possible to manually
+        reorder them moving up/down"."""
+        self._bookmark_repository.reorder(ordered_bookmark_ids)
+        self._refresh_bookmark_panel()
 
     def _current_bookmarks_sorted(self) -> list:
         if self._current_media_id is None:
@@ -583,10 +596,27 @@ class Application(QObject):
                     else self._bookmark_repository.list_global_for_media(media.id)
                 )
                 bookmark_counts[item.vlc_id] = len(bookmarks)
+                self._song_names_cache[media.id] = media.title or media.filename or item.uri
             self.window._playlist_panel.set_playlist([item for item, _media in resolved], bookmark_counts)
             self._preload_playlist_waveforms(resolved)
+            self._refresh_bookmark_panel()
         except Exception:  # noqa: BLE001 - spec #104: never crash the UI over one poll
             self._log.exception("playlist result handling failed")
+
+    def _refresh_bookmark_panel(self) -> None:
+        """Pushes every playlist-scoped bookmark across the WHOLE playlist into the
+        bookmark list panel -- direct user request: "the bookmarks should all be
+        listed for all songs", not just the one currently displayed (that's still
+        all load_bookmarks/the waveform ever shows). Called from the ~2s playlist
+        poll and immediately after any bookmark mutation (MainWindow.bookmarks_changed)
+        or manual reorder, so the list doesn't lag behind edits by a whole poll cycle.
+        """
+        playlist_id = self._synchronizer.active_playlist_id
+        if playlist_id is None:
+            self.window.load_all_bookmarks([], {})
+            return
+        bookmarks = self._bookmark_repository.list_for_playlist(playlist_id)
+        self.window.load_all_bookmarks(bookmarks, dict(self._song_names_cache))
 
     def _preload_playlist_waveforms(self, resolved: list) -> None:
         """Kicks off background decoding for every track in the playlist, not just the

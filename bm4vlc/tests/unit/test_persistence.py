@@ -27,9 +27,9 @@ def conn() -> sqlite3.Connection:
 
 
 def test_migrate_applies_schema_and_is_idempotent(conn: sqlite3.Connection) -> None:
-    assert current_version(conn) == 1
+    assert current_version(conn) == 2
     # Re-running must not error and must not reapply.
-    assert migrate(conn) == 1
+    assert migrate(conn) == 2
     tables = {
         row[0]
         for row in conn.execute(
@@ -204,6 +204,75 @@ def test_bookmark_delete(conn: sqlite3.Connection) -> None:
     bookmark_repo.insert(bookmark)
     bookmark_repo.delete(bookmark.id)
     assert bookmark_repo.get(bookmark.id) is None
+
+
+def test_list_for_playlist_spans_every_song_in_the_playlist(conn: sqlite3.Connection) -> None:
+    """Direct user request: "the bookmarks should all be listed for all songs"."""
+    media_repo = MediaRepository(conn)
+    playlist_repo = PlaylistRepository(conn)
+    bookmark_repo = BookmarkRepository(conn)
+
+    song_a = Media(
+        id=uuid4(), canonical_uri="file:///a.mp3", filename="a.mp3", title=None, artist=None,
+        album=None, duration_us=None, file_size=None, mtime_ns=None, fast_fingerprint=None,
+    )
+    song_b = Media(
+        id=uuid4(), canonical_uri="file:///b.mp3", filename="b.mp3", title=None, artist=None,
+        album=None, duration_us=None, file_size=None, mtime_ns=None, fast_fingerprint=None,
+    )
+    media_repo.insert(song_a)
+    media_repo.insert(song_b)
+    playlist = Playlist(id=uuid4(), name="P", source_uri=None, is_ad_hoc=True)
+    playlist_repo.insert(playlist)
+
+    def _bookmark(media_id, name, start_us):
+        return Bookmark(
+            id=uuid4(), playlist_id=playlist.id, media_id=media_id, scope=BookmarkScope.PLAYLIST_MEDIA,
+            lane_id=None, bookmark_type=BookmarkType.POINT, name=name, start_us=start_us, end_us=None,
+            loop_enabled=False, repeat_count=None, loop_gap_ms=0, completion_action=CompletionAction.CONTINUE,
+        )
+
+    bookmark_repo.insert(_bookmark(song_a.id, "A1", 5_000_000))
+    bookmark_repo.insert(_bookmark(song_b.id, "B1", 1_000_000))
+
+    all_bookmarks = bookmark_repo.list_for_playlist(playlist.id)
+    assert {b.name for b in all_bookmarks} == {"A1", "B1"}
+
+
+def test_reorder_persists_manual_order_across_songs(conn: sqlite3.Connection) -> None:
+    """Direct user request: "the row entries should also be possible to manually
+    reorder them moving up/down"."""
+    media_repo = MediaRepository(conn)
+    playlist_repo = PlaylistRepository(conn)
+    bookmark_repo = BookmarkRepository(conn)
+
+    song = Media(
+        id=uuid4(), canonical_uri="file:///a.mp3", filename="a.mp3", title=None, artist=None,
+        album=None, duration_us=None, file_size=None, mtime_ns=None, fast_fingerprint=None,
+    )
+    media_repo.insert(song)
+    playlist = Playlist(id=uuid4(), name="P", source_uri=None, is_ad_hoc=True)
+    playlist_repo.insert(playlist)
+
+    def _bookmark(name, start_us):
+        return Bookmark(
+            id=uuid4(), playlist_id=playlist.id, media_id=song.id, scope=BookmarkScope.PLAYLIST_MEDIA,
+            lane_id=None, bookmark_type=BookmarkType.POINT, name=name, start_us=start_us, end_us=None,
+            loop_enabled=False, repeat_count=None, loop_gap_ms=0, completion_action=CompletionAction.CONTINUE,
+        )
+
+    first = _bookmark("First", 1_000_000)
+    second = _bookmark("Second", 2_000_000)
+    bookmark_repo.insert(first)
+    bookmark_repo.insert(second)
+
+    # Default order follows start_us.
+    assert [b.name for b in bookmark_repo.list_for_playlist(playlist.id)] == ["First", "Second"]
+
+    # Manually move "Second" above "First", even though its start_us is later.
+    bookmark_repo.reorder([second.id, first.id])
+
+    assert [b.name for b in bookmark_repo.list_for_playlist(playlist.id)] == ["Second", "First"]
 
 
 def test_rename_legacy_default_names(conn: sqlite3.Connection) -> None:

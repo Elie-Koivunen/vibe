@@ -4,12 +4,16 @@ from __future__ import annotations
 from uuid import UUID
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout, QHeaderView, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+)
 
 from bookmark_studio.domain.bookmark import Bookmark
 from bookmark_studio.ui.transport import format_timecode
 
-COLUMNS = ["Name", "Start", "End", "Loop"]
+# Direct user request: a "Song" column identifying which track each bookmark belongs
+# to, since this list now spans every song in the playlist, not just the one on screen.
+COLUMNS = ["Song", "Name", "Start", "End", "Loop"]
 USER_ROLE = 32
 
 
@@ -19,10 +23,12 @@ class BookmarkPanel(QWidget):
     play_bookmark_requested = Signal(object)  # UUID
     loop_bookmark_requested = Signal(object)  # UUID
     delete_bookmark_requested = Signal(object)  # UUID
+    reorder_requested = Signal(list)  # ordered list of bookmark UUIDs
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._bookmarks: dict[UUID, Bookmark] = {}
+        self._song_names: dict[UUID, str] = {}
         layout = QVBoxLayout(self)
 
         toolbar = QHBoxLayout()
@@ -48,7 +54,17 @@ class BookmarkPanel(QWidget):
         self._delete_bookmark_button.clicked.connect(self._on_delete_bookmark_clicked)
         toolbar.addWidget(self._delete_bookmark_button)
 
-        self._set_playback_buttons_enabled(False, allow_loop=False)
+        # Direct user request: "the row entries should also be possible to manually
+        # reorder them moving up/down".
+        self._move_up_button = QPushButton("Move Up", self)
+        self._move_up_button.setToolTip("Move the selected bookmark up in this list")
+        self._move_up_button.clicked.connect(lambda: self._move_selected(-1))
+        toolbar.addWidget(self._move_up_button)
+
+        self._move_down_button = QPushButton("Move Down", self)
+        self._move_down_button.setToolTip("Move the selected bookmark down in this list")
+        self._move_down_button.clicked.connect(lambda: self._move_selected(1))
+        toolbar.addWidget(self._move_down_button)
 
         toolbar.addStretch(1)
         # Direct user feedback: "add a button to save bookmark catalogue" -- the
@@ -62,17 +78,36 @@ class BookmarkPanel(QWidget):
         self._tree = QTreeWidget(self)
         self._tree.setColumnCount(len(COLUMNS))
         self._tree.setHeaderLabels(COLUMNS)
+        # Direct user request: "nice to have all columns adjustable and reorderable".
+        # Interactive (drag-to-resize) is QHeaderView's default already; Movable adds
+        # drag-to-reorder.
+        header = self._tree.header()
+        header.setSectionsMovable(True)
+        header.setSectionResizeMode(QHeaderView.Interactive)
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
+        self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         layout.addWidget(self._tree)
+
+        self._set_playback_buttons_enabled(False, allow_loop=False)
 
     def _set_playback_buttons_enabled(self, play_enabled: bool, *, allow_loop: bool) -> None:
         self._play_bookmark_button.setEnabled(play_enabled)
         self._loop_bookmark_button.setEnabled(play_enabled and allow_loop)
         self._delete_bookmark_button.setEnabled(play_enabled)
+        self._update_move_buttons_enabled()
+
+    def _update_move_buttons_enabled(self) -> None:
+        index = self._tree.indexOfTopLevelItem(self._current_item()) if self._current_item() else -1
+        self._move_up_button.setEnabled(index > 0)
+        self._move_down_button.setEnabled(0 <= index < self._tree.topLevelItemCount() - 1)
+
+    def _current_item(self) -> QTreeWidgetItem | None:
+        selected = self._tree.selectedItems()
+        return selected[0] if selected else None
 
     def _selected_bookmark_id(self) -> UUID | None:
-        selected = self._tree.selectedItems()
-        return selected[0].data(0, USER_ROLE) if selected else None
+        item = self._current_item()
+        return item.data(0, USER_ROLE) if item is not None else None
 
     def _on_play_bookmark_clicked(self) -> None:
         bookmark_id = self._selected_bookmark_id()
@@ -89,15 +124,41 @@ class BookmarkPanel(QWidget):
         if bookmark_id is not None:
             self.delete_bookmark_requested.emit(bookmark_id)
 
-    def set_bookmarks(self, bookmarks: list[Bookmark]) -> None:
+    def _on_item_double_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
+        # Direct user request: "double clicking on a bookmark should play that
+        # bookmark as well" -- same intent as Play Bookmark, just a faster gesture.
+        bookmark_id = item.data(0, USER_ROLE)
+        if bookmark_id is not None:
+            self.play_bookmark_requested.emit(bookmark_id)
+
+    def _move_selected(self, delta: int) -> None:
+        index = self._tree.indexOfTopLevelItem(self._current_item()) if self._current_item() else -1
+        if index < 0:
+            return
+        new_index = index + delta
+        if not (0 <= new_index < self._tree.topLevelItemCount()):
+            return
+        ordered_ids = [self._tree.topLevelItem(i).data(0, USER_ROLE) for i in range(self._tree.topLevelItemCount())]
+        ordered_ids[index], ordered_ids[new_index] = ordered_ids[new_index], ordered_ids[index]
+        self.reorder_requested.emit(ordered_ids)
+
+    def set_bookmarks(self, bookmarks: list[Bookmark], song_names: dict[UUID, str] | None = None) -> None:
+        """`bookmarks` is displayed in the order given -- the caller (Application,
+        via BookmarkRepository.list_for_playlist) is responsible for ordering, so a
+        manual reorder (see _move_selected/reorder_requested) actually sticks instead
+        of being immediately re-sorted away by this panel re-deriving its own order.
+        """
+        previously_selected = self._selected_bookmark_id()
         self._bookmarks = {b.id: b for b in bookmarks}
+        self._song_names = song_names or {}
         self._tree.clear()
-        for bookmark in sorted(bookmarks, key=lambda b: b.start_us):
+        for bookmark in bookmarks:
             loop_label = "∞" if bookmark.loop_enabled and bookmark.repeat_count is None else (
                 f"×{bookmark.repeat_count}" if bookmark.loop_enabled else ""
             )
             row = QTreeWidgetItem(
                 [
+                    self._song_names.get(bookmark.media_id, ""),
                     bookmark.name,
                     format_timecode(bookmark.start_us),
                     format_timecode(bookmark.end_us) if bookmark.end_us is not None else "",
@@ -106,6 +167,8 @@ class BookmarkPanel(QWidget):
             )
             row.setData(0, USER_ROLE, bookmark.id)
             self._tree.addTopLevelItem(row)
+        if previously_selected is not None:
+            self.select_bookmark(previously_selected)
 
     def select_bookmark(self, bookmark_id: UUID) -> None:
         for i in range(self._tree.topLevelItemCount()):

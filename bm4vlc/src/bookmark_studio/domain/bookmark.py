@@ -51,6 +51,13 @@ class Bookmark:
     color_key: str | None = None
     notes: str | None = None
     tags: tuple[str, ...] = ()
+    # Manual ordering in the bookmark list panel (spec: "row entries should also be
+    # possible to manually reorder them moving up/down") -- independent of start_us,
+    # which stays the sole ordering for the waveform's own markers. 0 for every
+    # bookmark that's never been manually reordered, which combined with
+    # BookmarkRepository.list_for_playlist()'s `ORDER BY sort_index, start_us` just
+    # falls back to chronological order until the user actually reorders something.
+    sort_index: int = 0
 
     def __post_init__(self) -> None:
         validate_bookmark_range(

@@ -62,13 +62,42 @@ class BookmarkRepository:
         ).fetchall()
         return [self._row_to_bookmark(row) for row in rows]
 
+    def list_for_playlist(self, playlist_id: UUID) -> list[Bookmark]:
+        """Every playlist-scoped bookmark across every song in the playlist -- direct
+        user request: "the bookmarks should all be listed for all songs", for the
+        bookmark panel's cross-song view (the waveform itself still only ever shows
+        the one song currently displayed, via list_for_playlist_media). Ordered by
+        sort_index first so a manual reorder (see reorder()) sticks; falls back to
+        start_us for anything never manually reordered (sort_index 0 for everyone).
+        Global-media bookmarks aren't included -- they were never tied to this
+        playlist to begin with.
+        """
+        rows = self._conn.execute(
+            self._select_sql() + " WHERE playlist_id = ? AND scope = ? ORDER BY sort_index, start_us",
+            (str(playlist_id), BookmarkScope.PLAYLIST_MEDIA.value),
+        ).fetchall()
+        return [self._row_to_bookmark(row) for row in rows]
+
+    def reorder(self, ordered_bookmark_ids: list[UUID]) -> None:
+        """Assigns sort_index = position for each id, in the given order -- direct
+        user request for manual up/down bookmark reordering. Renumbers the WHOLE list
+        passed in, not just the two rows being swapped, so ties from bookmarks that
+        have never been manually reordered (all default sort_index=0) resolve into a
+        real, stable order the first time this is called.
+        """
+        for index, bookmark_id in enumerate(ordered_bookmark_ids):
+            self._conn.execute(
+                "UPDATE bookmarks SET sort_index = ? WHERE id = ?", (index, str(bookmark_id))
+            )
+        self._conn.commit()
+
     def insert(self, bookmark: Bookmark) -> Bookmark:
         now = _now()
         self._conn.execute(
             "INSERT INTO bookmarks (id, playlist_id, media_id, scope, lane_id, "
             "bookmark_type, name, start_us, end_us, loop_enabled, repeat_count, "
-            "loop_gap_ms, completion_action, color_key, notes, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "loop_gap_ms, completion_action, color_key, notes, sort_index, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             self._bookmark_params(bookmark, now, now),
         )
         self._set_tags(bookmark.id, bookmark.tags)
@@ -88,7 +117,7 @@ class BookmarkRepository:
             "UPDATE bookmarks SET playlist_id = ?, media_id = ?, scope = ?, lane_id = ?, "
             "bookmark_type = ?, name = ?, start_us = ?, end_us = ?, loop_enabled = ?, "
             "repeat_count = ?, loop_gap_ms = ?, completion_action = ?, color_key = ?, "
-            "notes = ?, updated_at = ? WHERE id = ?",
+            "notes = ?, sort_index = ?, updated_at = ? WHERE id = ?",
             (
                 str(bookmark.playlist_id) if bookmark.playlist_id else None,
                 str(bookmark.media_id),
@@ -104,6 +133,7 @@ class BookmarkRepository:
                 bookmark.completion_action.value,
                 bookmark.color_key,
                 bookmark.notes,
+                bookmark.sort_index,
                 _now(),
                 str(bookmark.id),
             ),
@@ -177,6 +207,7 @@ class BookmarkRepository:
             bookmark.completion_action.value,
             bookmark.color_key,
             bookmark.notes,
+            bookmark.sort_index,
             created_at,
             updated_at,
         )
@@ -186,7 +217,7 @@ class BookmarkRepository:
         return (
             "SELECT id, playlist_id, media_id, scope, lane_id, bookmark_type, name, "
             "start_us, end_us, loop_enabled, repeat_count, loop_gap_ms, "
-            "completion_action, color_key, notes FROM bookmarks"
+            "completion_action, color_key, notes, sort_index FROM bookmarks"
         )
 
     def _row_to_bookmark(self, row: sqlite3.Row | tuple) -> Bookmark:
@@ -206,6 +237,7 @@ class BookmarkRepository:
             completion_action,
             color_key,
             notes,
+            sort_index,
         ) = row
         bid = UUID(bookmark_id)
         return Bookmark(
@@ -225,4 +257,5 @@ class BookmarkRepository:
             color_key=color_key,
             notes=notes,
             tags=self._get_tags(bid),
+            sort_index=sort_index,
         )

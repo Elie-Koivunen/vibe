@@ -38,6 +38,8 @@ class MainWindow(QMainWindow):
     launch_vlc_requested = Signal()
     play_bookmark_requested = Signal(object)  # UUID
     loop_bookmark_requested = Signal(object)  # UUID
+    bookmark_reorder_requested = Signal(list)  # ordered list of bookmark UUIDs
+    bookmarks_changed = Signal()
 
     def __init__(
         self,
@@ -282,6 +284,7 @@ class MainWindow(QMainWindow):
         self._bookmark_panel.play_bookmark_requested.connect(self.play_bookmark_requested.emit)
         self._bookmark_panel.loop_bookmark_requested.connect(self.loop_bookmark_requested.emit)
         self._bookmark_panel.delete_bookmark_requested.connect(self._on_delete_bookmark_requested)
+        self._bookmark_panel.reorder_requested.connect(self.bookmark_reorder_requested.emit)
 
         self._inspector.name_committed.connect(self._on_name_committed)
         self._inspector.loop_settings_committed.connect(self._on_loop_settings_committed)
@@ -298,8 +301,14 @@ class MainWindow(QMainWindow):
         self._waveform_scene.set_duration_us(duration_us)
 
     def load_bookmarks(self, bookmarks: list[Bookmark]) -> None:
+        """Waveform-scoped bookmarks for the one song currently displayed. The
+        bookmark LIST panel is fed separately, from load_all_bookmarks -- direct user
+        request: "the bookmarks should all be listed for all songs", not just this one.
+        """
         self._waveform_scene.set_bookmarks(bookmarks)
-        self._bookmark_panel.set_bookmarks(bookmarks)
+
+    def load_all_bookmarks(self, bookmarks: list[Bookmark], song_names: dict[UUID, str]) -> None:
+        self._bookmark_panel.set_bookmarks(bookmarks, song_names)
 
     def set_playhead_time_us(self, time_us: int) -> None:
         self._waveform_scene.set_playhead_time_us(time_us)
@@ -545,6 +554,11 @@ class MainWindow(QMainWindow):
             self._current_playlist_id, self._current_media_id
         ) if self._current_playlist_id else self._bookmark_repository.list_global_for_media(self._current_media_id)
         self.load_bookmarks(bookmarks)
+        # Every bookmark mutation (create/rename/delete/drag-move/drag-resize/loop
+        # settings) funnels through this method -- one signal here lets Application
+        # refresh the cross-song bookmark panel immediately instead of the edit only
+        # showing up there after the next ~2s playlist poll happens to catch up.
+        self.bookmarks_changed.emit()
 
     def _on_seek_requested(self, time_us: int) -> None:
         self._waveform_scene.set_playhead_time_us(time_us)

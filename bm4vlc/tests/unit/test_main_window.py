@@ -118,7 +118,7 @@ def test_bookmark_panel_play_loop_buttons_track_selection(qtbot) -> None:
         end_us=None, loop_enabled=False, repeat_count=None, loop_gap_ms=0,
         completion_action=CompletionAction.CONTINUE,
     )
-    window.load_bookmarks([segment, point])
+    window.load_all_bookmarks([segment, point], {media.id: media.title})
     panel = window._bookmark_panel
     assert panel._play_bookmark_button.isEnabled() is False  # nothing selected yet
 
@@ -185,7 +185,7 @@ def test_delete_bookmark_button_removes_the_selected_bookmark(qtbot) -> None:
         completion_action=CompletionAction.CONTINUE,
     )
     repo.insert(bookmark)
-    window.load_bookmarks([bookmark])
+    window.load_all_bookmarks([bookmark], {media.id: media.title})
     panel = window._bookmark_panel
     assert panel._delete_bookmark_button.isEnabled() is False
 

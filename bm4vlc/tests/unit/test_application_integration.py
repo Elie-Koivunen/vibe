@@ -428,6 +428,75 @@ def test_selection_is_cleared_when_the_displayed_track_changes(qtbot, running_ap
     assert app.window._waveform_scene.selection() is None
 
 
+def test_bookmark_panel_shows_bookmarks_from_every_song_in_the_playlist(qtbot, running_app) -> None:
+    """Direct user request: "the bookmarks should all be listed for all songs"."""
+    adapter = MockPlaybackAdapter(
+        [
+            VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0),
+            VlcPlaylistItem(vlc_id=2, uri="file:///b.mp3", name="Song B", duration_s=20.0),
+        ]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: len(app._playlist_items) == 2, timeout=3000)
+
+    media_a = app._media_resolver.resolve("file:///a.mp3")
+    media_b = app._media_resolver.resolve("file:///b.mp3")
+    playlist_id = app._synchronizer.active_playlist_id
+    from uuid import uuid4
+
+    from bookmark_studio.domain.bookmark import Bookmark
+    from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
+
+    def _bookmark(media_id, name):
+        return Bookmark(
+            id=uuid4(), playlist_id=playlist_id, media_id=media_id, scope=BookmarkScope.PLAYLIST_MEDIA,
+            lane_id=None, bookmark_type=BookmarkType.POINT, name=name, start_us=1_000_000, end_us=None,
+            loop_enabled=False, repeat_count=None, loop_gap_ms=0, completion_action=CompletionAction.CONTINUE,
+        )
+
+    app._bookmark_repository.insert(_bookmark(media_a.id, "On A"))
+    app._bookmark_repository.insert(_bookmark(media_b.id, "On B"))
+
+    app._refresh_bookmark_panel()
+
+    panel = app.window._bookmark_panel
+    names = {panel._tree.topLevelItem(i).text(1) for i in range(panel._tree.topLevelItemCount())}
+    assert names == {"On A", "On B"}
+
+
+def test_bookmark_reorder_requested_persists_and_refreshes_the_panel(qtbot, running_app) -> None:
+    adapter = MockPlaybackAdapter([VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0)])
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
+
+    from uuid import uuid4
+
+    from bookmark_studio.domain.bookmark import Bookmark
+    from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
+
+    playlist_id = app._synchronizer.active_playlist_id
+
+    def _bookmark(name, start_us):
+        return Bookmark(
+            id=uuid4(), playlist_id=playlist_id, media_id=app._current_media_id, scope=BookmarkScope.PLAYLIST_MEDIA,
+            lane_id=None, bookmark_type=BookmarkType.POINT, name=name, start_us=start_us, end_us=None,
+            loop_enabled=False, repeat_count=None, loop_gap_ms=0, completion_action=CompletionAction.CONTINUE,
+        )
+
+    first = _bookmark("First", 1_000_000)
+    second = _bookmark("Second", 2_000_000)
+    app._bookmark_repository.insert(first)
+    app._bookmark_repository.insert(second)
+
+    app._on_bookmark_reorder_requested([second.id, first.id])
+
+    assert [b.name for b in app._bookmark_repository.list_for_playlist(playlist_id)] == ["Second", "First"]
+    panel = app.window._bookmark_panel
+    assert panel._tree.topLevelItem(0).text(1) == "Second"
+
+
 def test_offline_start_does_not_crash(qtbot, running_app) -> None:
     """spec #104: VLC unreachable must not prevent the app from starting."""
     adapter = MockPlaybackAdapter([])
