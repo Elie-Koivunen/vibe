@@ -103,6 +103,19 @@ class MainWindow(QMainWindow):
         zoom_fit_button.clicked.connect(self._waveform_view.fit_entire_media)
         layout.addWidget(zoom_fit_button)
 
+        # Direct user request: "a button to explicitly bookmark". Always enabled --
+        # unlike "Bookmark Selection" below, this needs no drag-selection first (which
+        # was itself broken by the handle_empty_drag boundary bug -- see scene.py), so
+        # it's the one guaranteed-simple way to drop a bookmark at the playhead.
+        self._bookmark_now_button = QPushButton("Bookmark Now", self)
+        self._bookmark_now_button.setToolTip(
+            "Add a point bookmark at the current playhead position (Ctrl+Shift+B)"
+        )
+        self._bookmark_now_button.clicked.connect(
+            lambda: self._on_point_bookmark_requested(self._playhead_time_us())
+        )
+        layout.addWidget(self._bookmark_now_button)
+
         self._bookmark_selection_button = QPushButton("Bookmark Selection (Ctrl+B)", self)
         self._bookmark_selection_button.clicked.connect(self._on_bookmark_selection_clicked)
         layout.addWidget(self._bookmark_selection_button)

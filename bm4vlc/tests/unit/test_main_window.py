@@ -65,6 +65,20 @@ def test_double_click_waveform_creates_bookmark_via_undo_stack(qtbot) -> None:
     assert len(repo.list_for_playlist_media(playlist.id, media.id)) == 1
 
 
+def test_bookmark_now_button_creates_point_bookmark_without_a_selection(qtbot) -> None:
+    """Direct user request: "a button to explicitly bookmark" -- must work with no
+    selection made first (drag-selection was itself broken by a separate bug, see
+    scene.py's handle_empty_drag), so this is the always-available fallback."""
+    window, repo, playlist, media = _build_window(qtbot)
+    assert window._waveform_scene.selection() is None
+
+    window._bookmark_now_button.click()
+
+    bookmarks = repo.list_for_playlist_media(playlist.id, media.id)
+    assert len(bookmarks) == 1
+    assert bookmarks[0].end_us is None  # a point bookmark, not a segment
+
+
 def test_bookmark_selection_populates_inspector(qtbot) -> None:
     window, repo, playlist, media = _build_window(qtbot)
     view = window._waveform_view

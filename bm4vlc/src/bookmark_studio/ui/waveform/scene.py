@@ -128,10 +128,23 @@ class WaveformScene(QGraphicsScene):
         self.seek_requested.emit(max(0, min(time_us, self._duration_us)))
 
     def handle_empty_drag(self, start_us: int, end_us: int) -> None:
+        """Regression found live: every mouse-move while dragging a selection that
+        started at or past the very end of the track spammed
+        "ValueError: end_us must be greater than start_us" and aborted mid-handler --
+        so the selection (and any bookmark drag/resize riding on the same drag
+        machinery) never visually updated at all, reading as "dragging doesn't work".
+        Root cause was clamping `hi` to duration_us AFTER already deciding the drag
+        was "big enough" using the *unclamped* hi-lo -- so lo == duration_us == (post-
+        clamp) hi slipped through as a zero-length range. Clamp both ends first, then
+        check the clamped width.
+        """
         lo, hi = sorted((max(0, start_us), max(0, end_us)))
+        if self._duration_us > 0:
+            lo = min(lo, self._duration_us)
+            hi = min(hi, self._duration_us)
         if hi - lo < 1:
             return
-        self.set_selection(Selection(start_us=lo, end_us=min(hi, self._duration_us) or lo + 1))
+        self.set_selection(Selection(start_us=lo, end_us=hi))
 
     def handle_empty_double_click(self, time_us: int) -> None:
         self.point_bookmark_requested.emit(max(0, min(time_us, self._duration_us)))

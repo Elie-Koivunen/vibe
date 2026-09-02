@@ -139,6 +139,7 @@ class Application(QObject):
         self._current_vlc_item_id: int | None = None
         self._last_playback_state: str = "stopped"
         self._playlist_items: list = []
+        self._connected = False
         # Every media_id ever handed to the waveform orchestrator this session, current
         # track or not -- see _preload_playlist_waveforms. Prevents re-dispatching a
         # decode job on every ~2s playlist poll once a track has already been
@@ -280,6 +281,8 @@ class Application(QObject):
         self._current_vlc_item_id = None
         self._current_media_id = None
         self._preload_requested.clear()
+        self._connected = False
+        self.window._transport.set_connected(False)
 
         try:
             new_adapter.connect()
@@ -383,6 +386,9 @@ class Application(QObject):
     def _on_status_result(self, status: object) -> None:
         self._status_inflight = False
         try:
+            if not self._connected:
+                self._connected = True
+                self.window._transport.set_connected(True)
             if self._mute_pending:
                 self._mute_pending = False
                 self._fire_and_forget(lambda: self._adapter.set_volume(0))
@@ -405,6 +411,9 @@ class Application(QObject):
 
     def _on_status_failed(self, message: str) -> None:
         self._status_inflight = False
+        if self._connected:
+            self._connected = False
+            self.window._transport.set_connected(False)
         self._log.debug("status poll failed: %s", message)  # spec #104: never crash the UI
 
     def _poll_playlist(self) -> None:

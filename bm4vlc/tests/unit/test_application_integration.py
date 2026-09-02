@@ -180,6 +180,22 @@ def test_waveform_click_seeks_the_real_adapter(qtbot, running_app) -> None:
     qtbot.waitUntil(lambda: adapter.get_status().time_us == 3_000_000, timeout=3000)
 
 
+def test_transport_becomes_enabled_once_status_polling_succeeds(qtbot, running_app) -> None:
+    """Regression: TransportBar.set_transport_enabled() (spec #137) existed but was
+    never called from anywhere -- buttons stayed clickable-looking even while
+    disconnected, so a click silently did nothing. Reported live as "the player
+    buttons do not map to vlc player, hence not functioning"."""
+    adapter = MockPlaybackAdapter(
+        [VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0)]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    assert app.window._transport.play_pause_button.isEnabled() is False
+
+    app.start()
+    qtbot.waitUntil(lambda: app.window._transport.play_pause_button.isEnabled() is True, timeout=3000)
+    assert app.window._transport._connection_label.text() == "● Connected"
+
+
 def test_offline_start_does_not_crash(qtbot, running_app) -> None:
     """spec #104: VLC unreachable must not prevent the app from starting."""
     adapter = MockPlaybackAdapter([])

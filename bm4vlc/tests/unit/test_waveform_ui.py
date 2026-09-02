@@ -52,6 +52,26 @@ def test_click_empty_waveform_seeks(qtbot) -> None:
     assert abs(seeks[0] - 3_000_000) < 5_000  # within 5ms of the click
 
 
+def test_handle_empty_drag_past_track_end_does_not_raise(qtbot) -> None:
+    """Regression, confirmed live: dragging a selection that starts at or past the very
+    end of the track spammed "ValueError: end_us must be greater than start_us" on
+    every mouse-move and aborted the handler each time -- so the selection (and by
+    extension the whole "drag to adjust" flow) simply never updated. Root cause was
+    clamping `hi` to duration_us only AFTER deciding "is this drag big enough" using
+    the unclamped width, letting a post-clamp zero-length range slip through.
+    """
+    scene, _view = _make_view(qtbot, duration_us=10_000_000)
+    # start exactly at the track's end, drag further right (off the end entirely)
+    scene.handle_empty_drag(10_000_000, 15_000_000)
+    assert scene.selection() is None  # clamped to zero width -> correctly a no-op
+
+    # a drag spanning from before the end to past it should still clamp sanely
+    scene.handle_empty_drag(9_000_000, 20_000_000)
+    assert scene.selection() is not None
+    assert scene.selection().start_us == 9_000_000
+    assert scene.selection().end_us == 10_000_000
+
+
 def test_drag_empty_waveform_creates_selection(qtbot) -> None:
     scene, view = _make_view(qtbot)
     selections = []

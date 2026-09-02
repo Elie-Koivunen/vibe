@@ -82,9 +82,30 @@ class TransportBar(QWidget):
         self._time_label.setFont(button_font)
         layout.addWidget(self._time_label)
 
+        # Direct fix for "the player buttons do not map to vlc player, hence not
+        # functioning": set_transport_enabled() (spec #137) existed but was never once
+        # called anywhere in app/application.py -- buttons stayed clickable-looking
+        # even while genuinely disconnected from VLC, so a click just silently did
+        # nothing (the failure was logged at debug level only). This label makes the
+        # actual connection state visible instead of a click doing nothing unexplained.
+        self._connection_label = QLabel("● Offline", self)
+        self._connection_label.setStyleSheet("color: #a33;")
+        layout.addWidget(self._connection_label)
+
+        self.set_connected(False)
+
     def set_time(self, position_us: int, duration_us: int | None) -> None:
         duration_text = format_timecode(duration_us) if duration_us is not None else "--:--:--.---"
         self._time_label.setText(f"{format_timecode(position_us)} / {duration_text}")
+
+    def set_connected(self, connected: bool) -> None:
+        self.set_transport_enabled(connected)
+        if connected:
+            self._connection_label.setText("● Connected")
+            self._connection_label.setStyleSheet("color: #2a2;")
+        else:
+            self._connection_label.setText("● Offline")
+            self._connection_label.setStyleSheet("color: #a33;")
 
     def set_transport_enabled(self, enabled: bool) -> None:
         """spec #137: 'VLC offline -> all VLC transport disabled'."""
