@@ -168,7 +168,9 @@ def test_selection_start_end_fields_track_and_edit_the_selection(qtbot) -> None:
     assert window._selection_start_edit.text() == "00:00:00.500"
 
     window._waveform_scene.clear_selection()
-    assert window._selection_start_edit.text() == ""
+    # TimecodeEdit is a row of numeric spin boxes now, not a blankable text field --
+    # cleared just means back to zero, disabled/greyed out.
+    assert window._selection_start_edit.text() == "00:00:00.000"
     assert window._selection_start_edit.isEnabled() is False
 
 
@@ -238,7 +240,8 @@ def test_transport_bookmark_fields_mirror_and_edit_the_inspected_bookmark(qtbot)
 
     window._on_bookmark_activated(bookmark.id)  # clears/reloads focus path, then clear it
     window._clear_inspector()
-    assert window._transport._bookmark_start_edit.text() == ""
+    # TimecodeEdit is a row of numeric spin boxes now, not a blankable text field.
+    assert window._transport._bookmark_start_edit.text() == "00:00:00.000"
     assert window._transport._bookmark_start_edit.isEnabled() is False
 
 
@@ -313,8 +316,12 @@ def test_inspector_start_end_fields_are_editable_and_persist(qtbot) -> None:
 def test_inspector_start_field_commits_on_real_enter_keypress(qtbot) -> None:
     """Same as test_inspector_start_end_fields_are_editable_and_persist but drives
     the field the way a real user does -- select all, type, press Enter -- to prove
-    QLineEdit.editingFinished actually reaches _on_inspector_start_committed, not
-    just that the handler is correct when called directly.
+    the per-unit spin boxes' editingFinished actually reaches
+    _on_inspector_start_committed, not just that the handler is correct when called
+    directly. TimecodeEdit is a row of separate HH/MM/SS/mmm spin boxes (direct
+    follow-up request: "each time unit has its own control arrows, just as in
+    audacity"), so driving it means typing into the specific unit boxes that need
+    to change (start is 00:00:01.000, target is 00:00:00.500 -- seconds and millis).
     """
     window, repo, playlist, media = _build_window(qtbot)
     from bookmark_studio.domain.selection import Selection
@@ -324,10 +331,15 @@ def test_inspector_start_field_commits_on_real_enter_keypress(qtbot) -> None:
     bookmark = repo.list_for_playlist_media(playlist.id, media.id)[0]
 
     edit = window._inspector._start_edit
-    edit.setFocus()
-    edit.selectAll()
-    QTest.keyClicks(edit, "00:00:00.500")
-    QTest.keyClick(edit, Qt.Key_Return)
+
+    edit._seconds.setFocus()
+    edit._seconds.selectAll()
+    QTest.keyClicks(edit._seconds, "00")
+
+    edit._millis.setFocus()
+    edit._millis.selectAll()
+    QTest.keyClicks(edit._millis, "500")
+    QTest.keyClick(edit._millis, Qt.Key_Return)
 
     assert repo.get(bookmark.id).start_us == 500_000
 

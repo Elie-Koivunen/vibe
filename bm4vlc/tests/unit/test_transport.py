@@ -49,7 +49,10 @@ def test_set_bookmark_times_updates_and_disables_appropriately(qtbot) -> None:
     transport = TransportBar()
     qtbot.addWidget(transport)
 
-    assert transport._bookmark_start_edit.text() == ""
+    # TimecodeEdit is a row of numeric spin boxes now, not a blankable text field --
+    # with nothing loaded it just shows the zero value, disabled/greyed out, same
+    # convention as any other disabled QSpinBox in this app.
+    assert transport._bookmark_start_edit.text() == "00:00:00.000"
     assert transport._bookmark_start_edit.isEnabled() is False
     assert transport._bookmark_end_edit.isEnabled() is False
 
@@ -62,46 +65,50 @@ def test_set_bookmark_times_updates_and_disables_appropriately(qtbot) -> None:
     # A point bookmark has a start but no end.
     transport.set_bookmark_times(2_000_000, None)
     assert transport._bookmark_start_edit.text() == "00:00:02.000"
-    assert transport._bookmark_end_edit.text() == ""
+    assert transport._bookmark_end_edit.text() == "00:00:00.000"
     assert transport._bookmark_end_edit.isEnabled() is False
 
     transport.set_bookmark_times(None, None)
-    assert transport._bookmark_start_edit.text() == ""
+    assert transport._bookmark_start_edit.text() == "00:00:00.000"
     assert transport._bookmark_start_edit.isEnabled() is False
 
 
 def test_editing_bookmark_start_end_fields_emits_commit_signals(qtbot) -> None:
+    """TimecodeEdit is a composite of four per-unit spin boxes (HH/MM/SS/mmm), each
+    its own QLineEdit-shaped sub-widget -- typing into one and pressing Enter (or
+    losing focus) commits, same as any other field in this app."""
     transport = TransportBar()
     qtbot.addWidget(transport)
     transport.show()
-    transport.set_bookmark_times(5_000_000, 10_000_000)
+    transport.set_bookmark_times(5_000_000, 10_000_000)  # "00:00:05.000" / "00:00:10.000"
 
     start_requests = []
     end_requests = []
     transport.bookmark_start_committed.connect(start_requests.append)
     transport.bookmark_end_committed.connect(end_requests.append)
 
-    start_edit = transport._bookmark_start_edit
-    start_edit.setFocus()
-    start_edit.selectAll()
-    QTest.keyClicks(start_edit, "00:00:06.000")
-    QTest.keyClick(start_edit, Qt.Key_Return)
+    start_seconds = transport._bookmark_start_edit._seconds
+    start_seconds.setFocus()
+    start_seconds.selectAll()
+    QTest.keyClicks(start_seconds, "06")
+    QTest.keyClick(start_seconds, Qt.Key_Return)
     assert start_requests == [6_000_000]
 
-    end_edit = transport._bookmark_end_edit
-    end_edit.setFocus()
-    end_edit.selectAll()
-    QTest.keyClicks(end_edit, "00:00:12.000")
-    QTest.keyClick(end_edit, Qt.Key_Return)
+    end_seconds = transport._bookmark_end_edit._seconds
+    end_seconds.setFocus()
+    end_seconds.selectAll()
+    QTest.keyClicks(end_seconds, "12")
+    QTest.keyClick(end_seconds, Qt.Key_Return)
     assert end_requests == [12_000_000]
 
 
-def test_bookmark_field_arrow_keys_step_the_section_under_the_cursor(qtbot) -> None:
-    """Direct follow-up request: "the bookmark fields still lack arrow buttons to
-    increment/decrement the time for hour, minutes, seconds, etc." -- TimecodeEdit is
-    now a real QAbstractSpinBox (visible spinner buttons, not just a keyboard
-    shortcut) whose Up/Down steps whichever HH/MM/SS/mmm section the cursor sits in,
-    like a QTimeEdit, and commits immediately (no separate Enter needed)."""
+def test_bookmark_field_each_unit_has_its_own_arrow_buttons(qtbot) -> None:
+    """Direct follow-up request: "i would assume that each time unit has its own
+    control arrows, just as in audacity" -- TimecodeEdit is a row of four real
+    QSpinBoxes (hours/minutes/seconds/millis), each with its own spinner arrows
+    (and Up/Down while focused), rather than one shared pair that stepped whichever
+    section the text cursor happened to be sitting in. Each step commits
+    immediately (no separate Enter needed)."""
     transport = TransportBar()
     qtbot.addWidget(transport)
     transport.show()
@@ -111,33 +118,34 @@ def test_bookmark_field_arrow_keys_step_the_section_under_the_cursor(qtbot) -> N
     transport.bookmark_start_committed.connect(start_requests.append)
 
     edit = transport._bookmark_start_edit
-    edit.setFocus()
 
-    edit.lineEdit().setCursorPosition(7)  # within the seconds section ("SS")
-    QTest.keyClick(edit, Qt.Key_Up)
+    edit._seconds.setFocus()
+    QTest.keyClick(edit._seconds, Qt.Key_Up)
     assert edit.text() == "00:00:06.000"
     assert start_requests[-1] == 6_000_000
 
-    edit.lineEdit().setCursorPosition(1)  # within the hours section ("HH")
-    QTest.keyClick(edit, Qt.Key_Up)
+    edit._hours.setFocus()
+    QTest.keyClick(edit._hours, Qt.Key_Up)
     assert edit.text() == "01:00:06.000"
     assert start_requests[-1] == 3_606_000_000
 
-    edit.lineEdit().setCursorPosition(4)  # within the minutes section ("MM")
-    QTest.keyClick(edit, Qt.Key_Down)
+    edit._minutes.setFocus()
+    QTest.keyClick(edit._minutes, Qt.Key_Down)
     assert edit.text() == "00:59:06.000"
     assert start_requests[-1] == 3_546_000_000
 
 
 def test_bookmark_field_arrow_key_does_not_go_negative(qtbot) -> None:
+    """A unit stepping below its own range (e.g. seconds going below 0 from
+    00:00:00) must clamp the WHOLE value at zero, not wrap+carry into the higher
+    units (which would silently jump to something like 00:59:59)."""
     transport = TransportBar()
     qtbot.addWidget(transport)
     transport.show()
     transport.set_bookmark_times(500_000, None)  # 0.5s -- one second-step would go negative
 
     edit = transport._bookmark_start_edit
-    edit.setFocus()
-    edit.lineEdit().setCursorPosition(7)  # within the seconds section
-    QTest.keyClick(edit, Qt.Key_Down)
+    edit._seconds.setFocus()
+    QTest.keyClick(edit._seconds, Qt.Key_Down)
 
     assert edit.text() == "00:00:00.000"

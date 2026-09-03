@@ -5,7 +5,9 @@ import re
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QAbstractSpinBox, QGridLayout, QLabel, QPushButton, QWidget
+from PySide6.QtWidgets import (
+    QAbstractSpinBox, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QWidget,
+)
 
 BUTTON_FONT_POINT_SIZE = 16
 BUTTON_MIN_SIZE = 44
@@ -43,64 +45,158 @@ def format_timecode(time_us: int) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
 
 
-class TimecodeEdit(QAbstractSpinBox):
-    """An HH:MM:SS.mmm timecode field with real, visible spinner arrow buttons --
-    direct follow-up user request: "the bookmark fields still lack arrow buttons to
-    increment/decrement the time for hour, minutes, seconds, etc." A plain QLineEdit
-    (the previous implementation) only supported Up/Down as a *keyboard* shortcut,
-    with no on-screen control at all -- QAbstractSpinBox draws its own up/down
-    buttons for free, and stepBy() below makes them (and the Up/Down keys, which
-    QAbstractSpinBox already routes to stepBy()) act on whichever HH/MM/SS/mmm
-    section the cursor is currently sitting in, like a QTimeEdit, rather than always
-    stepping the whole value by a fixed amount.
+class _UnitSpinBox(QSpinBox):
+    """One zero-padded HH/MM/SS/mmm segment of a TimecodeEdit, with its own visible
+    spin arrows -- direct follow-up request: "i would assume that each time unit has
+    its own control arrows, just as in audacity". A single shared pair of arrows
+    (the previous design, which stepped whichever section the text cursor happened
+    to be in) wasn't what "arrow buttons" meant to begin with. Stepping is fully
+    delegated to the owning TimecodeEdit (see `on_stepped`) rather than handled
+    locally: independently wrapping/carrying each box in isolation has a nasty edge
+    case at the very start of the timecode -- stepping "seconds" down from
+    00:00:00 would wrap+carry all the way up to 00:59:59 instead of just refusing to
+    go negative. TimecodeEdit instead recomputes and clamps the WHOLE value as one
+    number, then redistributes it back into all four boxes.
     """
 
-    # (section_start, section_end, microseconds_per_step) over the fixed
-    # "HH:MM:SS.mmm" layout -- cursor position decides which section steps.
-    _SECTIONS = [(0, 2, 3_600_000_000), (3, 5, 60_000_000), (6, 8, 1_000_000), (9, 12, 1_000)]
-
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, maximum: int, digits: int, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.lineEdit().setText(format_timecode(0))
+        self._digits = digits
+        self.setRange(0, maximum)
         self.setAlignment(Qt.AlignCenter)
+        self.setFrame(False)
+        self.on_stepped: object = None  # set by TimecodeEdit: called with `steps` (usually +-1)
 
-    # -- QLineEdit-shaped API, so call sites elsewhere don't need to change --
+    def textFromValue(self, value: int) -> str:
+        return str(value).zfill(self._digits)
 
-    def text(self) -> str:
-        return self.lineEdit().text()
-
-    def setText(self, text: str) -> None:
-        self.lineEdit().setText(text)
-
-    def clear(self) -> None:
-        self.lineEdit().clear()
-
-    def setPlaceholderText(self, text: str) -> None:
-        self.lineEdit().setPlaceholderText(text)
-
-    # -- QAbstractSpinBox hooks --
+    def valueFromText(self, text: str) -> int:
+        try:
+            return int(text or 0)
+        except ValueError:
+            return 0
 
     def stepBy(self, steps: int) -> None:
-        cursor_pos = self.lineEdit().cursorPosition()
-        try:
-            current_us = parse_timecode(self.text())
-        except ValueError:
-            current_us = 0
-        delta_us = self._delta_for_cursor(cursor_pos) * steps
-        self.setText(format_timecode(max(0, current_us + delta_us)))
-        self.lineEdit().setCursorPosition(cursor_pos)
-        self.editingFinished.emit()
+        if self.on_stepped is not None:
+            self.on_stepped(steps)
+        else:
+            super().stepBy(steps)
 
     def stepEnabled(self) -> QAbstractSpinBox.StepEnabledFlag:
+        # The default implementation gates Up/Down on THIS box's own value vs. its
+        # own min/max (e.g. refuses to step "seconds" down any further once it's at
+        # 0) -- but stepBy() above hands stepping off to the owning TimecodeEdit,
+        # which clamps the WHOLE value instead. Without this override, Qt would
+        # silently swallow the key/click before stepBy() (and TimecodeEdit's own
+        # clamp) ever runs at all, e.g. refusing to step "seconds" down at :00 even
+        # when the overall timecode is still well above zero (minutes > 0).
+        # TimecodeEdit's own clamp is the only limit that should apply.
         if not self.isEnabled() or self.isReadOnly():
             return QAbstractSpinBox.StepNone
         return QAbstractSpinBox.StepUpEnabled | QAbstractSpinBox.StepDownEnabled
 
-    def _delta_for_cursor(self, pos: int) -> int:
-        for start, end, delta in self._SECTIONS:
-            if start <= pos <= end:
-                return delta
-        return self._SECTIONS[-1][2]
+
+class TimecodeEdit(QWidget):
+    """An HH:MM:SS.mmm timecode field built from four _UnitSpinBox segments, each
+    with its own spin arrows -- see _UnitSpinBox's docstring. Exposes the same
+    text()/setText()/clear()/setPlaceholderText()/editingFinished surface the
+    previous single-field QLineEdit- and QAbstractSpinBox-based versions had, so
+    every call site elsewhere (selection bar, Inspector, transport bar) needed no
+    changes.
+    """
+
+    editingFinished = Signal()
+
+    # microseconds represented by one step of each unit, in the same order the
+    # boxes are laid out left-to-right.
+    _UNIT_STEP_US = {"hours": 3_600_000_000, "minutes": 60_000_000, "seconds": 1_000_000, "millis": 1_000}
+    _MAX_US = 99 * _UNIT_STEP_US["hours"] + 59 * _UNIT_STEP_US["minutes"] + 59 * _UNIT_STEP_US["seconds"] + 999_000
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._suppress_commit = False
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        self._hours = _UnitSpinBox(99, 2, self)
+        self._minutes = _UnitSpinBox(59, 2, self)
+        self._seconds = _UnitSpinBox(59, 2, self)
+        self._millis = _UnitSpinBox(999, 3, self)
+
+        layout.addWidget(self._hours)
+        layout.addWidget(QLabel(":", self))
+        layout.addWidget(self._minutes)
+        layout.addWidget(QLabel(":", self))
+        layout.addWidget(self._seconds)
+        layout.addWidget(QLabel(".", self))
+        layout.addWidget(self._millis)
+
+        self._hours.on_stepped = lambda steps: self._step_total(steps * self._UNIT_STEP_US["hours"])
+        self._minutes.on_stepped = lambda steps: self._step_total(steps * self._UNIT_STEP_US["minutes"])
+        self._seconds.on_stepped = lambda steps: self._step_total(steps * self._UNIT_STEP_US["seconds"])
+        self._millis.on_stepped = lambda steps: self._step_total(steps * self._UNIT_STEP_US["millis"])
+
+        # Typed entry (not an arrow/spin step) still only commits on Enter/blur,
+        # same as every other editable field in this app -- native editingFinished,
+        # not valueChanged, which would fire on every half-typed keystroke.
+        for box in (self._hours, self._minutes, self._seconds, self._millis):
+            box.editingFinished.connect(self._commit)
+
+    def _step_total(self, delta_us: int) -> None:
+        # Direct user request (of the earlier, single-shared-arrow version, still
+        # true here): an arrow press commits immediately, no separate Enter needed.
+        new_us = max(0, min(self._MAX_US, self._value_us() + delta_us))
+        self.setText(format_timecode(new_us))
+        self._commit()
+
+    def _commit(self) -> None:
+        if not self._suppress_commit:
+            self.editingFinished.emit()
+
+    # -- QLineEdit-shaped API, so call sites elsewhere don't need to change --
+
+    def text(self) -> str:
+        return format_timecode(self._value_us())
+
+    def setText(self, text: str) -> None:
+        try:
+            time_us = parse_timecode(text) if text else 0
+        except ValueError:
+            time_us = 0
+        self._suppress_commit = True
+        try:
+            total_ms = time_us // 1000
+            self._millis.setValue(total_ms % 1000)
+            total_seconds = total_ms // 1000
+            self._seconds.setValue(total_seconds % 60)
+            total_minutes = total_seconds // 60
+            self._minutes.setValue(total_minutes % 60)
+            self._hours.setValue(min(total_minutes // 60, self._hours.maximum()))
+        finally:
+            self._suppress_commit = False
+
+    def clear(self) -> None:
+        self.setText("")
+
+    def setPlaceholderText(self, _text: str) -> None:
+        pass  # no single text field to place it in -- kept as a harmless no-op
+
+    def setToolTip(self, text: str) -> None:  # noqa: N802 - Qt override
+        super().setToolTip(text)
+        for box in (self._hours, self._minutes, self._seconds, self._millis):
+            box.setToolTip(text)
+
+    def hasFocus(self) -> bool:  # noqa: N802 - Qt override
+        return any(box.hasFocus() for box in (self._hours, self._minutes, self._seconds, self._millis))
+
+    def _value_us(self) -> int:
+        total_ms = (
+            ((self._hours.value() * 60 + self._minutes.value()) * 60 + self._seconds.value()) * 1000
+            + self._millis.value()
+        )
+        return total_ms * 1000
 
 
 class TransportBar(QWidget):
