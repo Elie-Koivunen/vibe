@@ -31,18 +31,6 @@ class PlaylistPanel(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        # Direct follow-up request: "move the connection status to above the launch
-        # vlc button and enlarge the text" -- previously a small "● Connected" /
-        # "● Offline" label buried in the transport bar, far from the button that
-        # actually establishes the connection it's reporting on.
-        self._connection_label = QLabel("● Offline", self)
-        connection_font = QFont()
-        connection_font.setPointSize(14)
-        connection_font.setBold(True)
-        self._connection_label.setFont(connection_font)
-        self._connection_label.setStyleSheet("color: #a33;")
-        layout.addWidget(self._connection_label)
-
         # Direct user request: "add button to launch vlc and a browse button to
         # select desired playlist" / "option to select an open vlc instance, a drop
         # box ... alternatively the user would launch a new instance with a browse
@@ -55,6 +43,19 @@ class PlaylistPanel(QWidget):
         )
         self._launch_vlc_button.clicked.connect(self.launch_vlc_requested.emit)
         layout.addWidget(self._launch_vlc_button)
+
+        # Direct follow-up requests: "move the connection status to above the launch
+        # vlc button and enlarge the text", then "move the button above and make the
+        # connected/disconnected text a bit smaller" -- previously a small label
+        # buried in the transport bar, far from the button that actually establishes
+        # the connection it's reporting on; now sits right under that button instead.
+        self._connection_label = QLabel("● Offline", self)
+        connection_font = QFont()
+        connection_font.setPointSize(10)
+        connection_font.setBold(True)
+        self._connection_label.setFont(connection_font)
+        self._connection_label.setStyleSheet("color: #a33;")
+        layout.addWidget(self._connection_label)
 
         self._filter_edit = QLineEdit(self)
         self._filter_edit.setPlaceholderText("Filter...")

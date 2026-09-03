@@ -93,9 +93,13 @@ class MainWindow(QMainWindow):
         # Direct user request: "add additional fields to display start/end time based
         # on how the bookmark is highlighted" -- editable, so a drag-selection can be
         # fine-tuned numerically before turning it into a bookmark, not just read.
+        # A MINIMUM width, not a cap -- same class of clipping bug just fixed on the
+        # transport bar's bookmark fields (TimecodeEdit's own spin-button-aware
+        # sizeHint knows how much room it actually needs; a maximum below that just
+        # clips the digits).
         self._selection_start_edit = TimecodeEdit(self)
         self._selection_start_edit.setPlaceholderText("Start")
-        self._selection_start_edit.setMaximumWidth(110)
+        self._selection_start_edit.setMinimumWidth(110)
         self._selection_start_edit.setEnabled(False)
         self._selection_start_edit.editingFinished.connect(self._on_selection_start_edited)
         layout.addWidget(self._selection_start_edit)
@@ -104,7 +108,7 @@ class MainWindow(QMainWindow):
 
         self._selection_end_edit = TimecodeEdit(self)
         self._selection_end_edit.setPlaceholderText("End")
-        self._selection_end_edit.setMaximumWidth(110)
+        self._selection_end_edit.setMinimumWidth(110)
         self._selection_end_edit.setEnabled(False)
         self._selection_end_edit.editingFinished.connect(self._on_selection_end_edited)
         layout.addWidget(self._selection_end_edit)

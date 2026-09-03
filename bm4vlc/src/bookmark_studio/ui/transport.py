@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QAbstractSpinBox, QGridLayout, QLabel, QPushButton
 
 BUTTON_FONT_POINT_SIZE = 16
 BUTTON_MIN_SIZE = 44
+BOOKMARK_FIELD_FONT_POINT_SIZE = 12
 
 _TIMECODE_RE = re.compile(
     r"^(?:(?:(\d+):)?(\d+):)?(\d+)(?:\.(\d{1,3}))?$"
@@ -189,11 +190,25 @@ class TransportBar(QWidget):
         # _position_label above, so the two stay visually stacked.
         layout.addWidget(QLabel("Bookmark:", self), 1, 9, alignment=Qt.AlignRight)
 
+        # Direct follow-up request: "the interface needs to be reworked" -- the
+        # bookmark fields were being clipped (screenshot showed a lone "3" where the
+        # end field's digits should be). Root cause: TimecodeEdit became a real
+        # QAbstractSpinBox (so it could grow its own visible spinner buttons), but
+        # these two fields still carried the OLD QLineEdit-era setMaximumWidth(150)
+        # cap sized for a plain text box with no button area -- at the 16pt button
+        # font it was never wide enough for "00:00:00.000" plus those buttons. Now
+        # uses its own, slightly smaller font (fits comfortably without dominating
+        # the row) and a MINIMUM width instead of a cap, so the widget's own
+        # size-aware layout (which already reserves room for the spin buttons) is
+        # never squeezed below what it says it actually needs.
+        timecode_font = QFont()
+        timecode_font.setPointSize(BOOKMARK_FIELD_FONT_POINT_SIZE)
+
         self._bookmark_start_edit = TimecodeEdit(self)
-        self._bookmark_start_edit.setFont(button_font)
-        self._bookmark_start_edit.setMaximumWidth(150)
+        self._bookmark_start_edit.setFont(timecode_font)
+        self._bookmark_start_edit.setMinimumWidth(130)
         self._bookmark_start_edit.setToolTip(
-            "Selected bookmark's start -- edit and press Enter (or use ↑/↓) to adjust it"
+            "Selected bookmark's start -- edit and press Enter (or use ↑/↓, or the spinner buttons) to adjust it"
         )
         self._bookmark_start_edit.editingFinished.connect(self._on_bookmark_start_committed)
         layout.addWidget(self._bookmark_start_edit, 1, 10)
@@ -201,10 +216,10 @@ class TransportBar(QWidget):
         layout.addWidget(QLabel("→", self), 1, 11)
 
         self._bookmark_end_edit = TimecodeEdit(self)
-        self._bookmark_end_edit.setFont(button_font)
-        self._bookmark_end_edit.setMaximumWidth(150)
+        self._bookmark_end_edit.setFont(timecode_font)
+        self._bookmark_end_edit.setMinimumWidth(130)
         self._bookmark_end_edit.setToolTip(
-            "Selected bookmark's end -- edit and press Enter (or use ↑/↓) to adjust it"
+            "Selected bookmark's end -- edit and press Enter (or use ↑/↓, or the spinner buttons) to adjust it"
         )
         self._bookmark_end_edit.editingFinished.connect(self._on_bookmark_end_committed)
         layout.addWidget(self._bookmark_end_edit, 1, 12)
