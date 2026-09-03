@@ -58,6 +58,61 @@ def test_editing_position_field_emits_position_seek_requested(qtbot) -> None:
     assert requests == [15_000_000]
 
 
+def test_set_bookmark_times_updates_and_disables_appropriately(qtbot) -> None:
+    """Direct follow-up request: "the fields should reflect the bookmark start time
+    and end time, a different timer should be adjacent for the duration of the whole
+    song" -- added a mirrored, editable Start/End pair for the currently selected
+    bookmark, next to the existing live position/duration."""
+    transport = TransportBar()
+    qtbot.addWidget(transport)
+
+    assert transport._bookmark_start_edit.text() == ""
+    assert transport._bookmark_start_edit.isEnabled() is False
+    assert transport._bookmark_end_edit.isEnabled() is False
+
+    transport.set_bookmark_times(5_000_000, 10_000_000)
+    assert transport._bookmark_start_edit.text() == "00:00:05.000"
+    assert transport._bookmark_end_edit.text() == "00:00:10.000"
+    assert transport._bookmark_start_edit.isEnabled() is True
+    assert transport._bookmark_end_edit.isEnabled() is True
+
+    # A point bookmark has a start but no end.
+    transport.set_bookmark_times(2_000_000, None)
+    assert transport._bookmark_start_edit.text() == "00:00:02.000"
+    assert transport._bookmark_end_edit.text() == ""
+    assert transport._bookmark_end_edit.isEnabled() is False
+
+    transport.set_bookmark_times(None, None)
+    assert transport._bookmark_start_edit.text() == ""
+    assert transport._bookmark_start_edit.isEnabled() is False
+
+
+def test_editing_bookmark_start_end_fields_emits_commit_signals(qtbot) -> None:
+    transport = TransportBar()
+    qtbot.addWidget(transport)
+    transport.show()
+    transport.set_bookmark_times(5_000_000, 10_000_000)
+
+    start_requests = []
+    end_requests = []
+    transport.bookmark_start_committed.connect(start_requests.append)
+    transport.bookmark_end_committed.connect(end_requests.append)
+
+    start_edit = transport._bookmark_start_edit
+    start_edit.setFocus()
+    start_edit.selectAll()
+    QTest.keyClicks(start_edit, "00:00:06.000")
+    QTest.keyClick(start_edit, Qt.Key_Return)
+    assert start_requests == [6_000_000]
+
+    end_edit = transport._bookmark_end_edit
+    end_edit.setFocus()
+    end_edit.selectAll()
+    QTest.keyClicks(end_edit, "00:00:12.000")
+    QTest.keyClick(end_edit, Qt.Key_Return)
+    assert end_requests == [12_000_000]
+
+
 def test_set_time_does_not_clobber_the_field_while_it_has_focus(qtbot) -> None:
     """A live status poll calls set_time() roughly every 400ms -- it must not stomp
     whatever the user is mid-typing into the position field. Real OS-level focus is

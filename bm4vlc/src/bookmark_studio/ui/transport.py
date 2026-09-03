@@ -52,6 +52,8 @@ class TransportBar(QWidget):
     next_track_clicked = Signal()
     next_bookmark_clicked = Signal()
     position_seek_requested = Signal(int)  # microseconds -- manually typed into the position field
+    bookmark_start_committed = Signal(int)  # microseconds -- edited bookmark start
+    bookmark_end_committed = Signal(int)  # microseconds -- edited bookmark end
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -104,6 +106,33 @@ class TransportBar(QWidget):
         self._duration_label.setFont(button_font)
         layout.addWidget(self._duration_label)
 
+        # Direct follow-up request: "the fields should reflect the bookmark start
+        # time and end time, a different timer should be adjacent for the duration
+        # of the whole song" -- added alongside (not replacing) live position/
+        # duration above. Mirrors the currently selected/loaded bookmark (same one
+        # the Inspector shows) and edits it the same way; MainWindow wires these
+        # signals to the exact same handlers as the Inspector's own Start/End fields,
+        # and keeps both in sync whenever either one changes.
+        layout.addWidget(QLabel("Bookmark:", self))
+
+        self._bookmark_start_edit = QLineEdit(self)
+        self._bookmark_start_edit.setFont(button_font)
+        self._bookmark_start_edit.setMaximumWidth(150)
+        self._bookmark_start_edit.setToolTip("Selected bookmark's start -- edit and press Enter to adjust it")
+        self._bookmark_start_edit.editingFinished.connect(self._on_bookmark_start_committed)
+        layout.addWidget(self._bookmark_start_edit)
+
+        layout.addWidget(QLabel("→", self))
+
+        self._bookmark_end_edit = QLineEdit(self)
+        self._bookmark_end_edit.setFont(button_font)
+        self._bookmark_end_edit.setMaximumWidth(150)
+        self._bookmark_end_edit.setToolTip("Selected bookmark's end -- edit and press Enter to adjust it")
+        self._bookmark_end_edit.editingFinished.connect(self._on_bookmark_end_committed)
+        layout.addWidget(self._bookmark_end_edit)
+
+        self.set_bookmark_times(None, None)
+
         # Direct fix for "the player buttons do not map to vlc player, hence not
         # functioning": set_transport_enabled() (spec #137) existed but was never once
         # called anywhere in app/application.py -- buttons stayed clickable-looking
@@ -131,6 +160,35 @@ class TransportBar(QWidget):
         except ValueError:
             return  # will be overwritten back to the real position on the next poll
         self.position_seek_requested.emit(time_us)
+
+    def set_bookmark_times(self, start_us: int | None, end_us: int | None) -> None:
+        """Called whenever the Inspector's loaded bookmark changes (including to
+        None, e.g. nothing selected or a point bookmark with no end) -- keeps this
+        mini pair in sync with whatever's actually selected, the same way
+        BookmarkInspector.load_bookmark()/clear() do for the main Start/End fields.
+        """
+        has_bookmark = start_us is not None
+        if not self._bookmark_start_edit.hasFocus():
+            self._bookmark_start_edit.setText(format_timecode(start_us) if has_bookmark else "")
+        self._bookmark_start_edit.setEnabled(has_bookmark)
+        has_end = end_us is not None
+        if not self._bookmark_end_edit.hasFocus():
+            self._bookmark_end_edit.setText(format_timecode(end_us) if has_end else "")
+        self._bookmark_end_edit.setEnabled(has_end)
+
+    def _on_bookmark_start_committed(self) -> None:
+        try:
+            time_us = parse_timecode(self._bookmark_start_edit.text())
+        except ValueError:
+            return  # caller reverts via the next set_bookmark_times() call
+        self.bookmark_start_committed.emit(time_us)
+
+    def _on_bookmark_end_committed(self) -> None:
+        try:
+            time_us = parse_timecode(self._bookmark_end_edit.text())
+        except ValueError:
+            return
+        self.bookmark_end_committed.emit(time_us)
 
     def set_connected(self, connected: bool) -> None:
         self.set_transport_enabled(connected)

@@ -291,6 +291,12 @@ class MainWindow(QMainWindow):
         self._inspector.start_committed.connect(self._on_inspector_start_committed)
         self._inspector.end_committed.connect(self._on_inspector_end_committed)
 
+        # Direct follow-up request: transport-bar Start/End fields mirror and edit
+        # the same currently-selected bookmark as the Inspector's own fields --
+        # reuse the exact same commit handlers so both stay in sync automatically.
+        self._transport.bookmark_start_committed.connect(self._on_inspector_start_committed)
+        self._transport.bookmark_end_committed.connect(self._on_inspector_end_committed)
+
         self._playlist_panel.launch_vlc_requested.connect(self.launch_vlc_requested.emit)
 
     # -- context --
@@ -467,7 +473,7 @@ class MainWindow(QMainWindow):
         self._undo_stack.push(CreateBookmarkCommand(self._bookmark_repository, bookmark))
         self._refresh_bookmarks()
         # spec #46: inline name editor appears immediately after creation, no modal.
-        self._inspector.load_bookmark(bookmark)
+        self._load_bookmark_into_inspector(bookmark)
         self._bookmark_panel.select_bookmark(bookmark.id)
         self._inspector._name_edit.setFocus()
         self._inspector._name_edit.selectAll()
@@ -475,7 +481,7 @@ class MainWindow(QMainWindow):
     def _on_bookmark_activated(self, bookmark_id: UUID) -> None:
         bookmark = self._bookmark_repository.get(bookmark_id)
         if bookmark is not None:
-            self._inspector.load_bookmark(bookmark)
+            self._load_bookmark_into_inspector(bookmark)
             self._bookmark_panel.select_bookmark(bookmark_id)
 
     def _on_bookmark_move_finished(self, bookmark_id: UUID, start_us: int, end_us: int) -> None:
@@ -511,7 +517,7 @@ class MainWindow(QMainWindow):
             return
         updated = self._bookmark_repository.get(bookmark_id)
         if updated is not None:
-            self._inspector.load_bookmark(updated)
+            self._load_bookmark_into_inspector(updated)
 
     def _on_name_committed(self, new_name: str) -> None:
         bookmark = self._current_inspected_bookmark()
@@ -545,7 +551,7 @@ class MainWindow(QMainWindow):
         if bookmark is None:
             return
         if start_us < 0 or (bookmark.end_us is not None and start_us >= bookmark.end_us):
-            self._inspector.load_bookmark(bookmark)  # reject and revert the field
+            self._load_bookmark_into_inspector(bookmark)  # reject and revert the field
             return
         self._undo_stack.push(
             ResizeBookmarkCommand(self._bookmark_repository, bookmark.id, "start", bookmark.start_us, start_us)
@@ -558,7 +564,7 @@ class MainWindow(QMainWindow):
         if bookmark is None or bookmark.end_us is None:
             return  # a point bookmark has no end to edit; the field is disabled anyway
         if end_us <= bookmark.start_us:
-            self._inspector.load_bookmark(bookmark)  # reject and revert the field
+            self._load_bookmark_into_inspector(bookmark)  # reject and revert the field
             return
         self._undo_stack.push(
             ResizeBookmarkCommand(self._bookmark_repository, bookmark.id, "end", bookmark.end_us, end_us)
@@ -576,7 +582,7 @@ class MainWindow(QMainWindow):
         if bookmark is None:
             return
         self._undo_stack.push(DeleteBookmarkCommand(self._bookmark_repository, bookmark))
-        self._inspector.clear()
+        self._clear_inspector()
         self._refresh_bookmarks()
 
     def _on_delete_bookmark_requested(self, bookmark_ids: list) -> None:
@@ -595,11 +601,23 @@ class MainWindow(QMainWindow):
                 continue
             self._undo_stack.push(DeleteBookmarkCommand(self._bookmark_repository, bookmark))
             if inspected is not None and inspected.id == bookmark_id:
-                self._inspector.clear()
+                self._clear_inspector()
         self._refresh_bookmarks()
 
     def _current_inspected_bookmark(self) -> Bookmark | None:
         return self._inspector.current_bookmark()
+
+    def _load_bookmark_into_inspector(self, bookmark: Bookmark) -> None:
+        """Single funnel for every "show this bookmark for editing" path, so the
+        transport bar's mirrored Start/End fields (see TransportBar.set_bookmark_times)
+        never fall out of sync with whatever the Inspector itself is showing.
+        """
+        self._inspector.load_bookmark(bookmark)
+        self._transport.set_bookmark_times(bookmark.start_us, bookmark.end_us)
+
+    def _clear_inspector(self) -> None:
+        self._inspector.clear()
+        self._transport.set_bookmark_times(None, None)
 
     def _refresh_bookmarks(self) -> None:
         if self._current_playlist_id is None and self._current_media_id is None:
