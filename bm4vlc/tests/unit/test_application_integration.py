@@ -620,8 +620,43 @@ def test_swap_adapter_retargets_session_at_a_new_instance(qtbot, running_app) ->
     assert app._current_vlc_item_id is None
     assert app._status_timer.isActive()
     assert app._playlist_timer.isActive()
+    # Regression: PlaylistSynchronizer.reset() existed specifically for this
+    # ("VLC restarted, spec #105") but was never called anywhere.
+    assert app._synchronizer.active_playlist_id is None
 
     qtbot.waitUntil(lambda: new_adapter._volume == 0, timeout=3000)
+
+
+def test_swapping_vlc_instance_does_not_carry_over_the_old_playlist_id(qtbot, running_app) -> None:
+    """Regression, reported live: "if i close and open a new vlc instance, it does
+    not recognize the change in playlist and applies the previous bookmarks to the
+    next playlist" -- without PlaylistSynchronizer.reset(), the synchronizer kept
+    matching the new (unrelated) playlist snapshot against the OLD session's
+    active_playlist_id via its own similarity-based "still the same playlist, just
+    edited" logic, so bookmarks kept attaching to the wrong playlist.
+    """
+    old_adapter = MockPlaybackAdapter(
+        [
+            VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0),
+            VlcPlaylistItem(vlc_id=2, uri="file:///b.mp3", name="Song B", duration_s=10.0),
+        ]
+    )
+    app = running_app(old_adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: len(app._playlist_items) == 2, timeout=3000)
+    old_playlist_id = app._synchronizer.active_playlist_id
+    assert old_playlist_id is not None
+
+    new_adapter = MockPlaybackAdapter(
+        [VlcPlaylistItem(vlc_id=1, uri="file:///completely_different.mp3", name="Other Song", duration_s=30.0)]
+    )
+    app._swap_adapter(new_adapter, mute_on_connect=False, new_vlc_process=None)
+    assert app._synchronizer.active_playlist_id is None  # reset immediately on swap
+
+    qtbot.waitUntil(lambda: len(app._playlist_items) == 1, timeout=3000)
+    qtbot.waitUntil(lambda: app._synchronizer.active_playlist_id is not None, timeout=3000)
+
+    assert app._synchronizer.active_playlist_id != old_playlist_id
 
 
 def test_prompt_vlc_launch_dialog_without_settings_shows_message_and_does_not_touch_adapter(

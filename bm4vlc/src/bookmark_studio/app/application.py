@@ -302,11 +302,21 @@ class Application(QObject):
         self._loop_controller.set_adapter(new_adapter)
         self._mute_pending = mute_on_connect
         self._current_vlc_item_id = None
+        self._actually_playing_vlc_item_id = None
         self._current_media_id = None
         self._preload_requested.clear()
         self._song_names_cache.clear()
         self._connected = False
         self.window._transport.set_connected(False)
+        # Regression, reported live: "if i close and open a new vlc instance, it does
+        # not recognize the change in playlist and applies the previous bookmarks to
+        # the next playlist". PlaylistSynchronizer.reset() exists specifically for
+        # this ("Forces full recognition on the next snapshot (e.g. VLC restarted,
+        # spec #105)") but was never actually called anywhere -- without it,
+        # active_playlist_id stayed pointed at the OLD session's playlist, and every
+        # bookmark shown/created afterward was scoped to that stale id instead of
+        # whatever playlist the new VLC instance is actually playing.
+        self._synchronizer.reset()
 
         try:
             new_adapter.connect()
