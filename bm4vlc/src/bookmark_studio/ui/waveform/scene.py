@@ -45,6 +45,11 @@ class WaveformScene(QGraphicsScene):
         self._playhead_item = PlayheadItem(self._height)
         self._playhead_item.setY(RULER_HEIGHT)
         self.addItem(self._playhead_item)
+        # Direct user request: "make it usable where as a user can move it and the
+        # song would start from there when played" -- dragging the playhead reuses
+        # this scene's existing seek_requested signal (same one empty-space clicks
+        # already use), so it's wired into VLC seeking for free.
+        self._playhead_item.seek_requested.connect(self.seek_requested.emit)
         self._selection_item: SelectionItem | None = None
         self._bookmark_items: dict[UUID, BookmarkRegionItem | BookmarkPointItem] = {}
         self.setSceneRect(QRectF(0, 0, time_us_to_scene_x(max(duration_us, 1)), RULER_HEIGHT + self._height))

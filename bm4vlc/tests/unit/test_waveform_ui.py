@@ -52,6 +52,43 @@ def test_click_empty_waveform_seeks(qtbot) -> None:
     assert abs(seeks[0] - 3_000_000) < 5_000  # within 5ms of the click
 
 
+def test_dragging_the_playhead_seeks_to_the_drop_position(qtbot) -> None:
+    """Direct user request: "on the waveform, the red progressline bar, make it
+    usable where as a user can move it and the song would start from there when
+    played"."""
+    scene, view = _make_view(qtbot)
+    scene.set_playhead_time_us(1_000_000)
+    seeks = []
+    scene.seek_requested.connect(lambda t: seeks.append(t))
+
+    start_pos = _to_view_pos(view, 1_000_000)
+    end_pos = _to_view_pos(view, 4_000_000)
+    QTest.mousePress(view.viewport(), Qt.LeftButton, pos=start_pos)
+    QTest.mouseMove(view.viewport(), pos=end_pos)
+    QTest.mouseRelease(view.viewport(), Qt.LeftButton, pos=end_pos)
+
+    assert len(seeks) == 1
+    assert abs(seeks[0] - 4_000_000) < 25_000
+    assert abs(scene.playhead_time_us() - 4_000_000) < 25_000
+
+
+def test_playhead_ignores_incoming_updates_while_being_dragged(qtbot) -> None:
+    """A live status poll calls set_playhead_time_us() roughly every 400ms -- while
+    the user is mid-drag, that must not snap the line back to the pre-seek position."""
+    scene, view = _make_view(qtbot)
+    scene.set_playhead_time_us(1_000_000)
+
+    start_pos = _to_view_pos(view, 1_000_000)
+    mid_pos = _to_view_pos(view, 5_000_000)
+    QTest.mousePress(view.viewport(), Qt.LeftButton, pos=start_pos)
+    QTest.mouseMove(view.viewport(), pos=mid_pos)
+
+    scene.set_playhead_time_us(1_200_000)  # simulates a poll tick arriving mid-drag
+    assert abs(scene.playhead_time_us() - 5_000_000) < 25_000
+
+    QTest.mouseRelease(view.viewport(), Qt.LeftButton, pos=mid_pos)
+
+
 def test_handle_empty_drag_past_track_end_does_not_raise(qtbot) -> None:
     """Regression, confirmed live: dragging a selection that starts at or past the very
     end of the track spammed "ValueError: end_us must be greater than start_us" on
