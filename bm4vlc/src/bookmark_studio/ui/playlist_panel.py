@@ -6,7 +6,7 @@ from uuid import UUID
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
-    QCheckBox, QLabel, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QCheckBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from bookmark_studio.playback.status import VlcPlaylistItem
@@ -15,9 +15,13 @@ COLUMNS = ["Title", "Artist", "Duration", "Bookmarks", "Status"]
 
 # Direct user request: "instead of having a playing column, reflect in traffic
 # color by highlighting the song that is being played e.g. in green" -- replaces
-# the old "▶" marker column with a full-row background tint instead.
-_PLAYING_ROW_COLOR = QColor("#8fd98f")
-_NOT_PLAYING_BRUSH = QBrush()
+# the old "▶" marker column with a full-row background tint instead. Direct
+# follow-up: "if playback is active, then the highlight is green, otherwise,
+# blue" -- distinguishes the current song actually playing from one that's just
+# loaded (paused/stopped).
+_ACTIVELY_PLAYING_COLOR = QColor("#8fd98f")
+_CURRENT_NOT_PLAYING_COLOR = QColor("#a9c9f5")
+_NOT_CURRENT_BRUSH = QBrush()
 
 
 class PlaylistPanel(QWidget):
@@ -31,6 +35,7 @@ class PlaylistPanel(QWidget):
         self._items: list[VlcPlaylistItem] = []
         self._bookmark_counts: dict[int, int] = {}
         self._current_playing_id: int | None = None
+        self._is_actively_playing = False
 
         layout = QVBoxLayout(self)
         # Direct user request: "beautify the layout".
@@ -55,23 +60,31 @@ class PlaylistPanel(QWidget):
         # connected/disconnected text a bit smaller" -- previously a small label
         # buried in the transport bar, far from the button that actually establishes
         # the connection it's reporting on; now sits right under that button instead.
+        # Then "move the checkbox next to the connected status field" -- shares this
+        # row with the Follow checkbox instead of sitting on its own line below.
+        status_row = QHBoxLayout()
         self._connection_label = QLabel("● Offline", self)
         connection_font = QFont()
         connection_font.setPointSize(10)
         connection_font.setBold(True)
         self._connection_label.setFont(connection_font)
         self._connection_label.setStyleSheet("color: #a33;")
-        layout.addWidget(self._connection_label)
-
-        self._filter_edit = QLineEdit(self)
-        self._filter_edit.setPlaceholderText("Filter...")
-        self._filter_edit.textChanged.connect(self._apply_filter)
-        layout.addWidget(self._filter_edit)
+        status_row.addWidget(self._connection_label)
 
         self._follow_checkbox = QCheckBox("Follow currently playing VLC song", self)
         self._follow_checkbox.setChecked(True)
         self._follow_checkbox.toggled.connect(self.follow_vlc_toggled.emit)
-        layout.addWidget(self._follow_checkbox)
+        status_row.addWidget(self._follow_checkbox)
+        status_row.addStretch(1)
+        layout.addLayout(status_row)
+
+        # Direct follow-up request: "move the filter field closer to the playlist
+        # table" -- sits immediately above the tree it filters, instead of with a
+        # full row (the connection/follow controls) between them.
+        self._filter_edit = QLineEdit(self)
+        self._filter_edit.setPlaceholderText("Filter...")
+        self._filter_edit.textChanged.connect(self._apply_filter)
+        layout.addWidget(self._filter_edit)
 
         self._tree = QTreeWidget(self)
         self._tree.setColumnCount(len(COLUMNS))
@@ -95,7 +108,7 @@ class PlaylistPanel(QWidget):
         self._bookmark_counts = normalized_counts
         self._rebuild()
 
-    def set_current_playing(self, vlc_id: int | None) -> None:
+    def set_current_playing(self, vlc_id: int | None, *, is_playing: bool = False) -> None:
         """Updates just the playing-row highlight on existing rows -- direct fix for
         "i still cant automatically play a song by double clicking the tittle": this
         used to call _rebuild(), which does _tree.clear() + recreates every
@@ -107,13 +120,18 @@ class PlaylistPanel(QWidget):
         already verified correct. It also wiped the current selection highlight and
         scroll position on every tick, a real bug in its own right even ignoring
         double-click. No rebuild is needed at all: only the highlighted row changes.
+
+        `is_playing` (direct follow-up request: "if playback is active, then the
+        highlight is green, otherwise, blue") is VLC's actual playback state for
+        this song, distinct from it merely being the current/loaded item.
         """
-        if vlc_id == self._current_playing_id:
+        if vlc_id == self._current_playing_id and is_playing == self._is_actively_playing:
             return
         self._current_playing_id = vlc_id
+        self._is_actively_playing = is_playing
         for i in range(self._tree.topLevelItemCount()):
             row = self._tree.topLevelItem(i)
-            _set_row_playing(row, row.data(0, 32) == vlc_id)
+            _set_row_playing(row, row.data(0, 32) == vlc_id, is_playing)
 
     def select_item(self, vlc_id: int | None) -> None:
         """Highlights the row for `vlc_id` -- direct user request: selecting a
@@ -164,7 +182,7 @@ class PlaylistPanel(QWidget):
                 ]
             )
             row.setData(0, 32, item.vlc_id)  # Qt.UserRole == 32
-            _set_row_playing(row, item.vlc_id == self._current_playing_id)
+            _set_row_playing(row, item.vlc_id == self._current_playing_id, self._is_actively_playing)
             self._tree.addTopLevelItem(row)
         # Direct user request: "have the columns resize automatically to the length
         # of the strings" -- stays manually resizable after this, just re-fit to the
@@ -189,8 +207,11 @@ class PlaylistPanel(QWidget):
         self.item_double_clicked.emit(item.data(0, 32))
 
 
-def _set_row_playing(row: QTreeWidgetItem, playing: bool) -> None:
-    brush = QBrush(_PLAYING_ROW_COLOR) if playing else _NOT_PLAYING_BRUSH
+def _set_row_playing(row: QTreeWidgetItem, is_current: bool, is_playing: bool) -> None:
+    if is_current:
+        brush = QBrush(_ACTIVELY_PLAYING_COLOR if is_playing else _CURRENT_NOT_PLAYING_COLOR)
+    else:
+        brush = _NOT_CURRENT_BRUSH
     for column in range(len(COLUMNS)):
         row.setBackground(column, brush)
 

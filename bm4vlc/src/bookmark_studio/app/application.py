@@ -544,7 +544,13 @@ class Application(QObject):
             self.window._waveform_scene.set_playhead_time_us(status.time_us)
             self.window._waveform_view.follow_playhead(status.time_us)
             self.window._transport.set_time(status.time_us, status.duration_us)
-            self.window._playlist_panel.set_current_playing(status.current_playlist_item_id)
+            # Direct follow-up request: "if playback is active, then the highlight
+            # is green, otherwise, blue" -- distinguishes the current-song row's
+            # tint by whether VLC is actually playing right now vs. just loaded
+            # (paused/stopped).
+            self.window._playlist_panel.set_current_playing(
+                status.current_playlist_item_id, is_playing=status.state == "playing"
+            )
             # Direct user request: "add options to fade in and fade out when playing
             # back" -- fades ramp to/from whatever the user's real volume actually is
             # (ignored by the controller itself while a fade is mid-ramp, see

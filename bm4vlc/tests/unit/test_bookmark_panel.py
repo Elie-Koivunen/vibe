@@ -185,6 +185,93 @@ def test_move_up_disabled_when_selection_already_at_top(qtbot) -> None:
     assert panel._move_down_button.isEnabled() is False  # also includes the bottom row
 
 
+def test_loop_fade_columns_show_labels_and_are_dropdown_editable(qtbot) -> None:
+    """Direct follow-up request: "the columns for loop, fade in/out etc, they
+    should also be directly editable, e.g. clicking would give a drop menu
+    options" -- Loop/Fade In/Fade Out are backed by a combo-box delegate; editing
+    any other column (e.g. Name) must not open one at all."""
+    from bookmark_studio.ui.bookmark_panel import FADE_IN_COLUMN, FADE_OUT_COLUMN, LOOP_COLUMN
+
+    panel = BookmarkPanel()
+    qtbot.addWidget(panel)
+    media_id = uuid4()
+    bookmark = _bookmark(
+        media_id, "Chorus", 1_000_000, end_us=2_000_000, bookmark_type=BookmarkType.SEGMENT,
+        loop_enabled=True, repeat_count=3, fade_in_ms=500, fade_out_ms=0,
+    )
+    panel.set_bookmarks([bookmark], {media_id: "Song"})
+
+    row = panel._tree.topLevelItem(0)
+    assert row.text(LOOP_COLUMN) == "×3"
+    assert row.text(FADE_IN_COLUMN) == "500 ms"
+    assert row.text(FADE_OUT_COLUMN) == "Off"
+
+    delegate = panel._tree.itemDelegate()
+    assert delegate.createEditor(None, None, panel._tree.model().index(0, LOOP_COLUMN)) is not None
+    assert delegate.createEditor(None, None, panel._tree.model().index(0, 1)) is None  # Name column
+
+
+def test_editing_loop_column_emits_loop_edited(qtbot) -> None:
+    panel = BookmarkPanel()
+    qtbot.addWidget(panel)
+    media_id = uuid4()
+    bookmark = _bookmark(
+        media_id, "Chorus", 1_000_000, end_us=2_000_000, bookmark_type=BookmarkType.SEGMENT, loop_enabled=False,
+    )
+    panel.set_bookmarks([bookmark], {media_id: "Song"})
+
+    requests = []
+    panel.loop_edited.connect(lambda *args: requests.append(args))
+    row = panel._tree.topLevelItem(0)
+    from bookmark_studio.ui.bookmark_panel import LOOP_COLUMN
+
+    row.setText(LOOP_COLUMN, "∞")  # simulates the combo delegate's setModelData commit
+
+    assert requests == [(bookmark.id, True, None)]
+
+
+def test_editing_loop_column_on_a_point_bookmark_is_rejected(qtbot) -> None:
+    """A point bookmark has no end_us, so it has nothing to loop over -- an edit
+    there must be rejected and the cell reverted, not silently accepted."""
+    panel = BookmarkPanel()
+    qtbot.addWidget(panel)
+    media_id = uuid4()
+    bookmark = _bookmark(media_id, "Point", 1_000_000)  # bookmark_type=POINT by default, end_us=None
+    panel.set_bookmarks([bookmark], {media_id: "Song"})
+
+    requests = []
+    panel.loop_edited.connect(lambda *args: requests.append(args))
+    row = panel._tree.topLevelItem(0)
+    from bookmark_studio.ui.bookmark_panel import LOOP_COLUMN
+
+    row.setText(LOOP_COLUMN, "∞")
+
+    assert requests == []
+    assert row.text(LOOP_COLUMN) == "Off"
+
+
+def test_editing_fade_columns_emits_fade_edited(qtbot) -> None:
+    panel = BookmarkPanel()
+    qtbot.addWidget(panel)
+    media_id = uuid4()
+    bookmark = _bookmark(media_id, "Chorus", 1_000_000)
+    panel.set_bookmarks([bookmark], {media_id: "Song"})
+
+    fade_in_requests = []
+    fade_out_requests = []
+    panel.fade_in_edited.connect(lambda *args: fade_in_requests.append(args))
+    panel.fade_out_edited.connect(lambda *args: fade_out_requests.append(args))
+
+    row = panel._tree.topLevelItem(0)
+    from bookmark_studio.ui.bookmark_panel import FADE_IN_COLUMN, FADE_OUT_COLUMN
+
+    row.setText(FADE_IN_COLUMN, "1000 ms")
+    row.setText(FADE_OUT_COLUMN, "250 ms")
+
+    assert fade_in_requests == [(bookmark.id, 1000)]
+    assert fade_out_requests == [(bookmark.id, 250)]
+
+
 def test_set_bookmarks_preserves_selection_across_refresh(qtbot) -> None:
     panel = BookmarkPanel()
     qtbot.addWidget(panel)

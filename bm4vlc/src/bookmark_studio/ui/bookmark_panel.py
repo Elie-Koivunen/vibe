@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QHBoxLayout, QHeaderView, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QPushButton, QStyledItemDelegate,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from bookmark_studio.domain.bookmark import Bookmark
@@ -17,6 +18,75 @@ from bookmark_studio.ui.transport import format_timecode
 # surfaces the per-bookmark fade_in_ms/fade_out_ms (set in the Inspector) here too.
 COLUMNS = ["Song", "Name", "Start", "End", "Loop", "Fade In", "Fade Out"]
 USER_ROLE = 32
+LOOP_COLUMN = COLUMNS.index("Loop")
+FADE_IN_COLUMN = COLUMNS.index("Fade In")
+FADE_OUT_COLUMN = COLUMNS.index("Fade Out")
+
+# Direct follow-up request: "the columns for loop, fade in/out etc, they should
+# also be directly editable, e.g. clicking would give a drop menu options" --
+# (label, loop_enabled, repeat_count) choices for the Loop column's dropdown.
+_LOOP_CHOICES: list[tuple[str, bool, int | None]] = [
+    ("Off", False, None),
+    ("∞", True, None),
+    ("×1", True, 1),
+    ("×2", True, 2),
+    ("×3", True, 3),
+    ("×5", True, 5),
+    ("×10", True, 10),
+]
+_FADE_CHOICES_MS = [0, 100, 250, 500, 1000, 1500, 2000, 3000, 5000]
+
+
+def _loop_label(loop_enabled: bool, repeat_count: int | None) -> str:
+    for label, enabled, count in _LOOP_CHOICES:
+        if enabled == loop_enabled and count == repeat_count:
+            return label
+    return "Off"
+
+
+def _fade_label(fade_ms: int) -> str:
+    return "Off" if fade_ms <= 0 else f"{fade_ms} ms"
+
+
+def _fade_ms_from_label(label: str) -> int:
+    for ms in _FADE_CHOICES_MS:
+        if _fade_label(ms) == label:
+            return ms
+    return 0
+
+
+class _ComboColumnDelegate(QStyledItemDelegate):
+    """Makes specific columns editable via a dropdown instead of free text --
+    createEditor() returning None for every other column means Qt's item view
+    simply won't enter edit mode there at all, so Song/Name/Start/End (still
+    edited via the Inspector, not here) are unaffected.
+    """
+
+    def __init__(self, column_options: dict[int, list[str]], parent: QTreeWidget) -> None:
+        super().__init__(parent)
+        self._column_options = column_options
+
+    def createEditor(self, parent, option, index):  # noqa: N802 - Qt override
+        options = self._column_options.get(index.column())
+        if options is None:
+            return None
+        combo = QComboBox(parent)
+        combo.addItems(options)
+        return combo
+
+    def setEditorData(self, editor, index) -> None:  # noqa: N802 - Qt override
+        if not isinstance(editor, QComboBox):
+            super().setEditorData(editor, index)
+            return
+        position = editor.findText(index.data(Qt.DisplayRole))
+        editor.setCurrentIndex(position if position >= 0 else 0)
+        editor.showPopup()  # opens immediately -- "clicking would give a drop menu"
+
+    def setModelData(self, editor, model, index) -> None:  # noqa: N802 - Qt override
+        if not isinstance(editor, QComboBox):
+            super().setModelData(editor, model, index)
+            return
+        model.setData(index, editor.currentText(), Qt.EditRole)
 
 
 class BookmarkPanel(QWidget):
@@ -26,6 +96,11 @@ class BookmarkPanel(QWidget):
     loop_bookmark_requested = Signal(object)  # UUID
     delete_bookmark_requested = Signal(list)  # list of UUIDs -- one or more
     reorder_requested = Signal(list)  # ordered list of every bookmark UUID in the list
+    # Direct follow-up request: "the columns for loop, fade in/out etc, they should
+    # also be directly editable, e.g. clicking would give a drop menu options".
+    loop_edited = Signal(object, bool, object)  # bookmark_id, loop_enabled, repeat_count|None
+    fade_in_edited = Signal(object, int)  # bookmark_id, fade_in_ms
+    fade_out_edited = Signal(object, int)  # bookmark_id, fade_out_ms
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -105,6 +180,22 @@ class BookmarkPanel(QWidget):
         self._tree.model().rowsMoved.connect(self._on_rows_moved)
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+
+        # Direct follow-up request: "the columns for loop, fade in/out etc, they
+        # should also be directly editable, e.g. clicking would give a drop menu
+        # options" -- SelectedClicked (not DoubleClicked) so this doesn't collide
+        # with double-click-to-play, which fires regardless of which column was
+        # clicked (see _on_item_double_clicked).
+        self._tree.setEditTriggers(QAbstractItemView.SelectedClicked | QAbstractItemView.EditKeyPressed)
+        loop_labels = [label for label, _enabled, _count in _LOOP_CHOICES]
+        fade_labels = [_fade_label(ms) for ms in _FADE_CHOICES_MS]
+        self._tree.setItemDelegate(
+            _ComboColumnDelegate(
+                {LOOP_COLUMN: loop_labels, FADE_IN_COLUMN: fade_labels, FADE_OUT_COLUMN: fade_labels},
+                self._tree,
+            )
+        )
+        self._tree.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self._tree)
 
         self._set_playback_buttons_enabled(0, allow_loop=False)
@@ -157,6 +248,36 @@ class BookmarkPanel(QWidget):
         if bookmark_id is not None:
             self.play_bookmark_requested.emit(bookmark_id)
 
+    def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
+        """Fires when the Loop/Fade In/Fade Out combo delegate commits a choice --
+        direct follow-up request: "the columns for loop, fade in/out etc, they
+        should also be directly editable". Only reacts to those three columns; every
+        other column is never made editable in the first place (see
+        _ComboColumnDelegate), so this never fires for them.
+        """
+        if column not in (LOOP_COLUMN, FADE_IN_COLUMN, FADE_OUT_COLUMN):
+            return
+        bookmark_id = item.data(0, USER_ROLE)
+        bookmark = self._bookmarks.get(bookmark_id)
+        if bookmark is None:
+            return
+
+        if column == LOOP_COLUMN:
+            if bookmark.end_us is None:
+                # A point bookmark has nothing to loop over -- reject and revert,
+                # same "reject and revert the field" convention Inspector uses for
+                # an invalid Start/End edit.
+                item.setText(LOOP_COLUMN, _loop_label(bookmark.loop_enabled, bookmark.repeat_count))
+                return
+            for label, enabled, count in _LOOP_CHOICES:
+                if label == item.text(LOOP_COLUMN):
+                    self.loop_edited.emit(bookmark_id, enabled, count)
+                    return
+        elif column == FADE_IN_COLUMN:
+            self.fade_in_edited.emit(bookmark_id, _fade_ms_from_label(item.text(FADE_IN_COLUMN)))
+        elif column == FADE_OUT_COLUMN:
+            self.fade_out_edited.emit(bookmark_id, _fade_ms_from_label(item.text(FADE_OUT_COLUMN)))
+
     def _move_selected(self, delta: int) -> None:
         """Moves the whole selected block up or down by one position, keeping the
         selected rows' relative order -- direct user request: "i should be able to
@@ -198,18 +319,15 @@ class BookmarkPanel(QWidget):
         self._song_names = song_names or {}
         self._tree.clear()
         for bookmark in bookmarks:
-            loop_label = "∞" if bookmark.loop_enabled and bookmark.repeat_count is None else (
-                f"×{bookmark.repeat_count}" if bookmark.loop_enabled else ""
-            )
             row = QTreeWidgetItem(
                 [
                     self._song_names.get(bookmark.media_id, ""),
                     bookmark.name,
                     format_timecode(bookmark.start_us),
                     format_timecode(bookmark.end_us) if bookmark.end_us is not None else "",
-                    loop_label,
-                    f"{bookmark.fade_in_ms} ms" if bookmark.fade_in_ms else "",
-                    f"{bookmark.fade_out_ms} ms" if bookmark.fade_out_ms else "",
+                    _loop_label(bookmark.loop_enabled, bookmark.repeat_count),
+                    _fade_label(bookmark.fade_in_ms),
+                    _fade_label(bookmark.fade_out_ms),
                 ]
             )
             row.setData(0, USER_ROLE, bookmark.id)

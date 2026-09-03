@@ -40,7 +40,7 @@ def test_set_current_playing_does_not_recreate_tree_items(qtbot) -> None:
     panel = _panel(qtbot)
     row_before = panel._tree.topLevelItem(0)
 
-    panel.set_current_playing(1)
+    panel.set_current_playing(1, is_playing=True)
 
     row_after = panel._tree.topLevelItem(0)
     assert row_after is row_before  # same object, not recreated
@@ -50,6 +50,18 @@ def test_set_current_playing_does_not_recreate_tree_items(qtbot) -> None:
     assert row_after.background(0).color().name() == "#8fd98f"
     other_row = panel._tree.topLevelItem(1)
     assert other_row.background(0).style().name == "NoBrush"
+
+
+def test_set_current_playing_is_blue_when_not_actively_playing(qtbot) -> None:
+    """Direct follow-up request: "if playback is active, then the highlight is
+    green, otherwise, blue" -- the current/loaded song that's paused or stopped
+    gets a different tint than one that's actually playing right now."""
+    panel = _panel(qtbot)
+
+    panel.set_current_playing(1, is_playing=False)
+
+    row = panel._tree.topLevelItem(0)
+    assert row.background(0).color().name() == "#a9c9f5"
 
 
 def test_set_current_playing_preserves_selection(qtbot) -> None:

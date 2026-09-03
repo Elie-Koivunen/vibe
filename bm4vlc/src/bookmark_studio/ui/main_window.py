@@ -23,7 +23,7 @@ from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
 from bookmark_studio.ui.bookmark_panel import BookmarkPanel
 from bookmark_studio.ui.inspector import BookmarkInspector
 from bookmark_studio.ui.playlist_panel import PlaylistPanel
-from bookmark_studio.ui.transport import TimecodeEdit, TransportBar
+from bookmark_studio.ui.transport import TransportBar
 from bookmark_studio.ui.waveform.scene import WaveformScene
 from bookmark_studio.ui.waveform.view import WaveformView
 
@@ -93,29 +93,12 @@ class MainWindow(QMainWindow):
         self._selection_label = QLabel("No selection", self)
         layout.addWidget(self._selection_label)
 
-        # Direct user request: "add additional fields to display start/end time based
-        # on how the bookmark is highlighted" -- editable, so a drag-selection can be
-        # fine-tuned numerically before turning it into a bookmark, not just read.
-        # A MINIMUM width, not a cap -- same class of clipping bug just fixed on the
-        # transport bar's bookmark fields (TimecodeEdit's own spin-button-aware
-        # sizeHint knows how much room it actually needs; a maximum below that just
-        # clips the digits).
-        self._selection_start_edit = TimecodeEdit(self)
-        self._selection_start_edit.setPlaceholderText("Start")
-        self._selection_start_edit.setMinimumWidth(110)
-        self._selection_start_edit.setEnabled(False)
-        self._selection_start_edit.editingFinished.connect(self._on_selection_start_edited)
-        layout.addWidget(self._selection_start_edit)
-
-        layout.addWidget(QLabel("→", self))
-
-        self._selection_end_edit = TimecodeEdit(self)
-        self._selection_end_edit.setPlaceholderText("End")
-        self._selection_end_edit.setMinimumWidth(110)
-        self._selection_end_edit.setEnabled(False)
-        self._selection_end_edit.editingFinished.connect(self._on_selection_end_edited)
-        layout.addWidget(self._selection_end_edit)
-
+        # The editable Start/End fields that used to sit here were removed per
+        # direct follow-up request -- "these do not serve a purpose" -- once the
+        # bookmark list's own Start/End columns and the Inspector's fields already
+        # cover editing a saved bookmark's range; the pair here only ever edited an
+        # in-progress drag-selection, which is more naturally adjusted by dragging
+        # the selection itself on the waveform.
         layout.addStretch(1)
 
         # Explicit, always-visible zoom controls (spec #84's Ctrl+wheel/Ctrl+0 still
@@ -296,6 +279,9 @@ class MainWindow(QMainWindow):
         self._bookmark_panel.loop_bookmark_requested.connect(self.loop_bookmark_requested.emit)
         self._bookmark_panel.delete_bookmark_requested.connect(self._on_delete_bookmark_requested)
         self._bookmark_panel.reorder_requested.connect(self.bookmark_reorder_requested.emit)
+        self._bookmark_panel.loop_edited.connect(self._on_bookmark_panel_loop_edited)
+        self._bookmark_panel.fade_in_edited.connect(self._on_bookmark_panel_fade_in_edited)
+        self._bookmark_panel.fade_out_edited.connect(self._on_bookmark_panel_fade_out_edited)
 
         self._inspector.name_committed.connect(self._on_name_committed)
         self._inspector.loop_settings_committed.connect(self._on_loop_settings_committed)
@@ -342,64 +328,11 @@ class MainWindow(QMainWindow):
         from bookmark_studio.ui.transport import format_timecode
 
         if isinstance(selection, Selection):
-            # Start/end now live in the dedicated fields next to this label (below) --
-            # repeating them here as well was redundant and crowded the toolbar row.
             self._selection_label.setText(f"Selection ({format_timecode(selection.duration_us)})")
-            # Only resync from the model when the field doesn't already show this
-            # value -- editingFinished() already applied the typed value locally, and
-            # overwriting mid-edit-cycle would just echo back exactly what the user
-            # typed, but doing it unconditionally would also clobber the cursor/
-            # selection state in the field for no reason.
-            start_text = format_timecode(selection.start_us)
-            if self._selection_start_edit.text() != start_text:
-                self._selection_start_edit.setText(start_text)
-            end_text = format_timecode(selection.end_us)
-            if self._selection_end_edit.text() != end_text:
-                self._selection_end_edit.setText(end_text)
-            self._selection_start_edit.setEnabled(True)
-            self._selection_end_edit.setEnabled(True)
             self._set_selection_buttons_enabled(True)
         else:
             self._selection_label.setText("No selection")
-            self._selection_start_edit.clear()
-            self._selection_end_edit.clear()
-            self._selection_start_edit.setEnabled(False)
-            self._selection_end_edit.setEnabled(False)
             self._set_selection_buttons_enabled(False)
-
-    def _on_selection_start_edited(self) -> None:
-        from bookmark_studio.domain.selection import Selection
-        from bookmark_studio.ui.transport import format_timecode, parse_timecode
-
-        selection = self._waveform_scene.selection()
-        if selection is None:
-            return
-        try:
-            new_start_us = parse_timecode(self._selection_start_edit.text())
-        except ValueError:
-            self._selection_start_edit.setText(format_timecode(selection.start_us))
-            return
-        if new_start_us < 0 or new_start_us >= selection.end_us:
-            self._selection_start_edit.setText(format_timecode(selection.start_us))
-            return
-        self._waveform_scene.set_selection(Selection(start_us=new_start_us, end_us=selection.end_us))
-
-    def _on_selection_end_edited(self) -> None:
-        from bookmark_studio.domain.selection import Selection
-        from bookmark_studio.ui.transport import format_timecode, parse_timecode
-
-        selection = self._waveform_scene.selection()
-        if selection is None:
-            return
-        try:
-            new_end_us = parse_timecode(self._selection_end_edit.text())
-        except ValueError:
-            self._selection_end_edit.setText(format_timecode(selection.end_us))
-            return
-        if new_end_us <= selection.start_us:
-            self._selection_end_edit.setText(format_timecode(selection.end_us))
-            return
-        self._waveform_scene.set_selection(Selection(start_us=selection.start_us, end_us=new_end_us))
 
     def _on_bookmark_now_clicked(self) -> None:
         if self._waveform_scene.selection() is not None:
@@ -564,6 +497,59 @@ class MainWindow(QMainWindow):
             )
         )
         self._refresh_bookmarks()
+
+    # Direct follow-up request: "the columns for loop, fade in/out etc, they should
+    # also be directly editable, e.g. clicking would give a drop menu options" --
+    # these three mirror _on_loop_settings_committed's ChangeLoopCommand usage, but
+    # target whichever bookmark row was edited in the list (not necessarily the one
+    # currently loaded in the Inspector) and only touch the one field that changed.
+
+    def _on_bookmark_panel_loop_edited(self, bookmark_id: UUID, loop_enabled: bool, repeat_count: int | None) -> None:
+        bookmark = self._bookmark_repository.get(bookmark_id)
+        if bookmark is None:
+            return
+        self._push_bookmark_loop_change(
+            bookmark, loop_enabled=loop_enabled, repeat_count=repeat_count,
+            gap_ms=bookmark.loop_gap_ms, completion_action=bookmark.completion_action,
+            fade_in_ms=bookmark.fade_in_ms, fade_out_ms=bookmark.fade_out_ms,
+        )
+
+    def _on_bookmark_panel_fade_in_edited(self, bookmark_id: UUID, fade_in_ms: int) -> None:
+        bookmark = self._bookmark_repository.get(bookmark_id)
+        if bookmark is None:
+            return
+        self._push_bookmark_loop_change(
+            bookmark, loop_enabled=bookmark.loop_enabled, repeat_count=bookmark.repeat_count,
+            gap_ms=bookmark.loop_gap_ms, completion_action=bookmark.completion_action,
+            fade_in_ms=fade_in_ms, fade_out_ms=bookmark.fade_out_ms,
+        )
+
+    def _on_bookmark_panel_fade_out_edited(self, bookmark_id: UUID, fade_out_ms: int) -> None:
+        bookmark = self._bookmark_repository.get(bookmark_id)
+        if bookmark is None:
+            return
+        self._push_bookmark_loop_change(
+            bookmark, loop_enabled=bookmark.loop_enabled, repeat_count=bookmark.repeat_count,
+            gap_ms=bookmark.loop_gap_ms, completion_action=bookmark.completion_action,
+            fade_in_ms=bookmark.fade_in_ms, fade_out_ms=fade_out_ms,
+        )
+
+    def _push_bookmark_loop_change(
+        self, bookmark: Bookmark, *, loop_enabled: bool, repeat_count: int | None, gap_ms: int,
+        completion_action: CompletionAction, fade_in_ms: int, fade_out_ms: int,
+    ) -> None:
+        self._undo_stack.push(
+            ChangeLoopCommand(
+                self._bookmark_repository, bookmark.id,
+                old=(
+                    bookmark.loop_enabled, bookmark.repeat_count, bookmark.loop_gap_ms,
+                    bookmark.completion_action, bookmark.fade_in_ms, bookmark.fade_out_ms,
+                ),
+                new=(loop_enabled, repeat_count, gap_ms, completion_action, fade_in_ms, fade_out_ms),
+            )
+        )
+        self._refresh_bookmarks()
+        self._refresh_inspector_if_current(bookmark.id)
 
     def _on_inspector_start_committed(self, start_us: int) -> None:
         """Direct user request: "the begin/end time fields should be manually
