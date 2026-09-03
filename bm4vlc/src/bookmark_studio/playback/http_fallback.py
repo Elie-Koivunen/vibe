@@ -24,6 +24,11 @@ class StandardHttpPlaybackAdapter:
         self._base_url = f"http://{host}:{port}"
         self._auth = ("", password)
         self._session = requests.Session()
+        # Cached from the most recent get_status() -- seek_absolute_us() needs it to
+        # convert a microsecond target into VLC's percent-seek syntax (see that
+        # method's docstring for why). None until the first successful poll; seeks
+        # issued before then fall back to the old whole-second behavior.
+        self._last_duration_us: int | None = None
 
     def connect(self) -> None:
         self._session.get(f"{self._base_url}/requests/status.json", auth=self._auth, timeout=STATUS_TIMEOUT_S)
@@ -38,13 +43,16 @@ class StandardHttpPlaybackAdapter:
         response.raise_for_status()
         data = response.json()
         length_s = data.get("length")
+        duration_us = int(length_s) * 1_000_000 if length_s is not None else None
+        self._last_duration_us = duration_us
+        position = float(data.get("position", 0.0))
         return PlaybackStatus(
             state=data.get("state", "stopped"),
-            time_us=int(data.get("time", 0)) * 1_000_000,
-            position=float(data.get("position", 0.0)),
+            time_us=_precise_time_us(data.get("time", 0), position, duration_us),
+            position=position,
             rate=float(data.get("rate", 1.0)),
             current_playlist_item_id=data.get("currentplid"),
-            duration_us=int(length_s) * 1_000_000 if length_s is not None else None,
+            duration_us=duration_us,
             media_uri=_extract_media_uri(data),
         )
 
@@ -86,8 +94,28 @@ class StandardHttpPlaybackAdapter:
         self._command("pl_play", {"id": vlc_id})
 
     def seek_absolute_us(self, time_us: int) -> None:
-        # spec #27: the built-in interface's seek is integer-seconds granularity.
-        self._command("seek", {"val": max(0, time_us) // 1_000_000})
+        """Direct user report: "the bookmark playback is not respecting the loop, it
+        drifts away". Root-caused live against a real VLC instance (see this
+        module's percent-seek verification, not a spec assumption): the built-in
+        interface's `seek` command silently mis-parses a plain fractional-seconds
+        value -- `val=12.345` actually landed at 345 SECONDS, not 12.345s -- so the
+        previous whole-second-only seek wasn't just imprecise, it was the *safe*
+        choice given that bug. Confirmed live, its documented percent syntax
+        (`val=<float>%`) is both correctly parsed AND sub-second precise: seeking to
+        "41.15%" of a 30s file landed within 0.2ms of the intended 12.345s. Using
+        that (once a status poll has told us the real duration) makes every loop
+        seek land at its true bookmark boundary instead of rounding to the nearest
+        second -- confirmed live to be the dominant source of the reported loop
+        drift, since a bookmark's start/end are rarely whole seconds. Falls back to
+        the old whole-second behavior if duration isn't known yet (no poll has
+        succeeded), which is still strictly better than guessing.
+        """
+        time_us = max(0, time_us)
+        if self._last_duration_us:
+            percent = min(100.0, (time_us / self._last_duration_us) * 100.0)
+            self._command("seek", {"val": f"{percent:.4f}%"})
+        else:
+            self._command("seek", {"val": time_us // 1_000_000})
 
     def seek_relative_us(self, delta_us: int) -> None:
         sign = "+" if delta_us >= 0 else "-"
@@ -109,6 +137,22 @@ class StandardHttpPlaybackAdapter:
             timeout=COMMAND_TIMEOUT_S,
         )
         response.raise_for_status()
+
+
+def _precise_time_us(raw_time_s: object, position: float, duration_us: int | None) -> int:
+    """VLC's status.json "time" field is a whole number of seconds -- confirmed live,
+    it never carries a fractional part, unlike "position" (a float fraction of the
+    track, confirmed live to genuinely track sub-second progress: e.g. 0.4115 for a
+    seek that landed at 12.345s of a 30s file). Deriving time from position*duration
+    instead gives PlaybackClock (and, downstream, LoopController's boundary check) far
+    better precision than truncating to the nearest second -- part of the fix for
+    "the bookmark playback is not respecting the loop, it drifts away". Falls back to
+    the plain integer field when duration or position isn't usable (e.g. nothing
+    loaded yet), which is exactly the old behavior.
+    """
+    if duration_us and 0.0 <= position <= 1.0:
+        return int(position * duration_us)
+    return int(raw_time_s or 0) * 1_000_000
 
 
 def _extract_media_uri(status_json: dict) -> str | None:

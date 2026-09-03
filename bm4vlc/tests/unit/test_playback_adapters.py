@@ -98,6 +98,33 @@ class _VlcHandler(BaseHTTPRequestHandler):
         pass
 
 
+class _VlcSeekCaptureHandler(BaseHTTPRequestHandler):
+    """Like _VlcHandler, but records every request's query string (as `last_query`,
+    a class attribute reset per test) so a test can assert exactly what `val=` a
+    seek call actually sent -- needed to verify the percent-vs-whole-seconds fix
+    without a real VLC instance.
+    """
+
+    last_query: dict = {}
+    status_body: dict = {}
+
+    def do_GET(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        type(self).last_query = parse_qs(parsed.query)
+        if parsed.path == "/requests/status.json":
+            payload = json.dumps(type(self).status_body).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(payload)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
 def _start_server(handler_cls: type[BaseHTTPRequestHandler]) -> tuple[HTTPServer, threading.Thread]:
     server = HTTPServer(("127.0.0.1", 0), handler_cls)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -116,6 +143,19 @@ def bridge_server():
 @pytest.fixture()
 def vlc_server():
     server, thread = _start_server(_VlcHandler)
+    yield server.server_address
+    server.shutdown()
+    thread.join(timeout=5)
+
+
+@pytest.fixture()
+def vlc_seek_capture_server():
+    _VlcSeekCaptureHandler.last_query = {}
+    _VlcSeekCaptureHandler.status_body = {
+        "state": "playing", "time": 12, "position": 0.4115, "rate": 1.0,
+        "currentplid": 1, "length": 30,
+    }
+    server, thread = _start_server(_VlcSeekCaptureHandler)
     yield server.server_address
     server.shutdown()
     thread.join(timeout=5)
@@ -241,3 +281,48 @@ def test_standard_http_adapter_transport_commands_do_not_raise(vlc_server) -> No
     adapter.seek_absolute_us(3_000_000)
     adapter.set_rate(1.25)
     adapter.set_volume(0)
+
+
+def test_get_status_derives_time_from_position_not_the_truncated_integer_field(vlc_seek_capture_server) -> None:
+    """Direct user report: "the bookmark playback is not respecting the loop, it
+    drifts away" -- VLC's status.json "time" field is whole seconds only (confirmed
+    live); "position" genuinely carries sub-second precision, so time_us should be
+    derived from position*duration, not the truncated integer.
+    """
+    host, port = vlc_seek_capture_server
+    adapter = StandardHttpPlaybackAdapter(host, port, VLC_PASSWORD)
+    status = adapter.get_status()
+    # position=0.4115, length=30 -> 12.345s, not the truncated "time": 12 (12.000s).
+    assert status.time_us == 12_345_000
+
+
+def test_seek_absolute_us_uses_percent_syntax_once_duration_is_known(vlc_seek_capture_server) -> None:
+    """Confirmed live against a real VLC instance: the built-in interface's seek
+    command mis-parses a plain fractional-seconds value (val="12.345" landed at 345
+    SECONDS, not 12.345s), but its percent syntax (val="<float>%") is both correctly
+    parsed and sub-second precise. seek_absolute_us must use percent once it knows
+    the track's duration (from a prior get_status() call).
+    """
+    host, port = vlc_seek_capture_server
+    adapter = StandardHttpPlaybackAdapter(host, port, VLC_PASSWORD)
+    adapter.get_status()  # populates _last_duration_us = 30_000_000
+
+    adapter.seek_absolute_us(12_345_000)  # 12.345s of a 30s track = 41.15%
+
+    val = _VlcSeekCaptureHandler.last_query["val"][0]
+    assert val.endswith("%")
+    assert abs(float(val.rstrip("%")) - 41.15) < 0.01
+
+
+def test_seek_absolute_us_falls_back_to_whole_seconds_before_any_status_poll(vlc_seek_capture_server) -> None:
+    """Without a known duration (e.g. the very first seek before any get_status()
+    call has succeeded), percent seeking is impossible -- must fall back to the old
+    whole-seconds behavior rather than guess or crash.
+    """
+    host, port = vlc_seek_capture_server
+    adapter = StandardHttpPlaybackAdapter(host, port, VLC_PASSWORD)
+
+    adapter.seek_absolute_us(12_345_000)
+
+    val = _VlcSeekCaptureHandler.last_query["val"][0]
+    assert val == "12"
