@@ -58,6 +58,10 @@ class Bookmark:
     # BookmarkRepository.list_for_playlist()'s `ORDER BY sort_index, start_us` just
     # falls back to chronological order until the user actually reorders something.
     sort_index: int = 0
+    # Direct user request: "add options to fade in and fade out when playing back".
+    # 0 disables (default) -- matches loop_gap_ms's own "0 means off" convention.
+    fade_in_ms: int = 0
+    fade_out_ms: int = 0
 
     def __post_init__(self) -> None:
         validate_bookmark_range(
@@ -68,6 +72,8 @@ class Bookmark:
             repeat_count=self.repeat_count,
             loop_gap_ms=self.loop_gap_ms,
         )
+        if self.fade_in_ms < 0 or self.fade_out_ms < 0:
+            raise InvalidBookmarkRange("fade_in_ms and fade_out_ms must be >= 0")
 
 
 def validate_bookmark_range(

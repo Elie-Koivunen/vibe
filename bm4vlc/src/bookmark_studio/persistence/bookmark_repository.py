@@ -96,8 +96,9 @@ class BookmarkRepository:
         self._conn.execute(
             "INSERT INTO bookmarks (id, playlist_id, media_id, scope, lane_id, "
             "bookmark_type, name, start_us, end_us, loop_enabled, repeat_count, "
-            "loop_gap_ms, completion_action, color_key, notes, sort_index, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "loop_gap_ms, completion_action, color_key, notes, sort_index, "
+            "fade_in_ms, fade_out_ms, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             self._bookmark_params(bookmark, now, now),
         )
         self._set_tags(bookmark.id, bookmark.tags)
@@ -117,7 +118,7 @@ class BookmarkRepository:
             "UPDATE bookmarks SET playlist_id = ?, media_id = ?, scope = ?, lane_id = ?, "
             "bookmark_type = ?, name = ?, start_us = ?, end_us = ?, loop_enabled = ?, "
             "repeat_count = ?, loop_gap_ms = ?, completion_action = ?, color_key = ?, "
-            "notes = ?, sort_index = ?, updated_at = ? WHERE id = ?",
+            "notes = ?, sort_index = ?, fade_in_ms = ?, fade_out_ms = ?, updated_at = ? WHERE id = ?",
             (
                 str(bookmark.playlist_id) if bookmark.playlist_id else None,
                 str(bookmark.media_id),
@@ -134,6 +135,8 @@ class BookmarkRepository:
                 bookmark.color_key,
                 bookmark.notes,
                 bookmark.sort_index,
+                bookmark.fade_in_ms,
+                bookmark.fade_out_ms,
                 _now(),
                 str(bookmark.id),
             ),
@@ -208,6 +211,8 @@ class BookmarkRepository:
             bookmark.color_key,
             bookmark.notes,
             bookmark.sort_index,
+            bookmark.fade_in_ms,
+            bookmark.fade_out_ms,
             created_at,
             updated_at,
         )
@@ -217,7 +222,7 @@ class BookmarkRepository:
         return (
             "SELECT id, playlist_id, media_id, scope, lane_id, bookmark_type, name, "
             "start_us, end_us, loop_enabled, repeat_count, loop_gap_ms, "
-            "completion_action, color_key, notes, sort_index FROM bookmarks"
+            "completion_action, color_key, notes, sort_index, fade_in_ms, fade_out_ms FROM bookmarks"
         )
 
     def _row_to_bookmark(self, row: sqlite3.Row | tuple) -> Bookmark:
@@ -238,6 +243,8 @@ class BookmarkRepository:
             color_key,
             notes,
             sort_index,
+            fade_in_ms,
+            fade_out_ms,
         ) = row
         bid = UUID(bookmark_id)
         return Bookmark(
@@ -258,4 +265,6 @@ class BookmarkRepository:
             notes=notes,
             tags=self._get_tags(bid),
             sort_index=sort_index,
+            fade_in_ms=fade_in_ms,
+            fade_out_ms=fade_out_ms,
         )

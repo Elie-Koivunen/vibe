@@ -308,7 +308,7 @@ class Application(QObject):
         self._preload_requested.clear()
         self._song_names_cache.clear()
         self._connected = False
-        self.window._transport.set_connected(False)
+        self.window.set_connected(False)
         # Regression, reported live: "if i close and open a new vlc instance, it does
         # not recognize the change in playlist and applies the previous bookmarks to
         # the next playlist". PlaylistSynchronizer.reset() exists specifically for
@@ -462,6 +462,7 @@ class Application(QObject):
                 start_us=bookmark.start_us, end_us=bookmark.end_us,
                 repeat_count=bookmark.repeat_count, gap_ms=bookmark.loop_gap_ms,
                 completion_action=bookmark.completion_action,
+                fade_in_ms=bookmark.fade_in_ms, fade_out_ms=bookmark.fade_out_ms,
             )
         )
 
@@ -534,7 +535,7 @@ class Application(QObject):
         try:
             if not self._connected:
                 self._connected = True
-                self.window._transport.set_connected(True)
+                self.window.set_connected(True)
             if self._mute_pending:
                 self._mute_pending = False
                 self._fire_and_forget(lambda: self._adapter.set_volume(0))
@@ -544,6 +545,11 @@ class Application(QObject):
             self.window._waveform_view.follow_playhead(status.time_us)
             self.window._transport.set_time(status.time_us, status.duration_us)
             self.window._playlist_panel.set_current_playing(status.current_playlist_item_id)
+            # Direct user request: "add options to fade in and fade out when playing
+            # back" -- fades ramp to/from whatever the user's real volume actually is
+            # (ignored by the controller itself while a fade is mid-ramp, see
+            # LoopController.set_target_volume's docstring).
+            self._loop_controller.set_target_volume(status.volume)
             self._loop_controller.on_tick()
 
             if status.current_playlist_item_id != self._actually_playing_vlc_item_id:
@@ -637,7 +643,7 @@ class Application(QObject):
         self._status_inflight = False
         if self._connected:
             self._connected = False
-            self.window._transport.set_connected(False)
+            self.window.set_connected(False)
         self._log.debug("status poll failed: %s", message)  # spec #104: never crash the UI
 
     def _poll_playlist(self) -> None:

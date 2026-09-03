@@ -9,22 +9,23 @@ from bookmark_studio.ui.transport import TransportBar
 def test_transport_starts_disconnected_and_disabled(qtbot) -> None:
     transport = TransportBar()
     qtbot.addWidget(transport)
-    assert transport._connection_label.text() == "● Offline"
     assert transport.play_pause_button.isEnabled() is False
     assert transport.previous_bookmark_button.isEnabled() is True  # not gated by connection
 
 
-def test_set_connected_true_enables_transport_and_updates_label(qtbot) -> None:
+def test_set_transport_enabled_true_enables_playback_buttons(qtbot) -> None:
+    """The connection indicator itself now lives in PlaylistPanel, right above the
+    Launch VLC button (direct follow-up request: "move the connection status to
+    above the launch vlc button") -- see test_playlist_panel.py for that. This is
+    just the button-enable half, still owned by TransportBar."""
     transport = TransportBar()
     qtbot.addWidget(transport)
 
-    transport.set_connected(True)
-    assert transport._connection_label.text() == "● Connected"
+    transport.set_transport_enabled(True)
     assert transport.play_pause_button.isEnabled() is True
     assert transport.stop_button.isEnabled() is True
 
-    transport.set_connected(False)
-    assert transport._connection_label.text() == "● Offline"
+    transport.set_transport_enabled(False)
     assert transport.play_pause_button.isEnabled() is False
 
 
@@ -95,14 +96,16 @@ def test_editing_bookmark_start_end_fields_emits_commit_signals(qtbot) -> None:
     assert end_requests == [12_000_000]
 
 
-def test_bookmark_field_arrow_keys_step_the_value(qtbot) -> None:
-    """Direct user request: "the bookmark fields can also have arrow keys to
-    increment the numerals" -- plain Up/Down step by 100ms, Shift+Up/Down by 1s, and
-    an arrow press commits immediately (no separate Enter needed)."""
+def test_bookmark_field_arrow_keys_step_the_section_under_the_cursor(qtbot) -> None:
+    """Direct follow-up request: "the bookmark fields still lack arrow buttons to
+    increment/decrement the time for hour, minutes, seconds, etc." -- TimecodeEdit is
+    now a real QAbstractSpinBox (visible spinner buttons, not just a keyboard
+    shortcut) whose Up/Down steps whichever HH/MM/SS/mmm section the cursor sits in,
+    like a QTimeEdit, and commits immediately (no separate Enter needed)."""
     transport = TransportBar()
     qtbot.addWidget(transport)
     transport.show()
-    transport.set_bookmark_times(5_000_000, 10_000_000)
+    transport.set_bookmark_times(5_000_000, 10_000_000)  # "00:00:05.000"
 
     start_requests = []
     transport.bookmark_start_committed.connect(start_requests.append)
@@ -110,28 +113,31 @@ def test_bookmark_field_arrow_keys_step_the_value(qtbot) -> None:
     edit = transport._bookmark_start_edit
     edit.setFocus()
 
+    edit.lineEdit().setCursorPosition(7)  # within the seconds section ("SS")
     QTest.keyClick(edit, Qt.Key_Up)
-    assert edit.text() == "00:00:05.100"
-    assert start_requests[-1] == 5_100_000
+    assert edit.text() == "00:00:06.000"
+    assert start_requests[-1] == 6_000_000
 
-    QTest.keyClick(edit, Qt.Key_Down)
-    QTest.keyClick(edit, Qt.Key_Down)
-    assert edit.text() == "00:00:04.900"
-    assert start_requests[-1] == 4_900_000
+    edit.lineEdit().setCursorPosition(1)  # within the hours section ("HH")
+    QTest.keyClick(edit, Qt.Key_Up)
+    assert edit.text() == "01:00:06.000"
+    assert start_requests[-1] == 3_606_000_000
 
-    QTest.keyClick(edit, Qt.Key_Up, Qt.ShiftModifier)
-    assert edit.text() == "00:00:05.900"
-    assert start_requests[-1] == 5_900_000
+    edit.lineEdit().setCursorPosition(4)  # within the minutes section ("MM")
+    QTest.keyClick(edit, Qt.Key_Down)
+    assert edit.text() == "00:59:06.000"
+    assert start_requests[-1] == 3_546_000_000
 
 
 def test_bookmark_field_arrow_key_does_not_go_negative(qtbot) -> None:
     transport = TransportBar()
     qtbot.addWidget(transport)
     transport.show()
-    transport.set_bookmark_times(50_000, None)  # 0.05s -- one coarse step would go negative
+    transport.set_bookmark_times(500_000, None)  # 0.5s -- one second-step would go negative
 
     edit = transport._bookmark_start_edit
     edit.setFocus()
-    QTest.keyClick(edit, Qt.Key_Down, Qt.ShiftModifier)
+    edit.lineEdit().setCursorPosition(7)  # within the seconds section
+    QTest.keyClick(edit, Qt.Key_Down)
 
     assert edit.text() == "00:00:00.000"

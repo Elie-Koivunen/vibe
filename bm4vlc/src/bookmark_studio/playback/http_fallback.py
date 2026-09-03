@@ -54,6 +54,7 @@ class StandardHttpPlaybackAdapter:
             current_playlist_item_id=data.get("currentplid"),
             duration_us=duration_us,
             media_uri=_extract_media_uri(data),
+            volume=int(data.get("volume", 256)),
         )
 
     def get_playlist(self) -> list[VlcPlaylistItem]:

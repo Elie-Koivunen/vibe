@@ -240,7 +240,7 @@ def test_transport_becomes_enabled_once_status_polling_succeeds(qtbot, running_a
 
     app.start()
     qtbot.waitUntil(lambda: app.window._transport.play_pause_button.isEnabled() is True, timeout=3000)
-    assert app.window._transport._connection_label.text() == "● Connected"
+    assert app.window._playlist_panel._connection_label.text() == "● Connected"
 
 
 def test_play_bookmark_requested_seeks_and_plays(qtbot, running_app) -> None:

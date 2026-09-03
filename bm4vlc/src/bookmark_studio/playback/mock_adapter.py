@@ -36,6 +36,7 @@ class MockPlaybackAdapter:
             current_playlist_item_id=item.vlc_id if item else None,
             duration_us=duration_us,
             media_uri=item.uri if item else None,
+            volume=self._volume,
         )
 
     def get_playlist(self) -> list[VlcPlaylistItem]:

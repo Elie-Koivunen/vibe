@@ -158,3 +158,67 @@ def test_start_validates_via_loopspec_construction() -> None:
     with pytest.raises(ValueError):
         LoopSpec(start_us=1000, end_us=500, repeat_count=None, gap_ms=0,
                  completion_action=CompletionAction.CONTINUE)
+
+
+def test_boundary_timer_seeks_back_without_waiting_for_a_poll(qtbot, rig) -> None:
+    """Direct user report, after the percent-seek precision fix still wasn't enough:
+    "it still drifts outside of the bookmark area!" -- root-caused to on_tick() only
+    ever being invoked once per status poll (~400ms in the real app), so even a
+    perfectly precise seek could land the loop hundreds of ms past its marked
+    boundary before anything noticed. _boundary_timer instead schedules the seek-back
+    itself, computed straight from the spec, so it fires without needing a poll or an
+    on_tick() call at all -- this test never calls on_tick(), only qtbot.wait().
+    """
+    adapter, clock, controller = rig
+    spec = LoopSpec(start_us=1_000_000, end_us=1_050_000, repeat_count=None, gap_ms=0,
+                     completion_action=CompletionAction.CONTINUE)
+    controller.start(spec)
+    assert adapter.get_status().time_us == 1_000_000
+
+    qtbot.wait(150)  # segment is 50ms; give the boundary timer plenty of margin to fire
+    assert adapter.get_status().time_us == 1_000_000  # seeked back to A, no on_tick() involved
+    assert controller.state is LoopState.PLAYING
+
+
+def test_fade_in_ramps_volume_up_from_zero(qtbot, rig) -> None:
+    """Direct user request: "add options to fade in and fade out when playing back"."""
+    adapter, clock, controller = rig
+    adapter.set_volume(200)
+    controller.set_target_volume(200)
+    spec = LoopSpec(start_us=0, end_us=10_000_000, repeat_count=None, gap_ms=0,
+                     completion_action=CompletionAction.CONTINUE, fade_in_ms=80)
+    controller.start(spec)
+    assert adapter.get_status().volume == 0  # ducked to silent right at the seek
+
+    qtbot.wait(150)
+    assert adapter.get_status().volume == 200  # ramped back up to the real target
+
+
+def test_fade_out_ducks_volume_before_the_boundary(qtbot, rig) -> None:
+    adapter, clock, controller = rig
+    adapter.set_volume(200)
+    controller.set_target_volume(200)
+    spec = LoopSpec(start_us=0, end_us=100_000, repeat_count=None, gap_ms=0,
+                     completion_action=CompletionAction.CONTINUE, fade_out_ms=60)
+    controller.start(spec)
+
+    qtbot.wait(150)  # segment (100ms) has fully elapsed, including the fade-out window
+    # Faded down to silent near the boundary, then immediately restored to the real
+    # target on the seek-back to A -- with no fade_in_ms configured, nothing else
+    # would ever bring it back up, and the loop would otherwise go silent forever
+    # after just its first iteration.
+    assert adapter.get_status().volume == 200
+
+
+def test_set_target_volume_ignored_while_a_fade_is_active(rig) -> None:
+    adapter, clock, controller = rig
+    controller.set_target_volume(200)
+    spec = LoopSpec(start_us=0, end_us=10_000_000, repeat_count=None, gap_ms=0,
+                     completion_action=CompletionAction.CONTINUE, fade_in_ms=5_000)
+    controller.start(spec)
+    assert controller._fade_active is True
+
+    # A status poll landing mid-fade must not corrupt the fade's own target with
+    # whatever intermediate (ducked) volume our own ramp just set.
+    controller.set_target_volume(adapter.get_status().volume)
+    assert controller._target_volume == 200

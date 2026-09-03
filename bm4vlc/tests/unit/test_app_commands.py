@@ -144,8 +144,8 @@ def test_change_loop_undo_redo(repo: BookmarkRepository) -> None:
     stack.push(
         ChangeLoopCommand(
             repo, bookmark.id,
-            old=(False, None, 0, CompletionAction.CONTINUE),
-            new=(True, 5, 250, CompletionAction.PAUSE),
+            old=(False, None, 0, CompletionAction.CONTINUE, 0, 0),
+            new=(True, 5, 250, CompletionAction.PAUSE, 100, 200),
         )
     )
     updated = repo.get(bookmark.id)

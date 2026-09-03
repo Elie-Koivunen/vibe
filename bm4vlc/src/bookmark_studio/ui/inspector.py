@@ -23,9 +23,13 @@ COMPLETION_LABELS = {
 
 class BookmarkInspector(QWidget):
     name_committed = Signal(str)
-    start_committed = Signal(int)
-    end_committed = Signal(int)
-    loop_settings_committed = Signal(bool, object, int, object)  # enabled, repeat_count|None, gap_ms, action
+    # object, not int -- see TransportBar.bookmark_start_committed's comment: a plain
+    # `int` signal arg overflows PySide6's 32-bit C++ marshaling beyond ~35.8 minutes,
+    # which the new per-section (incl. hour) arrow-key stepping can reach directly.
+    start_committed = Signal(object)
+    end_committed = Signal(object)
+    # enabled, repeat_count|None, gap_ms, action, fade_in_ms, fade_out_ms
+    loop_settings_committed = Signal(bool, object, int, object, int, int)
     tags_committed = Signal(tuple)
     notes_committed = Signal(str)
 
@@ -73,6 +77,22 @@ class BookmarkInspector(QWidget):
         self._completion_combo.currentIndexChanged.connect(self._on_loop_settings_changed)
         form.addRow("After loop", self._completion_combo)
 
+        # Direct user request: "add options to fade in and fade out when playing
+        # back". 0 disables, same "0 means off" convention as Gap above.
+        self._fade_in_spin = QSpinBox(self)
+        self._fade_in_spin.setRange(0, 60_000)
+        self._fade_in_spin.setSuffix(" ms")
+        self._fade_in_spin.setSpecialValueText("Off")
+        self._fade_in_spin.valueChanged.connect(self._on_loop_settings_changed)
+        form.addRow("Fade in", self._fade_in_spin)
+
+        self._fade_out_spin = QSpinBox(self)
+        self._fade_out_spin.setRange(0, 60_000)
+        self._fade_out_spin.setSuffix(" ms")
+        self._fade_out_spin.setSpecialValueText("Off")
+        self._fade_out_spin.valueChanged.connect(self._on_loop_settings_changed)
+        form.addRow("Fade out", self._fade_out_spin)
+
         self._tags_edit = QLineEdit(self)
         self._tags_edit.editingFinished.connect(self._on_tags_committed)
         form.addRow("Tags", self._tags_edit)
@@ -97,6 +117,8 @@ class BookmarkInspector(QWidget):
             self._gap_spin.setValue(bookmark.loop_gap_ms)
             index = self._completion_combo.findData(bookmark.completion_action)
             self._completion_combo.setCurrentIndex(max(0, index))
+            self._fade_in_spin.setValue(bookmark.fade_in_ms)
+            self._fade_out_spin.setValue(bookmark.fade_out_ms)
             self._tags_edit.setText(", ".join(bookmark.tags))
             self._notes_edit.setPlainText(bookmark.notes or "")
         finally:
@@ -134,7 +156,8 @@ class BookmarkInspector(QWidget):
         repeat_count = self._repeat_spin.value() or None
         action = self._completion_combo.currentData()
         self.loop_settings_committed.emit(
-            self._loop_checkbox.isChecked(), repeat_count, self._gap_spin.value(), action
+            self._loop_checkbox.isChecked(), repeat_count, self._gap_spin.value(), action,
+            self._fade_in_spin.value(), self._fade_out_spin.value(),
         )
 
     def _on_tags_committed(self) -> None:

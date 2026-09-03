@@ -4,7 +4,10 @@ from __future__ import annotations
 from uuid import UUID
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QCheckBox, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QCheckBox, QLabel, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+)
 
 from bookmark_studio.playback.status import VlcPlaylistItem
 
@@ -24,6 +27,21 @@ class PlaylistPanel(QWidget):
         self._current_playing_id: int | None = None
 
         layout = QVBoxLayout(self)
+        # Direct user request: "beautify the layout".
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # Direct follow-up request: "move the connection status to above the launch
+        # vlc button and enlarge the text" -- previously a small "● Connected" /
+        # "● Offline" label buried in the transport bar, far from the button that
+        # actually establishes the connection it's reporting on.
+        self._connection_label = QLabel("● Offline", self)
+        connection_font = QFont()
+        connection_font.setPointSize(14)
+        connection_font.setBold(True)
+        self._connection_label.setFont(connection_font)
+        self._connection_label.setStyleSheet("color: #a33;")
+        layout.addWidget(self._connection_label)
 
         # Direct user request: "add button to launch vlc and a browse button to
         # select desired playlist" / "option to select an open vlc instance, a drop
@@ -106,6 +124,14 @@ class PlaylistPanel(QWidget):
             if row.data(0, 32) == vlc_id:
                 self._tree.setCurrentItem(row)
                 return
+
+    def set_connected(self, connected: bool) -> None:
+        if connected:
+            self._connection_label.setText("● Connected")
+            self._connection_label.setStyleSheet("color: #2a2;")
+        else:
+            self._connection_label.setText("● Offline")
+            self._connection_label.setStyleSheet("color: #a33;")
 
     def set_follow_vlc(self, enabled: bool) -> None:
         """Programmatic version of the checkbox -- used when previewing a different,

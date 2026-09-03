@@ -58,6 +58,7 @@ class MainWindow(QMainWindow):
         self._current_media_id: UUID | None = None
 
         self._breadcrumb = QLabel("No playlist › No track › 0 bookmarks", self)
+        self._breadcrumb.setStyleSheet("padding: 4px 8px; font-weight: 600;")
 
         self._playlist_panel = PlaylistPanel(self)
         self._waveform_scene = WaveformScene()
@@ -83,7 +84,8 @@ class MainWindow(QMainWindow):
         """
         self._selection_bar = QWidget(self)
         layout = QHBoxLayout(self._selection_bar)
-        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(8)
 
         self._selection_label = QLabel("No selection", self)
         layout.addWidget(self._selection_label)
@@ -181,6 +183,7 @@ class MainWindow(QMainWindow):
 
         central = QWidget(self)
         layout = QVBoxLayout(central)
+        layout.setSpacing(6)
         layout.addWidget(self._breadcrumb)
         layout.addWidget(self._selection_bar)
         layout.addWidget(top_splitter, 2)
@@ -321,6 +324,15 @@ class MainWindow(QMainWindow):
 
     def set_playhead_time_us(self, time_us: int) -> None:
         self._waveform_scene.set_playhead_time_us(time_us)
+
+    def set_connected(self, connected: bool) -> None:
+        """Drives both the connection indicator (PlaylistPanel, above Launch VLC --
+        direct follow-up request to move it there) and the transport buttons'
+        enabled state (TransportBar) together, so callers have one place to report
+        connection changes instead of reaching into two widgets.
+        """
+        self._transport.set_transport_enabled(connected)
+        self._playlist_panel.set_connected(connected)
 
     # -- handlers: selection bar --
 
@@ -534,7 +546,8 @@ class MainWindow(QMainWindow):
         self._refresh_bookmarks()
 
     def _on_loop_settings_committed(
-        self, enabled: bool, repeat_count: int | None, gap_ms: int, action: CompletionAction
+        self, enabled: bool, repeat_count: int | None, gap_ms: int, action: CompletionAction,
+        fade_in_ms: int, fade_out_ms: int,
     ) -> None:
         bookmark = self._current_inspected_bookmark()
         if bookmark is None:
@@ -542,8 +555,11 @@ class MainWindow(QMainWindow):
         self._undo_stack.push(
             ChangeLoopCommand(
                 self._bookmark_repository, bookmark.id,
-                old=(bookmark.loop_enabled, bookmark.repeat_count, bookmark.loop_gap_ms, bookmark.completion_action),
-                new=(enabled, repeat_count, gap_ms, action),
+                old=(
+                    bookmark.loop_enabled, bookmark.repeat_count, bookmark.loop_gap_ms,
+                    bookmark.completion_action, bookmark.fade_in_ms, bookmark.fade_out_ms,
+                ),
+                new=(enabled, repeat_count, gap_ms, action, fade_in_ms, fade_out_ms),
             )
         )
         self._refresh_bookmarks()

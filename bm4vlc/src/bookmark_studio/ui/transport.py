@@ -5,7 +5,7 @@ import re
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QGridLayout, QLabel, QLineEdit, QPushButton, QWidget
+from PySide6.QtWidgets import QAbstractSpinBox, QGridLayout, QLabel, QPushButton, QWidget
 
 BUTTON_FONT_POINT_SIZE = 16
 BUTTON_MIN_SIZE = 44
@@ -42,31 +42,64 @@ def format_timecode(time_us: int) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
 
 
-class TimecodeEdit(QLineEdit):
-    """A QLineEdit for HH:MM:SS.mmm timecodes with spinbox-like Up/Down arrow-key
-    stepping -- direct user request: "the bookmark fields can also have arrow keys to
-    increment the numerals". Plain Up/Down steps by 100ms; Shift+Up/Down by 1s. An
-    arrow press re-commits immediately (emits editingFinished itself) so the change
-    takes effect right away instead of needing a separate Enter afterward.
+class TimecodeEdit(QAbstractSpinBox):
+    """An HH:MM:SS.mmm timecode field with real, visible spinner arrow buttons --
+    direct follow-up user request: "the bookmark fields still lack arrow buttons to
+    increment/decrement the time for hour, minutes, seconds, etc." A plain QLineEdit
+    (the previous implementation) only supported Up/Down as a *keyboard* shortcut,
+    with no on-screen control at all -- QAbstractSpinBox draws its own up/down
+    buttons for free, and stepBy() below makes them (and the Up/Down keys, which
+    QAbstractSpinBox already routes to stepBy()) act on whichever HH/MM/SS/mmm
+    section the cursor is currently sitting in, like a QTimeEdit, rather than always
+    stepping the whole value by a fixed amount.
     """
 
-    STEP_US = 100_000
-    STEP_US_COARSE = 1_000_000
+    # (section_start, section_end, microseconds_per_step) over the fixed
+    # "HH:MM:SS.mmm" layout -- cursor position decides which section steps.
+    _SECTIONS = [(0, 2, 3_600_000_000), (3, 5, 60_000_000), (6, 8, 1_000_000), (9, 12, 1_000)]
 
-    def keyPressEvent(self, event) -> None:  # noqa: N802
-        if event.key() in (Qt.Key_Up, Qt.Key_Down):
-            try:
-                current_us = parse_timecode(self.text())
-            except ValueError:
-                event.accept()
-                return
-            step = self.STEP_US_COARSE if event.modifiers() & Qt.ShiftModifier else self.STEP_US
-            delta = step if event.key() == Qt.Key_Up else -step
-            self.setText(format_timecode(max(0, current_us + delta)))
-            self.editingFinished.emit()
-            event.accept()
-            return
-        super().keyPressEvent(event)
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.lineEdit().setText(format_timecode(0))
+        self.setAlignment(Qt.AlignCenter)
+
+    # -- QLineEdit-shaped API, so call sites elsewhere don't need to change --
+
+    def text(self) -> str:
+        return self.lineEdit().text()
+
+    def setText(self, text: str) -> None:
+        self.lineEdit().setText(text)
+
+    def clear(self) -> None:
+        self.lineEdit().clear()
+
+    def setPlaceholderText(self, text: str) -> None:
+        self.lineEdit().setPlaceholderText(text)
+
+    # -- QAbstractSpinBox hooks --
+
+    def stepBy(self, steps: int) -> None:
+        cursor_pos = self.lineEdit().cursorPosition()
+        try:
+            current_us = parse_timecode(self.text())
+        except ValueError:
+            current_us = 0
+        delta_us = self._delta_for_cursor(cursor_pos) * steps
+        self.setText(format_timecode(max(0, current_us + delta_us)))
+        self.lineEdit().setCursorPosition(cursor_pos)
+        self.editingFinished.emit()
+
+    def stepEnabled(self) -> QAbstractSpinBox.StepEnabledFlag:
+        if not self.isEnabled() or self.isReadOnly():
+            return QAbstractSpinBox.StepNone
+        return QAbstractSpinBox.StepUpEnabled | QAbstractSpinBox.StepDownEnabled
+
+    def _delta_for_cursor(self, pos: int) -> int:
+        for start, end, delta in self._SECTIONS:
+            if start <= pos <= end:
+                return delta
+        return self._SECTIONS[-1][2]
 
 
 class TransportBar(QWidget):
@@ -78,8 +111,12 @@ class TransportBar(QWidget):
     seek_forward_clicked = Signal()
     next_track_clicked = Signal()
     next_bookmark_clicked = Signal()
-    bookmark_start_committed = Signal(int)  # microseconds -- edited bookmark start
-    bookmark_end_committed = Signal(int)  # microseconds -- edited bookmark end
+    # object, not int: PySide6 marshals a plain `int` signal arg through a 32-bit C++
+    # int, which silently wraps for any timecode beyond ~35.8 minutes (2^31 us) --
+    # exposed by the new per-section arrow-key stepping (an hour-section step alone
+    # already overflows it). microseconds -- edited bookmark start/end.
+    bookmark_start_committed = Signal(object)
+    bookmark_end_committed = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -89,6 +126,11 @@ class TransportBar(QWidget):
         # QGridLayout makes that alignment automatic (matching column -> matching
         # width/position) instead of needing fragile manually-tuned spacers.
         layout = QGridLayout(self)
+        # Direct user request: "beautify the layout" -- the default zero-margin,
+        # zero-spacing grid packed every button and field edge-to-edge.
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(6)
         button_font = QFont()
         button_font.setPointSize(BUTTON_FONT_POINT_SIZE)
 
@@ -139,10 +181,6 @@ class TransportBar(QWidget):
         self._duration_label.setFont(button_font)
         layout.addWidget(self._duration_label, 0, 11)
 
-        self._connection_label = QLabel("● Offline", self)
-        self._connection_label.setStyleSheet("color: #a33;")
-        layout.addWidget(self._connection_label, 0, 12)
-
         # Direct follow-up request: "the fields should reflect the bookmark start
         # time and end time" -- mirrors whatever bookmark is currently loaded in the
         # Inspector and edits it the same way; MainWindow wires these signals to the
@@ -177,9 +215,12 @@ class TransportBar(QWidget):
         # functioning": set_transport_enabled() (spec #137) existed but was never once
         # called anywhere in app/application.py -- buttons stayed clickable-looking
         # even while genuinely disconnected from VLC, so a click just silently did
-        # nothing (the failure was logged at debug level only). This label makes the
-        # actual connection state visible instead of a click doing nothing unexplained.
-        self.set_connected(False)
+        # nothing (the failure was logged at debug level only). The connection
+        # indicator itself now lives in PlaylistPanel, right above the Launch VLC
+        # button (direct follow-up request: "move the connection status to above the
+        # launch vlc button") -- MainWindow.set_connected() drives both it and this
+        # button-enable state together.
+        self.set_transport_enabled(False)
 
     def set_time(self, position_us: int, duration_us: int | None) -> None:
         self._position_label.setText(format_timecode(position_us))
@@ -214,15 +255,6 @@ class TransportBar(QWidget):
         except ValueError:
             return
         self.bookmark_end_committed.emit(time_us)
-
-    def set_connected(self, connected: bool) -> None:
-        self.set_transport_enabled(connected)
-        if connected:
-            self._connection_label.setText("● Connected")
-            self._connection_label.setStyleSheet("color: #2a2;")
-        else:
-            self._connection_label.setText("● Offline")
-            self._connection_label.setStyleSheet("color: #a33;")
 
     def set_transport_enabled(self, enabled: bool) -> None:
         """spec #137: 'VLC offline -> all VLC transport disabled'."""

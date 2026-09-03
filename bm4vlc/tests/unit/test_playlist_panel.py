@@ -16,6 +16,19 @@ def _panel(qtbot) -> PlaylistPanel:
     return panel
 
 
+def test_set_connected_updates_label_above_launch_button(qtbot) -> None:
+    """Direct follow-up request: "move the connection status to above the launch vlc
+    button and enlarge the text" -- the indicator moved here from TransportBar."""
+    panel = _panel(qtbot)
+    assert panel._connection_label.text() == "● Offline"
+
+    panel.set_connected(True)
+    assert panel._connection_label.text() == "● Connected"
+
+    panel.set_connected(False)
+    assert panel._connection_label.text() == "● Offline"
+
+
 def test_set_current_playing_does_not_recreate_tree_items(qtbot) -> None:
     """Regression, reported live as "i still cant automatically play a song by double
     clicking the tittle": set_current_playing() used to call the full _tree.clear() +

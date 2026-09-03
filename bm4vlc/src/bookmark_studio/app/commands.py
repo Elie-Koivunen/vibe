@@ -162,8 +162,8 @@ class ChangeLoopCommand(QUndoCommand):
         repository: BookmarkRepository,
         bookmark_id: UUID,
         *,
-        old: tuple[bool, int | None, int, CompletionAction],
-        new: tuple[bool, int | None, int, CompletionAction],
+        old: tuple[bool, int | None, int, CompletionAction, int, int],
+        new: tuple[bool, int | None, int, CompletionAction, int, int],
     ) -> None:
         super().__init__("Change loop settings")
         self._repository = repository
@@ -177,11 +177,11 @@ class ChangeLoopCommand(QUndoCommand):
     def undo(self) -> None:
         self._apply(self._old)
 
-    def _apply(self, values: tuple[bool, int | None, int, CompletionAction]) -> None:
+    def _apply(self, values: tuple[bool, int | None, int, CompletionAction, int, int]) -> None:
         bookmark = self._repository.get(self._bookmark_id)
         if bookmark is None:
             return
-        loop_enabled, repeat_count, loop_gap_ms, completion_action = values
+        loop_enabled, repeat_count, loop_gap_ms, completion_action, fade_in_ms, fade_out_ms = values
         self._repository.update(
             replace(
                 bookmark,
@@ -189,6 +189,8 @@ class ChangeLoopCommand(QUndoCommand):
                 repeat_count=repeat_count,
                 loop_gap_ms=loop_gap_ms,
                 completion_action=completion_action,
+                fade_in_ms=fade_in_ms,
+                fade_out_ms=fade_out_ms,
             )
         )
 

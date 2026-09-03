@@ -27,9 +27,9 @@ def conn() -> sqlite3.Connection:
 
 
 def test_migrate_applies_schema_and_is_idempotent(conn: sqlite3.Connection) -> None:
-    assert current_version(conn) == 2
+    assert current_version(conn) == 3
     # Re-running must not error and must not reapply.
-    assert migrate(conn) == 2
+    assert migrate(conn) == 3
     tables = {
         row[0]
         for row in conn.execute(
