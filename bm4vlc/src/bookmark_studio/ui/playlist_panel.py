@@ -90,6 +90,23 @@ class PlaylistPanel(QWidget):
             row = self._tree.topLevelItem(i)
             row.setText(0, "▶" if row.data(0, 32) == vlc_id else "")
 
+    def select_item(self, vlc_id: int | None) -> None:
+        """Highlights the row for `vlc_id` -- direct user request: selecting a
+        bookmark should "automatically select the song from the playlist above" too,
+        not just switch the waveform. Setting the current item fires the normal
+        itemSelectionChanged -> item_selected signal chain, so Application's existing
+        _on_playlist_item_selected handles the actual waveform/follow-state switch;
+        this method only needs to move the highlight.
+        """
+        if vlc_id is None:
+            self._tree.clearSelection()
+            return
+        for i in range(self._tree.topLevelItemCount()):
+            row = self._tree.topLevelItem(i)
+            if row.data(0, 32) == vlc_id:
+                self._tree.setCurrentItem(row)
+                return
+
     def set_follow_vlc(self, enabled: bool) -> None:
         """Programmatic version of the checkbox -- used when previewing a different,
         not-currently-playing song single-clicks the checkbox off (see

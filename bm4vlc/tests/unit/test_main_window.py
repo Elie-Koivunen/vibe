@@ -206,8 +206,14 @@ def test_bookmark_selection_populates_inspector(qtbot) -> None:
     QTest.mouseDClick(view.viewport(), Qt.LeftButton, pos=pos)
     bookmark = repo.list_for_playlist_media(playlist.id, media.id)[0]
 
+    requests = []
+    window.bookmark_song_display_requested.connect(requests.append)
+
     window._on_bookmark_activated(bookmark.id)
     assert window._inspector._name_edit.text() == bookmark.name
+    # Direct user request: "when i select a bookmarking, i want it to automatically
+    # select the song from the playlist above and display its waveform".
+    assert requests == [bookmark.id]
 
 
 def test_transport_bookmark_fields_mirror_and_edit_the_inspected_bookmark(qtbot) -> None:

@@ -552,6 +552,51 @@ def test_selection_is_cleared_when_the_displayed_track_changes(qtbot, running_ap
     assert app.window._waveform_scene.selection() is None
 
 
+def test_selecting_a_bookmark_switches_the_waveform_to_its_song_without_playing(qtbot, running_app) -> None:
+    """Direct user request: "when i select a bookmarking, i want it to automatically
+    select the song from the playlist above and display its waveform along with the
+    bookmarks" -- just selecting (not Play/Loop Bookmark) must preview the song, the
+    same as single-clicking its playlist row, without commanding VLC to play it.
+    """
+    adapter = MockPlaybackAdapter(
+        [
+            VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=60.0),
+            VlcPlaylistItem(vlc_id=2, uri="file:///b.mp3", name="Song B", duration_s=60.0),
+        ]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._actually_playing_vlc_item_id == 1, timeout=3000)
+
+    from uuid import uuid4
+
+    from bookmark_studio.domain.bookmark import Bookmark
+    from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
+
+    media_b = app._media_resolver.resolve("file:///b.mp3")
+    bookmark = Bookmark(
+        id=uuid4(), playlist_id=app._synchronizer.active_playlist_id, media_id=media_b.id,
+        scope=BookmarkScope.PLAYLIST_MEDIA, lane_id=None, bookmark_type=BookmarkType.POINT,
+        name="Hook", start_us=3_000_000, end_us=None, loop_enabled=False, repeat_count=None,
+        loop_gap_ms=0, completion_action=CompletionAction.CONTINUE,
+    )
+    app._bookmark_repository.insert(bookmark)
+
+    app._on_bookmark_song_display_requested(bookmark.id)
+
+    # Selects the matching row in the playlist panel above.
+    selected_items = app.window._playlist_panel._tree.selectedItems()
+    assert len(selected_items) == 1
+    assert selected_items[0].data(0, 32) == 2
+
+    # Switches the waveform/breadcrumb to that song, without commanding playback.
+    assert app._current_media_id == media_b.id
+    assert "b.mp3" in app.window._breadcrumb.text()
+    assert app._actually_playing_vlc_item_id == 1  # actual VLC playback untouched
+    assert adapter.get_status().current_playlist_item_id == 1
+    assert app.window._playlist_panel.follow_vlc_enabled() is False
+
+
 def test_bookmark_panel_shows_bookmarks_from_every_song_in_the_playlist(qtbot, running_app) -> None:
     """Direct user request: "the bookmarks should all be listed for all songs"."""
     adapter = MockPlaybackAdapter(

@@ -225,6 +225,7 @@ class Application(QObject):
         self.window.loop_bookmark_requested.connect(self._on_loop_bookmark_requested)
         self.window.bookmark_reorder_requested.connect(self._on_bookmark_reorder_requested)
         self.window.bookmarks_changed.connect(self._refresh_bookmark_panel)
+        self.window.bookmark_song_display_requested.connect(self._on_bookmark_song_display_requested)
 
     # -- launch/attach picker --
     #
@@ -391,6 +392,24 @@ class Application(QObject):
         self._current_vlc_item_id = item.vlc_id
         duration_us = int(item.duration_s * 1_000_000) if item.duration_s is not None else None
         self._on_current_item_changed(item.uri, duration_us)
+
+    def _on_bookmark_song_display_requested(self, bookmark_id: UUID) -> None:
+        """Direct user request: "when i select a bookmarking, i want it to
+        automatically select the song from the playlist above and display its
+        waveform along with the bookmarks" -- just selecting a bookmark row (not
+        Play/Loop Bookmark) previews its song the same way single-clicking a playlist
+        row does, without commanding VLC to actually play anything. Selecting the
+        matching playlist row reuses the exact same selection-changed signal chain
+        _on_playlist_item_selected already handles (follow-toggle if it's not the
+        actively-playing song, waveform/breadcrumb/bookmark-list switch), so no
+        separate display logic is needed here.
+        """
+        bookmark = self._bookmark_repository.get(bookmark_id)
+        if bookmark is None:
+            return
+        item = self._playlist_item_for_media(bookmark.media_id)
+        if item is not None:
+            self.window._playlist_panel.select_item(item.vlc_id)
 
     def _on_play_bookmark_requested(self, bookmark_id: UUID) -> None:
         """"another set below that would play explicitly from the bookmark listing

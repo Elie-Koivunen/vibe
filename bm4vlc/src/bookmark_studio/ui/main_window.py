@@ -39,6 +39,7 @@ class MainWindow(QMainWindow):
     play_bookmark_requested = Signal(object)  # UUID
     loop_bookmark_requested = Signal(object)  # UUID
     bookmark_reorder_requested = Signal(list)  # ordered list of bookmark UUIDs
+    bookmark_song_display_requested = Signal(object)  # UUID -- just selected, not played
     bookmarks_changed = Signal()
 
     def __init__(
@@ -483,6 +484,12 @@ class MainWindow(QMainWindow):
         if bookmark is not None:
             self._load_bookmark_into_inspector(bookmark)
             self._bookmark_panel.select_bookmark(bookmark_id)
+            # Direct user request: "when i select a bookmarking, i want it to
+            # automatically select the song from the playlist above and display its
+            # waveform along with the bookmarks" -- Application resolves which live
+            # playlist row/song this bookmark belongs to (this window has no playlist
+            # snapshot of its own to do that lookup with).
+            self.bookmark_song_display_requested.emit(bookmark_id)
 
     def _on_bookmark_move_finished(self, bookmark_id: UUID, start_us: int, end_us: int) -> None:
         bookmark = self._bookmark_repository.get(bookmark_id)

@@ -67,3 +67,26 @@ def test_set_playlist_is_a_noop_when_items_are_unchanged(qtbot) -> None:
     )
 
     assert panel._tree.topLevelItem(0) is row_before
+
+
+def test_select_item_highlights_the_matching_row_and_fires_item_selected(qtbot) -> None:
+    """Direct user request: selecting a bookmark should "automatically select the
+    song from the playlist above" -- Application drives this via select_item()."""
+    panel = _panel(qtbot)
+    selected = []
+    panel.item_selected.connect(selected.append)
+
+    panel.select_item(2)
+
+    assert [item.data(0, 32) for item in panel._tree.selectedItems()] == [2]
+    assert selected == [2]
+
+
+def test_select_item_none_clears_selection(qtbot) -> None:
+    panel = _panel(qtbot)
+    panel.select_item(1)
+    assert panel._tree.selectedItems()
+
+    panel.select_item(None)
+
+    assert panel._tree.selectedItems() == []
