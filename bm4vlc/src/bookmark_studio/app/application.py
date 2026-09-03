@@ -359,9 +359,9 @@ class Application(QObject):
                       completion_action=CompletionAction.CONTINUE)
         )
 
-    def _vlc_id_for_media(self, media_id: UUID) -> int | None:
-        """Maps a bookmark's media_id back to the live VLC playlist item id that
-        plays it, by resolving each currently-known playlist item's URI the same way
+    def _playlist_item_for_media(self, media_id: UUID):
+        """Maps a bookmark's media_id back to the live VLC playlist item that plays
+        it, by resolving each currently-known playlist item's URI the same way
         _on_playlist_result already does (MediaResolver.resolve is idempotent -- an
         already-resolved URI just returns the existing record, no new DB writes).
         """
@@ -373,8 +373,24 @@ class Application(QObject):
             except Exception:  # noqa: BLE001 - best-effort lookup, see callers
                 continue
             if media.id == media_id:
-                return item.vlc_id
+                return item
         return None
+
+    def _switch_displayed_song_for_bookmark(self, item) -> None:
+        """Loads the bookmark's own song into the waveform/breadcrumb/bookmark list
+        immediately, instead of waiting for the async VLC command + next status poll
+        to come back around. Regression, reported live: "when selecting a bookmarked
+        sample to play, the original song and the waveform are not loaded at the
+        same time" -- Play/Loop Bookmark only ever told VLC to switch tracks and left
+        the waveform to catch up on its own via the ~400ms status poll (and not at
+        all if "Follow currently playing VLC song" had been switched off by a
+        previous preview click -- see _on_playlist_item_selected). Mirrors the same
+        fix already applied to double-click-to-play in the playlist.
+        """
+        self.window._playlist_panel.set_follow_vlc(True)
+        self._current_vlc_item_id = item.vlc_id
+        duration_us = int(item.duration_s * 1_000_000) if item.duration_s is not None else None
+        self._on_current_item_changed(item.uri, duration_us)
 
     def _on_play_bookmark_requested(self, bookmark_id: UUID) -> None:
         """"another set below that would play explicitly from the bookmark listing
@@ -392,7 +408,10 @@ class Application(QObject):
         bookmark = self._bookmark_repository.get(bookmark_id)
         if bookmark is None:
             return
-        vlc_id = self._vlc_id_for_media(bookmark.media_id)
+        item = self._playlist_item_for_media(bookmark.media_id)
+        if item is not None:
+            self._switch_displayed_song_for_bookmark(item)
+        vlc_id = item.vlc_id if item is not None else None
 
         def _play() -> None:
             if vlc_id is not None:
@@ -412,9 +431,10 @@ class Application(QObject):
         # runs its seek/play synchronously on the calling (main) thread -- matches
         # the codebase's existing behavior for _on_loop_selection_requested, and
         # guarantees the song switch has actually landed before the loop's own seek.
-        vlc_id = self._vlc_id_for_media(bookmark.media_id)
-        if vlc_id is not None:
-            self._adapter.goto_item(vlc_id)
+        item = self._playlist_item_for_media(bookmark.media_id)
+        if item is not None:
+            self._switch_displayed_song_for_bookmark(item)
+            self._adapter.goto_item(item.vlc_id)
 
         from bookmark_studio.domain.loop import LoopSpec
 

@@ -306,9 +306,58 @@ def test_play_bookmark_requested_switches_song_when_bookmark_belongs_to_a_differ
 
     app._on_play_bookmark_requested(bookmark.id)
 
+    # Regression: "when selecting a bookmarked sample to play, the original song and
+    # the waveform are not loaded at the same time" -- the waveform/breadcrumb must
+    # switch to the bookmark's song immediately (synchronously, right here), not only
+    # once the async VLC command eventually completes and a status poll catches up.
+    assert app._current_media_id == media_b.id
+    assert "b.mp3" in app.window._breadcrumb.text()
+    assert app.window._playlist_panel.follow_vlc_enabled() is True
+
     qtbot.waitUntil(lambda: adapter.get_status().current_playlist_item_id == 2, timeout=3000)
     qtbot.waitUntil(lambda: adapter.get_status().time_us == 20_000_000, timeout=3000)
     assert adapter.get_status().state == "playing"
+
+
+def test_play_bookmark_re_enables_follow_disabled_by_a_prior_preview(qtbot, running_app) -> None:
+    """Worse variant of the same regression: if the user had previewed a different
+    song (single-click, which switches off "Follow currently playing VLC song"),
+    Play Bookmark must still switch the waveform to the bookmark's song and re-enable
+    follow -- otherwise, with follow off, the waveform would never update at all once
+    VLC's own status poll eventually caught up either, not just late.
+    """
+    from uuid import uuid4
+
+    from bookmark_studio.domain.bookmark import Bookmark
+    from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
+
+    adapter = MockPlaybackAdapter(
+        [
+            VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=60.0),
+            VlcPlaylistItem(vlc_id=2, uri="file:///b.mp3", name="Song B", duration_s=60.0),
+        ]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._actually_playing_vlc_item_id == 1, timeout=3000)
+
+    app._on_playlist_item_selected(2)  # preview Song B without playing it
+    assert app.window._playlist_panel.follow_vlc_enabled() is False
+
+    media_a = app._media_resolver.resolve("file:///a.mp3")
+    bookmark = Bookmark(
+        id=uuid4(), playlist_id=app._synchronizer.active_playlist_id, media_id=media_a.id,
+        scope=BookmarkScope.PLAYLIST_MEDIA, lane_id=None, bookmark_type=BookmarkType.POINT,
+        name="Intro", start_us=5_000_000, end_us=None, loop_enabled=False, repeat_count=None,
+        loop_gap_ms=0, completion_action=CompletionAction.CONTINUE,
+    )
+    app._bookmark_repository.insert(bookmark)
+
+    app._on_play_bookmark_requested(bookmark.id)
+
+    assert app.window._playlist_panel.follow_vlc_enabled() is True
+    assert app._current_media_id == media_a.id
+    assert "a.mp3" in app.window._breadcrumb.text()
 
 
 def test_loop_bookmark_requested_switches_song_when_bookmark_belongs_to_a_different_one(
