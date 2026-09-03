@@ -22,12 +22,15 @@ TRACK_HEIGHT = 160
 
 
 class WaveformScene(QGraphicsScene):
-    seek_requested = Signal(int)
+    # object, not int: these carry raw microsecond timecodes, which PySide6 would
+    # otherwise marshal through a 32-bit C++ int and silently wrap past ~35.8 minutes
+    # (2^31 us) -- same bug class fixed for TransportBar/BookmarkInspector's signals.
+    seek_requested = Signal(object)
     selection_changed = Signal(object)  # Selection | None
-    point_bookmark_requested = Signal(int)
+    point_bookmark_requested = Signal(object)
     bookmark_activated = Signal(object)  # UUID
-    bookmark_move_finished = Signal(object, int, int)  # UUID, start_us, end_us
-    bookmark_resize_finished = Signal(object, str, int)  # UUID, handle, value_us
+    bookmark_move_finished = Signal(object, object, object)  # UUID, start_us, end_us
+    bookmark_resize_finished = Signal(object, str, object)  # UUID, handle, value_us
     bookmark_context_menu_requested = Signal(object, object)  # UUID, scene QPointF
 
     def __init__(self, duration_us: int = 0) -> None:

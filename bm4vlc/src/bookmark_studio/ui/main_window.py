@@ -33,8 +33,11 @@ class MainWindow(QMainWindow):
     # composition root (e.g. app/application.py) has one place to wire real VLC
     # commands, instead of reaching into private widgets. play_selection_requested and
     # loop_selection_requested carry (start_us, end_us).
-    play_selection_requested = Signal(int, int)
-    loop_selection_requested = Signal(int, int)
+    # int would marshal through a 32-bit C++ int and silently wrap past ~35.8 minutes
+    # (2^31 microseconds) -- same bug class fixed for TransportBar/BookmarkInspector's
+    # timecode signals; object bypasses that C-type coercion entirely.
+    play_selection_requested = Signal(object, object)
+    loop_selection_requested = Signal(object, object)
     launch_vlc_requested = Signal()
     play_bookmark_requested = Signal(object)  # UUID
     loop_bookmark_requested = Signal(object)  # UUID
@@ -298,12 +301,6 @@ class MainWindow(QMainWindow):
         self._inspector.loop_settings_committed.connect(self._on_loop_settings_committed)
         self._inspector.start_committed.connect(self._on_inspector_start_committed)
         self._inspector.end_committed.connect(self._on_inspector_end_committed)
-
-        # Direct follow-up request: transport-bar Start/End fields mirror and edit
-        # the same currently-selected bookmark as the Inspector's own fields --
-        # reuse the exact same commit handlers so both stay in sync automatically.
-        self._transport.bookmark_start_committed.connect(self._on_inspector_start_committed)
-        self._transport.bookmark_end_committed.connect(self._on_inspector_end_committed)
 
         self._playlist_panel.launch_vlc_requested.connect(self.launch_vlc_requested.emit)
 
@@ -635,16 +632,11 @@ class MainWindow(QMainWindow):
         return self._inspector.current_bookmark()
 
     def _load_bookmark_into_inspector(self, bookmark: Bookmark) -> None:
-        """Single funnel for every "show this bookmark for editing" path, so the
-        transport bar's mirrored Start/End fields (see TransportBar.set_bookmark_times)
-        never fall out of sync with whatever the Inspector itself is showing.
-        """
+        """Single funnel for every "show this bookmark for editing" path."""
         self._inspector.load_bookmark(bookmark)
-        self._transport.set_bookmark_times(bookmark.start_us, bookmark.end_us)
 
     def _clear_inspector(self) -> None:
         self._inspector.clear()
-        self._transport.set_bookmark_times(None, None)
 
     def _refresh_bookmarks(self) -> None:
         if self._current_playlist_id is None and self._current_media_id is None:

@@ -4,14 +4,20 @@ from __future__ import annotations
 from uuid import UUID
 
 from PySide6.QtCore import Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QCheckBox, QLabel, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from bookmark_studio.playback.status import VlcPlaylistItem
 
-COLUMNS = ["Playing", "Title", "Artist", "Duration", "Bookmarks", "Status"]
+COLUMNS = ["Title", "Artist", "Duration", "Bookmarks", "Status"]
+
+# Direct user request: "instead of having a playing column, reflect in traffic
+# color by highlighting the song that is being played e.g. in green" -- replaces
+# the old "▶" marker column with a full-row background tint instead.
+_PLAYING_ROW_COLOR = QColor("#8fd98f")
+_NOT_PLAYING_BRUSH = QBrush()
 
 
 class PlaylistPanel(QWidget):
@@ -90,7 +96,7 @@ class PlaylistPanel(QWidget):
         self._rebuild()
 
     def set_current_playing(self, vlc_id: int | None) -> None:
-        """Updates just the "Playing" marker column on existing rows -- direct fix for
+        """Updates just the playing-row highlight on existing rows -- direct fix for
         "i still cant automatically play a song by double clicking the tittle": this
         used to call _rebuild(), which does _tree.clear() + recreates every
         QTreeWidgetItem from scratch. Called on every ~400ms status poll, that
@@ -100,14 +106,14 @@ class PlaylistPanel(QWidget):
         detection -- confirmed by the fact goto_item()'s VLC command itself was
         already verified correct. It also wiped the current selection highlight and
         scroll position on every tick, a real bug in its own right even ignoring
-        double-click. No rebuild is needed at all: only the ▶ text ever changes here.
+        double-click. No rebuild is needed at all: only the highlighted row changes.
         """
         if vlc_id == self._current_playing_id:
             return
         self._current_playing_id = vlc_id
         for i in range(self._tree.topLevelItemCount()):
             row = self._tree.topLevelItem(i)
-            row.setText(0, "▶" if row.data(0, 32) == vlc_id else "")
+            _set_row_playing(row, row.data(0, 32) == vlc_id)
 
     def select_item(self, vlc_id: int | None) -> None:
         """Highlights the row for `vlc_id` -- direct user request: selecting a
@@ -150,7 +156,6 @@ class PlaylistPanel(QWidget):
         for item in self._items:
             row = QTreeWidgetItem(
                 [
-                    "▶" if item.vlc_id == self._current_playing_id else "",
                     item.name,
                     "",
                     _format_duration(item.duration_s),
@@ -159,14 +164,20 @@ class PlaylistPanel(QWidget):
                 ]
             )
             row.setData(0, 32, item.vlc_id)  # Qt.UserRole == 32
+            _set_row_playing(row, item.vlc_id == self._current_playing_id)
             self._tree.addTopLevelItem(row)
+        # Direct user request: "have the columns resize automatically to the length
+        # of the strings" -- stays manually resizable after this, just re-fit to the
+        # current content on every rebuild instead of defaulting to truncated text.
+        for column in range(len(COLUMNS)):
+            self._tree.resizeColumnToContents(column)
         self._apply_filter(self._filter_edit.text())
 
     def _apply_filter(self, text: str) -> None:
         needle = text.strip().lower()
         for i in range(self._tree.topLevelItemCount()):
             row = self._tree.topLevelItem(i)
-            visible = not needle or needle in row.text(1).lower()
+            visible = not needle or needle in row.text(0).lower()  # column 0 == Title
             row.setHidden(not visible)
 
     def _on_selection_changed(self) -> None:
@@ -176,6 +187,12 @@ class PlaylistPanel(QWidget):
 
     def _on_item_double_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
         self.item_double_clicked.emit(item.data(0, 32))
+
+
+def _set_row_playing(row: QTreeWidgetItem, playing: bool) -> None:
+    brush = QBrush(_PLAYING_ROW_COLOR) if playing else _NOT_PLAYING_BRUSH
+    for column in range(len(COLUMNS)):
+        row.setBackground(column, brush)
 
 
 def _format_duration(duration_s: float | None) -> str:

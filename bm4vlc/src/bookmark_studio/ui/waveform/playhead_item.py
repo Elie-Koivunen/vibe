@@ -33,7 +33,10 @@ def _view_scale_x(item: QGraphicsItem) -> float:
 
 
 class PlayheadItem(QGraphicsObject):
-    seek_requested = Signal(int)  # microseconds -- emitted once, when the drag ends
+    # object, not int: a raw microsecond timecode -- int would marshal through a 32-bit
+    # C++ int and silently wrap past ~35.8 minutes (2^31 us), same bug class fixed for
+    # TransportBar/BookmarkInspector's timecode signals.
+    seek_requested = Signal(object)  # emitted once, when the drag ends
 
     def __init__(self, height: float = TRACK_HEIGHT) -> None:
         super().__init__()

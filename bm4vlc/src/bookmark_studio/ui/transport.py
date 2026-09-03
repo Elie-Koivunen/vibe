@@ -11,7 +11,6 @@ from PySide6.QtWidgets import (
 
 BUTTON_FONT_POINT_SIZE = 16
 BUTTON_MIN_SIZE = 44
-BOOKMARK_FIELD_FONT_POINT_SIZE = 12
 
 _TIMECODE_RE = re.compile(
     r"^(?:(?:(\d+):)?(\d+):)?(\d+)(?:\.(\d{1,3}))?$"
@@ -208,12 +207,6 @@ class TransportBar(QWidget):
     seek_forward_clicked = Signal()
     next_track_clicked = Signal()
     next_bookmark_clicked = Signal()
-    # object, not int: PySide6 marshals a plain `int` signal arg through a 32-bit C++
-    # int, which silently wraps for any timecode beyond ~35.8 minutes (2^31 us) --
-    # exposed by the new per-section arrow-key stepping (an hour-section step alone
-    # already overflows it). microseconds -- edited bookmark start/end.
-    bookmark_start_committed = Signal(object)
-    bookmark_end_committed = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -278,49 +271,10 @@ class TransportBar(QWidget):
         self._duration_label.setFont(button_font)
         layout.addWidget(self._duration_label, 0, 11)
 
-        # Direct follow-up request: "the fields should reflect the bookmark start
-        # time and end time" -- mirrors whatever bookmark is currently loaded in the
-        # Inspector and edits it the same way; MainWindow wires these signals to the
-        # exact same handlers as the Inspector's own Start/End fields, and keeps both
-        # in sync whenever either one changes. Row 1, column 10 -- same column as
-        # _position_label above, so the two stay visually stacked.
-        layout.addWidget(QLabel("Bookmark:", self), 1, 9, alignment=Qt.AlignRight)
-
-        # Direct follow-up request: "the interface needs to be reworked" -- the
-        # bookmark fields were being clipped (screenshot showed a lone "3" where the
-        # end field's digits should be). Root cause: TimecodeEdit became a real
-        # QAbstractSpinBox (so it could grow its own visible spinner buttons), but
-        # these two fields still carried the OLD QLineEdit-era setMaximumWidth(150)
-        # cap sized for a plain text box with no button area -- at the 16pt button
-        # font it was never wide enough for "00:00:00.000" plus those buttons. Now
-        # uses its own, slightly smaller font (fits comfortably without dominating
-        # the row) and a MINIMUM width instead of a cap, so the widget's own
-        # size-aware layout (which already reserves room for the spin buttons) is
-        # never squeezed below what it says it actually needs.
-        timecode_font = QFont()
-        timecode_font.setPointSize(BOOKMARK_FIELD_FONT_POINT_SIZE)
-
-        self._bookmark_start_edit = TimecodeEdit(self)
-        self._bookmark_start_edit.setFont(timecode_font)
-        self._bookmark_start_edit.setMinimumWidth(130)
-        self._bookmark_start_edit.setToolTip(
-            "Selected bookmark's start -- edit and press Enter (or use ↑/↓, or the spinner buttons) to adjust it"
-        )
-        self._bookmark_start_edit.editingFinished.connect(self._on_bookmark_start_committed)
-        layout.addWidget(self._bookmark_start_edit, 1, 10)
-
-        layout.addWidget(QLabel("→", self), 1, 11)
-
-        self._bookmark_end_edit = TimecodeEdit(self)
-        self._bookmark_end_edit.setFont(timecode_font)
-        self._bookmark_end_edit.setMinimumWidth(130)
-        self._bookmark_end_edit.setToolTip(
-            "Selected bookmark's end -- edit and press Enter (or use ↑/↓, or the spinner buttons) to adjust it"
-        )
-        self._bookmark_end_edit.editingFinished.connect(self._on_bookmark_end_committed)
-        layout.addWidget(self._bookmark_end_edit, 1, 12)
-
-        self.set_bookmark_times(None, None)
+        # The mirrored Bookmark Start/End fields that used to live here (row 1) were
+        # removed per direct follow-up request -- "this is now duplicate, you can
+        # remove" (the Inspector's own Start/End fields, and now also the bookmark
+        # list's Start/End columns, already show the same thing).
 
         # Direct fix for "the player buttons do not map to vlc player, hence not
         # functioning": set_transport_enabled() (spec #137) existed but was never once
@@ -337,35 +291,6 @@ class TransportBar(QWidget):
         self._position_label.setText(format_timecode(position_us))
         duration_text = format_timecode(duration_us) if duration_us is not None else "--:--:--.---"
         self._duration_label.setText(f"/ {duration_text}")
-
-    def set_bookmark_times(self, start_us: int | None, end_us: int | None) -> None:
-        """Called whenever the Inspector's loaded bookmark changes (including to
-        None, e.g. nothing selected or a point bookmark with no end) -- keeps this
-        mini pair in sync with whatever's actually selected, the same way
-        BookmarkInspector.load_bookmark()/clear() do for the main Start/End fields.
-        """
-        has_bookmark = start_us is not None
-        if not self._bookmark_start_edit.hasFocus():
-            self._bookmark_start_edit.setText(format_timecode(start_us) if has_bookmark else "")
-        self._bookmark_start_edit.setEnabled(has_bookmark)
-        has_end = end_us is not None
-        if not self._bookmark_end_edit.hasFocus():
-            self._bookmark_end_edit.setText(format_timecode(end_us) if has_end else "")
-        self._bookmark_end_edit.setEnabled(has_end)
-
-    def _on_bookmark_start_committed(self) -> None:
-        try:
-            time_us = parse_timecode(self._bookmark_start_edit.text())
-        except ValueError:
-            return  # caller reverts via the next set_bookmark_times() call
-        self.bookmark_start_committed.emit(time_us)
-
-    def _on_bookmark_end_committed(self) -> None:
-        try:
-            time_us = parse_timecode(self._bookmark_end_edit.text())
-        except ValueError:
-            return
-        self.bookmark_end_committed.emit(time_us)
 
     def set_transport_enabled(self, enabled: bool) -> None:
         """spec #137: 'VLC offline -> all VLC transport disabled'."""

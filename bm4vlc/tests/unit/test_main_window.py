@@ -218,33 +218,6 @@ def test_bookmark_selection_populates_inspector(qtbot) -> None:
     assert requests == [bookmark.id]
 
 
-def test_transport_bookmark_fields_mirror_and_edit_the_inspected_bookmark(qtbot) -> None:
-    """Direct follow-up request: "the fields should reflect the bookmark start time
-    and end time, a different timer should be adjacent for the duration of the whole
-    song" -- the transport bar's Start/End pair mirrors the Inspector's own, and
-    editing either one updates the same bookmark and keeps both in sync."""
-    window, repo, playlist, media = _build_window(qtbot)
-    from bookmark_studio.domain.selection import Selection
-
-    window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=3_000_000))
-    window._bookmark_selection_button.click()
-    bookmark = repo.list_for_playlist_media(playlist.id, media.id)[0]
-
-    assert window._transport._bookmark_start_edit.text() == "00:00:01.000"
-    assert window._transport._bookmark_end_edit.text() == "00:00:03.000"
-
-    window._transport._bookmark_start_edit.setText("00:00:00.500")
-    window._transport._on_bookmark_start_committed()
-    assert repo.get(bookmark.id).start_us == 500_000
-    assert window._inspector._start_edit.text() == "00:00:00.500"  # Inspector stays in sync
-
-    window._on_bookmark_activated(bookmark.id)  # clears/reloads focus path, then clear it
-    window._clear_inspector()
-    # TimecodeEdit is a row of numeric spin boxes now, not a blankable text field.
-    assert window._transport._bookmark_start_edit.text() == "00:00:00.000"
-    assert window._transport._bookmark_start_edit.isEnabled() is False
-
-
 def test_selection_bar_disabled_until_a_selection_exists(qtbot) -> None:
     window, _repo, _playlist, _media = _build_window(qtbot)
     assert not window._bookmark_selection_button.isEnabled()

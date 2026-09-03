@@ -44,7 +44,12 @@ def test_set_current_playing_does_not_recreate_tree_items(qtbot) -> None:
 
     row_after = panel._tree.topLevelItem(0)
     assert row_after is row_before  # same object, not recreated
-    assert row_after.text(0) == "▶"
+    # Direct follow-up request: "instead of having a playing column, reflect in
+    # traffic color by highlighting the song that is being played e.g. in green" --
+    # the ▶-in-a-column marker is gone; the whole row's background is tinted instead.
+    assert row_after.background(0).color().name() == "#8fd98f"
+    other_row = panel._tree.topLevelItem(1)
+    assert other_row.background(0).style().name == "NoBrush"
 
 
 def test_set_current_playing_preserves_selection(qtbot) -> None:

@@ -13,7 +13,9 @@ from bookmark_studio.ui.transport import format_timecode
 
 # Direct user request: a "Song" column identifying which track each bookmark belongs
 # to, since this list now spans every song in the playlist, not just the one on screen.
-COLUMNS = ["Song", "Name", "Start", "End", "Loop"]
+# Fade In/Out columns: direct follow-up request, "include fade in/out columns" --
+# surfaces the per-bookmark fade_in_ms/fade_out_ms (set in the Inspector) here too.
+COLUMNS = ["Song", "Name", "Start", "End", "Loop", "Fade In", "Fade Out"]
 USER_ROLE = 32
 
 
@@ -206,10 +208,18 @@ class BookmarkPanel(QWidget):
                     format_timecode(bookmark.start_us),
                     format_timecode(bookmark.end_us) if bookmark.end_us is not None else "",
                     loop_label,
+                    f"{bookmark.fade_in_ms} ms" if bookmark.fade_in_ms else "",
+                    f"{bookmark.fade_out_ms} ms" if bookmark.fade_out_ms else "",
                 ]
             )
             row.setData(0, USER_ROLE, bookmark.id)
             self._tree.addTopLevelItem(row)
+        # Direct user request: "have the columns resize automatically to the length
+        # of the strings" -- columns stay Interactive (still manually resizable
+        # after this), but every rebuild re-fits each one to its current content so
+        # truncated song/name text isn't the default state.
+        for column in range(len(COLUMNS)):
+            self._tree.resizeColumnToContents(column)
         if previously_selected:
             self.select_bookmarks(previously_selected)
 

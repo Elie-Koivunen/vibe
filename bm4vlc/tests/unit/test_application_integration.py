@@ -143,7 +143,7 @@ def test_playlist_panel_populates_from_live_polling(qtbot, running_app) -> None:
 
     qtbot.waitUntil(lambda: app.window._playlist_panel._tree.topLevelItemCount() == 2, timeout=5000)
     titles = {
-        app.window._playlist_panel._tree.topLevelItem(i).text(1)
+        app.window._playlist_panel._tree.topLevelItem(i).text(0)  # column 0 == Title
         for i in range(app.window._playlist_panel._tree.topLevelItemCount())
     }
     assert titles == {"Song A", "Song B"}
@@ -179,7 +179,7 @@ def test_one_bad_playlist_item_does_not_hide_all_others(qtbot, running_app, monk
 
     qtbot.waitUntil(lambda: app.window._playlist_panel._tree.topLevelItemCount() >= 1, timeout=5000)
     titles = {
-        app.window._playlist_panel._tree.topLevelItem(i).text(1)
+        app.window._playlist_panel._tree.topLevelItem(i).text(0)  # column 0 == Title
         for i in range(app.window._playlist_panel._tree.topLevelItemCount())
     }
     assert "Good Song" in titles

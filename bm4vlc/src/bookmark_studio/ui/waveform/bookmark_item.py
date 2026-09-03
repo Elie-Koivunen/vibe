@@ -41,12 +41,15 @@ def _view_scale_x(item: QGraphicsItem) -> float:
 class BookmarkRegionItem(QGraphicsObject):
     """A segment bookmark: draggable body, left/right resize handles (spec #41, #49-50)."""
 
+    # object, not int: these carry raw microsecond timecodes, which PySide6 would
+    # otherwise marshal through a 32-bit C++ int and silently wrap past ~35.8 minutes
+    # (2^31 us) -- same bug class fixed for TransportBar/BookmarkInspector's signals.
     move_started = Signal()
-    move_preview = Signal(int, int)
-    move_finished = Signal(int, int)
+    move_preview = Signal(object, object)
+    move_finished = Signal(object, object)
     resize_started = Signal(str)
-    resize_preview = Signal(str, int)
-    resize_finished = Signal(str, int)
+    resize_preview = Signal(str, object)
+    resize_finished = Signal(str, object)
     activated = Signal()
     context_menu_requested = Signal(QPointF)
 
@@ -171,9 +174,10 @@ class BookmarkRegionItem(QGraphicsObject):
 class BookmarkPointItem(QGraphicsObject):
     """A point bookmark: a small diamond marker, draggable but not resizable (spec #40)."""
 
+    # object, not int -- see BookmarkRegionItem above.
     move_started = Signal()
-    move_preview = Signal(int)
-    move_finished = Signal(int)
+    move_preview = Signal(object)
+    move_finished = Signal(object)
     activated = Signal()
     context_menu_requested = Signal(QPointF)
 
