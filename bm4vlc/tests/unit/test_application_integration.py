@@ -214,18 +214,6 @@ def test_transport_seek_forward_commands_the_real_adapter(qtbot, running_app) ->
     qtbot.waitUntil(lambda: adapter.get_status().time_us == 5_000_000, timeout=3000)
 
 
-def test_transport_position_field_seeks_the_real_adapter(qtbot, running_app) -> None:
-    """Direct user request: "the timer are still not manually editable"."""
-    adapter = MockPlaybackAdapter(
-        [VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=60.0)]
-    )
-    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
-    app.start()
-
-    app.window._transport.position_seek_requested.emit(15_000_000)
-    qtbot.waitUntil(lambda: adapter.get_status().time_us == 15_000_000, timeout=3000)
-
-
 def test_waveform_click_seeks_the_real_adapter(qtbot, running_app) -> None:
     """Regression: clicking the waveform to seek only moved a local cosmetic playhead
     (WaveformScene.set_playhead_time_us) without ever telling VLC to seek."""

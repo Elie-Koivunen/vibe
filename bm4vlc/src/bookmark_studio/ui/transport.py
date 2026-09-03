@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPushButton, QWidget
+from PySide6.QtWidgets import QGridLayout, QLabel, QLineEdit, QPushButton, QWidget
 
 BUTTON_FONT_POINT_SIZE = 16
 BUTTON_MIN_SIZE = 44
@@ -42,6 +42,33 @@ def format_timecode(time_us: int) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
 
 
+class TimecodeEdit(QLineEdit):
+    """A QLineEdit for HH:MM:SS.mmm timecodes with spinbox-like Up/Down arrow-key
+    stepping -- direct user request: "the bookmark fields can also have arrow keys to
+    increment the numerals". Plain Up/Down steps by 100ms; Shift+Up/Down by 1s. An
+    arrow press re-commits immediately (emits editingFinished itself) so the change
+    takes effect right away instead of needing a separate Enter afterward.
+    """
+
+    STEP_US = 100_000
+    STEP_US_COARSE = 1_000_000
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() in (Qt.Key_Up, Qt.Key_Down):
+            try:
+                current_us = parse_timecode(self.text())
+            except ValueError:
+                event.accept()
+                return
+            step = self.STEP_US_COARSE if event.modifiers() & Qt.ShiftModifier else self.STEP_US
+            delta = step if event.key() == Qt.Key_Up else -step
+            self.setText(format_timecode(max(0, current_us + delta)))
+            self.editingFinished.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class TransportBar(QWidget):
     previous_bookmark_clicked = Signal()
     previous_track_clicked = Signal()
@@ -51,23 +78,27 @@ class TransportBar(QWidget):
     seek_forward_clicked = Signal()
     next_track_clicked = Signal()
     next_bookmark_clicked = Signal()
-    position_seek_requested = Signal(int)  # microseconds -- manually typed into the position field
     bookmark_start_committed = Signal(int)  # microseconds -- edited bookmark start
     bookmark_end_committed = Signal(int)  # microseconds -- edited bookmark end
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        layout = QHBoxLayout(self)
+        # A 2-row grid, not a single QHBoxLayout: direct user request to "stagger"
+        # the bookmark start/end fields on their own row, with the start field
+        # column-aligned directly under the live position field above it. A
+        # QGridLayout makes that alignment automatic (matching column -> matching
+        # width/position) instead of needing fragile manually-tuned spacers.
+        layout = QGridLayout(self)
         button_font = QFont()
         button_font.setPointSize(BUTTON_FONT_POINT_SIZE)
 
-        def add_button(text: str, signal: Signal, *, tooltip: str) -> QPushButton:
+        def add_button(text: str, signal: Signal, *, tooltip: str, col: int) -> QPushButton:
             button = QPushButton(text, self)
             button.setFont(button_font)
             button.setMinimumSize(BUTTON_MIN_SIZE, BUTTON_MIN_SIZE)
             button.setToolTip(tooltip)
             button.clicked.connect(signal.emit)
-            layout.addWidget(button)
+            layout.addWidget(button, 0, col)
             return button
 
         # Larger, more standard media-control glyphs per direct user feedback
@@ -76,60 +107,69 @@ class TransportBar(QWidget):
         # follow-up request: "moved to the middle to reflect that they control the
         # playback of the playlist", distinct from track/bookmark navigation on the
         # outer edges.
-        self.previous_bookmark_button = add_button("⏮", self.previous_bookmark_clicked, tooltip="Previous bookmark")
-        self.previous_track_button = add_button("⏪", self.previous_track_clicked, tooltip="Previous track")
+        self.previous_bookmark_button = add_button(
+            "⏮", self.previous_bookmark_clicked, tooltip="Previous bookmark", col=0
+        )
+        self.previous_track_button = add_button("⏪", self.previous_track_clicked, tooltip="Previous track", col=1)
 
-        layout.addStretch(1)
+        layout.setColumnStretch(2, 1)
 
-        self.seek_back_button = add_button("−5s", self.seek_back_clicked, tooltip="Seek back 5 seconds")
-        self.stop_button = add_button("⏹", self.stop_clicked, tooltip="Stop")
-        self.play_pause_button = add_button("▶ ⏸", self.play_pause_clicked, tooltip="Play / Pause")
-        self.seek_forward_button = add_button("+5s", self.seek_forward_clicked, tooltip="Seek forward 5 seconds")
+        self.seek_back_button = add_button("−5s", self.seek_back_clicked, tooltip="Seek back 5 seconds", col=3)
+        self.stop_button = add_button("⏹", self.stop_clicked, tooltip="Stop", col=4)
+        self.play_pause_button = add_button("▶ ⏸", self.play_pause_clicked, tooltip="Play / Pause", col=5)
+        self.seek_forward_button = add_button(
+            "+5s", self.seek_forward_clicked, tooltip="Seek forward 5 seconds", col=6
+        )
 
-        layout.addStretch(1)
+        layout.setColumnStretch(7, 1)
 
-        self.next_track_button = add_button("⏩", self.next_track_clicked, tooltip="Next track")
-        self.next_bookmark_button = add_button("⏭", self.next_bookmark_clicked, tooltip="Next bookmark")
+        self.next_track_button = add_button("⏩", self.next_track_clicked, tooltip="Next track", col=8)
+        self.next_bookmark_button = add_button("⏭", self.next_bookmark_clicked, tooltip="Next bookmark", col=9)
 
-        # Direct user request: "the timer are still not manually editable" -- the
-        # current-position half of the transport display is now a real editable
-        # field (type a timecode, press Enter, VLC seeks there), not just a label.
-        # Duration stays a plain label since seeking "to the duration" isn't a thing.
-        self._position_edit = QLineEdit("00:00:00.000", self)
-        self._position_edit.setFont(button_font)
-        self._position_edit.setMaximumWidth(150)
-        self._position_edit.setToolTip("Current position -- edit and press Enter to seek")
-        self._position_edit.editingFinished.connect(self._on_position_committed)
-        layout.addWidget(self._position_edit)
+        # Direct follow-up request: "the song start end doesnt need to be editable,
+        # only the bookmark fields" -- reverted to a plain read-only display (an
+        # earlier version made this editable-for-seeking, which the user later
+        # decided wasn't needed once the bookmark fields below covered the actual
+        # "editable timecode" need).
+        self._position_label = QLabel("00:00:00.000", self)
+        self._position_label.setFont(button_font)
+        layout.addWidget(self._position_label, 0, 10)
 
         self._duration_label = QLabel("/ 00:00:00.000", self)
         self._duration_label.setFont(button_font)
-        layout.addWidget(self._duration_label)
+        layout.addWidget(self._duration_label, 0, 11)
+
+        self._connection_label = QLabel("● Offline", self)
+        self._connection_label.setStyleSheet("color: #a33;")
+        layout.addWidget(self._connection_label, 0, 12)
 
         # Direct follow-up request: "the fields should reflect the bookmark start
-        # time and end time, a different timer should be adjacent for the duration
-        # of the whole song" -- added alongside (not replacing) live position/
-        # duration above. Mirrors the currently selected/loaded bookmark (same one
-        # the Inspector shows) and edits it the same way; MainWindow wires these
-        # signals to the exact same handlers as the Inspector's own Start/End fields,
-        # and keeps both in sync whenever either one changes.
-        layout.addWidget(QLabel("Bookmark:", self))
+        # time and end time" -- mirrors whatever bookmark is currently loaded in the
+        # Inspector and edits it the same way; MainWindow wires these signals to the
+        # exact same handlers as the Inspector's own Start/End fields, and keeps both
+        # in sync whenever either one changes. Row 1, column 10 -- same column as
+        # _position_label above, so the two stay visually stacked.
+        layout.addWidget(QLabel("Bookmark:", self), 1, 9, alignment=Qt.AlignRight)
 
-        self._bookmark_start_edit = QLineEdit(self)
+        self._bookmark_start_edit = TimecodeEdit(self)
         self._bookmark_start_edit.setFont(button_font)
         self._bookmark_start_edit.setMaximumWidth(150)
-        self._bookmark_start_edit.setToolTip("Selected bookmark's start -- edit and press Enter to adjust it")
+        self._bookmark_start_edit.setToolTip(
+            "Selected bookmark's start -- edit and press Enter (or use ↑/↓) to adjust it"
+        )
         self._bookmark_start_edit.editingFinished.connect(self._on_bookmark_start_committed)
-        layout.addWidget(self._bookmark_start_edit)
+        layout.addWidget(self._bookmark_start_edit, 1, 10)
 
-        layout.addWidget(QLabel("→", self))
+        layout.addWidget(QLabel("→", self), 1, 11)
 
-        self._bookmark_end_edit = QLineEdit(self)
+        self._bookmark_end_edit = TimecodeEdit(self)
         self._bookmark_end_edit.setFont(button_font)
         self._bookmark_end_edit.setMaximumWidth(150)
-        self._bookmark_end_edit.setToolTip("Selected bookmark's end -- edit and press Enter to adjust it")
+        self._bookmark_end_edit.setToolTip(
+            "Selected bookmark's end -- edit and press Enter (or use ↑/↓) to adjust it"
+        )
         self._bookmark_end_edit.editingFinished.connect(self._on_bookmark_end_committed)
-        layout.addWidget(self._bookmark_end_edit)
+        layout.addWidget(self._bookmark_end_edit, 1, 12)
 
         self.set_bookmark_times(None, None)
 
@@ -139,27 +179,12 @@ class TransportBar(QWidget):
         # even while genuinely disconnected from VLC, so a click just silently did
         # nothing (the failure was logged at debug level only). This label makes the
         # actual connection state visible instead of a click doing nothing unexplained.
-        self._connection_label = QLabel("● Offline", self)
-        self._connection_label.setStyleSheet("color: #a33;")
-        layout.addWidget(self._connection_label)
-
         self.set_connected(False)
 
     def set_time(self, position_us: int, duration_us: int | None) -> None:
-        # Never overwrite the field while the user has it focused (e.g. mid-edit) --
-        # this is called on every ~400ms status poll, which would otherwise stomp
-        # whatever they'd typed before they finished entering it.
-        if not self._position_edit.hasFocus():
-            self._position_edit.setText(format_timecode(position_us))
+        self._position_label.setText(format_timecode(position_us))
         duration_text = format_timecode(duration_us) if duration_us is not None else "--:--:--.---"
         self._duration_label.setText(f"/ {duration_text}")
-
-    def _on_position_committed(self) -> None:
-        try:
-            time_us = parse_timecode(self._position_edit.text())
-        except ValueError:
-            return  # will be overwritten back to the real position on the next poll
-        self.position_seek_requested.emit(time_us)
 
     def set_bookmark_times(self, start_us: int | None, end_us: int | None) -> None:
         """Called whenever the Inspector's loaded bookmark changes (including to

@@ -29,33 +29,15 @@ def test_set_connected_true_enables_transport_and_updates_label(qtbot) -> None:
 
 
 def test_set_time_updates_position_and_duration(qtbot) -> None:
+    """Direct follow-up request: "the song start end doesnt need to be editable,
+    only the bookmark fields" -- position/duration are a plain read-only display."""
     transport = TransportBar()
     qtbot.addWidget(transport)
 
     transport.set_time(7_000_000, 30_000_000)
 
-    assert transport._position_edit.text() == "00:00:07.000"
+    assert transport._position_label.text() == "00:00:07.000"
     assert transport._duration_label.text() == "/ 00:00:30.000"
-
-
-def test_editing_position_field_emits_position_seek_requested(qtbot) -> None:
-    """Direct user request: "the timer are still not manually editable" -- the
-    current-position half of the transport display is now a real editable field."""
-    transport = TransportBar()
-    qtbot.addWidget(transport)
-    transport.show()
-    transport.set_time(7_000_000, 30_000_000)
-
-    requests = []
-    transport.position_seek_requested.connect(requests.append)
-
-    edit = transport._position_edit
-    edit.setFocus()
-    edit.selectAll()
-    QTest.keyClicks(edit, "00:00:15.000")
-    QTest.keyClick(edit, Qt.Key_Return)
-
-    assert requests == [15_000_000]
 
 
 def test_set_bookmark_times_updates_and_disables_appropriately(qtbot) -> None:
@@ -113,23 +95,43 @@ def test_editing_bookmark_start_end_fields_emits_commit_signals(qtbot) -> None:
     assert end_requests == [12_000_000]
 
 
-def test_set_time_does_not_clobber_the_field_while_it_has_focus(qtbot) -> None:
-    """A live status poll calls set_time() roughly every 400ms -- it must not stomp
-    whatever the user is mid-typing into the position field. Real OS-level focus is
-    unreliable under the offscreen Qt platform used for headless testing (see similar
-    notes elsewhere in this test suite), so this drives the same hasFocus() branch
-    set_time() checks by asking the field itself rather than the window manager.
-    """
+def test_bookmark_field_arrow_keys_step_the_value(qtbot) -> None:
+    """Direct user request: "the bookmark fields can also have arrow keys to
+    increment the numerals" -- plain Up/Down step by 100ms, Shift+Up/Down by 1s, and
+    an arrow press commits immediately (no separate Enter needed)."""
     transport = TransportBar()
     qtbot.addWidget(transport)
-    transport.set_time(7_000_000, 30_000_000)
+    transport.show()
+    transport.set_bookmark_times(5_000_000, 10_000_000)
 
-    edit = transport._position_edit
-    edit.setText("00:00:20")
-    assert edit.hasFocus() is False  # not focused -- confirms the next call's premise
-    edit.hasFocus = lambda: True  # simulate real focus without depending on the WM
-    try:
-        transport.set_time(8_000_000, 30_000_000)
-        assert edit.text() == "00:00:20"
-    finally:
-        del edit.hasFocus
+    start_requests = []
+    transport.bookmark_start_committed.connect(start_requests.append)
+
+    edit = transport._bookmark_start_edit
+    edit.setFocus()
+
+    QTest.keyClick(edit, Qt.Key_Up)
+    assert edit.text() == "00:00:05.100"
+    assert start_requests[-1] == 5_100_000
+
+    QTest.keyClick(edit, Qt.Key_Down)
+    QTest.keyClick(edit, Qt.Key_Down)
+    assert edit.text() == "00:00:04.900"
+    assert start_requests[-1] == 4_900_000
+
+    QTest.keyClick(edit, Qt.Key_Up, Qt.ShiftModifier)
+    assert edit.text() == "00:00:05.900"
+    assert start_requests[-1] == 5_900_000
+
+
+def test_bookmark_field_arrow_key_does_not_go_negative(qtbot) -> None:
+    transport = TransportBar()
+    qtbot.addWidget(transport)
+    transport.show()
+    transport.set_bookmark_times(50_000, None)  # 0.05s -- one coarse step would go negative
+
+    edit = transport._bookmark_start_edit
+    edit.setFocus()
+    QTest.keyClick(edit, Qt.Key_Down, Qt.ShiftModifier)
+
+    assert edit.text() == "00:00:00.000"

@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QUndoStack
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
 from bookmark_studio.app.commands import (
@@ -23,7 +23,7 @@ from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
 from bookmark_studio.ui.bookmark_panel import BookmarkPanel
 from bookmark_studio.ui.inspector import BookmarkInspector
 from bookmark_studio.ui.playlist_panel import PlaylistPanel
-from bookmark_studio.ui.transport import TransportBar
+from bookmark_studio.ui.transport import TimecodeEdit, TransportBar
 from bookmark_studio.ui.waveform.scene import WaveformScene
 from bookmark_studio.ui.waveform.view import WaveformView
 
@@ -90,7 +90,7 @@ class MainWindow(QMainWindow):
         # Direct user request: "add additional fields to display start/end time based
         # on how the bookmark is highlighted" -- editable, so a drag-selection can be
         # fine-tuned numerically before turning it into a bookmark, not just read.
-        self._selection_start_edit = QLineEdit(self)
+        self._selection_start_edit = TimecodeEdit(self)
         self._selection_start_edit.setPlaceholderText("Start")
         self._selection_start_edit.setMaximumWidth(110)
         self._selection_start_edit.setEnabled(False)
@@ -99,7 +99,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(QLabel("→", self))
 
-        self._selection_end_edit = QLineEdit(self)
+        self._selection_end_edit = TimecodeEdit(self)
         self._selection_end_edit.setPlaceholderText("End")
         self._selection_end_edit.setMaximumWidth(110)
         self._selection_end_edit.setEnabled(False)

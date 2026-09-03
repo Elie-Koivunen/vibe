@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
 
 from bookmark_studio.domain.bookmark import Bookmark
 from bookmark_studio.domain.enums import CompletionAction
-from bookmark_studio.ui.transport import format_timecode, parse_timecode
+from bookmark_studio.ui.transport import TimecodeEdit, format_timecode, parse_timecode
 
 COMPLETION_LABELS = {
     CompletionAction.CONTINUE: "Continue",
@@ -40,11 +40,14 @@ class BookmarkInspector(QWidget):
         self._name_edit.editingFinished.connect(self._on_name_committed)
         form.addRow("Name", self._name_edit)
 
-        self._start_edit = QLineEdit(self)
+        # Direct user request: "the bookmark fields can also have arrow keys to
+        # increment the numerals" -- TimecodeEdit adds spinbox-like Up/Down stepping
+        # on top of plain QLineEdit's normal typed-entry + editingFinished behavior.
+        self._start_edit = TimecodeEdit(self)
         self._start_edit.editingFinished.connect(self._on_start_committed)
         form.addRow("Start", self._start_edit)
 
-        self._end_edit = QLineEdit(self)
+        self._end_edit = TimecodeEdit(self)
         self._end_edit.editingFinished.connect(self._on_end_committed)
         form.addRow("End", self._end_edit)
 
