@@ -2,10 +2,20 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import threading
 
 FFMPEG_ANALYSIS_SAMPLE_RATE = 8000
 _READ_CHUNK_BYTES = 1 << 20
+
+# Direct user request: "weird behavior, when i launch vlc with a playlist, it started
+# opening many cmd windows" -- ffmpeg.exe is a console app; spawning one from a
+# windowless pythonw.exe process without this flag makes Windows pop up a real,
+# visible console window per subprocess. Playlist-wide waveform preloading
+# (_preload_playlist_waveforms) can have several of these running at once, so it
+# showed up as a stack of console windows rather than just one easy-to-miss flash.
+# CREATE_NO_WINDOW only exists on Windows, so this is guarded to that platform.
+_POPEN_KWARGS = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 
 class WaveformCancelled(Exception):
@@ -43,7 +53,7 @@ def decode_media_to_pcm(
 ) -> bytes:
     """Runs ffmpeg and returns raw f32le PCM bytes. Never uses shell=True (spec #58)."""
     args = build_ffmpeg_args(ffmpeg_path, media_path)
-    process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **_POPEN_KWARGS)
     chunks: list[bytes] = []
     try:
         assert process.stdout is not None

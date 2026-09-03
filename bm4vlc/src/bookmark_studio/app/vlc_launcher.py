@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -65,6 +66,11 @@ def has_unmanaged_vlc_process() -> bool:
         result = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq vlc.exe"],
             capture_output=True, text=True, timeout=5,
+            # tasklist.exe is a console app; spawning one from windowless pythonw.exe
+            # without this would flash a visible console window every time the
+            # launch dialog opens (same root cause as the ffmpeg preload windows --
+            # see ffmpeg_decoder.py).
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
     except (OSError, subprocess.SubprocessError):
         return False
