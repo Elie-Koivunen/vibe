@@ -319,6 +319,80 @@ def test_play_bookmark_requested_switches_song_when_bookmark_belongs_to_a_differ
     assert adapter.get_status().state == "playing"
 
 
+def test_play_bookmark_requested_loops_when_the_bookmark_is_loop_enabled(qtbot, running_app) -> None:
+    """Direct user report (three times over before this root cause was found):
+    "when playing a saved bookmark, it start at the right spot, but then it does
+    not stop or loop back to the start when it reaches the end part of the
+    bookmark." Root cause: Play Bookmark (and double-clicking a bookmark row,
+    which fires the same signal) was a dumb one-shot seek+play with no loop
+    awareness at all -- it never went through LoopController, so every earlier
+    fix in that area was correct but irrelevant to this path. Bookmarks default
+    to loop_enabled=True, so this is what a user actually exercises most of the
+    time. Play Bookmark must now delegate to the same LoopController-driven path
+    as Loop Bookmark whenever the bookmark itself says to loop.
+    """
+    from uuid import uuid4
+
+    from bookmark_studio.domain.bookmark import Bookmark
+    from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction, LoopState
+
+    adapter = MockPlaybackAdapter([VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=60.0)])
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
+
+    bookmark = Bookmark(
+        id=uuid4(), playlist_id=app._synchronizer.active_playlist_id, media_id=app._current_media_id,
+        scope=BookmarkScope.PLAYLIST_MEDIA, lane_id=None, bookmark_type=BookmarkType.SEGMENT,
+        name="Chorus", start_us=1_000_000, end_us=1_300_000, loop_enabled=True, repeat_count=None,
+        loop_gap_ms=0, completion_action=CompletionAction.CONTINUE,
+    )
+    app._bookmark_repository.insert(bookmark)
+
+    iterations = []
+    app._loop_controller.iteration_changed.connect(lambda remaining: iterations.append(remaining))
+
+    app._on_play_bookmark_requested(bookmark.id)
+
+    assert app._loop_controller.state is LoopState.PLAYING
+    assert app._loop_controller.spec.start_us == 1_000_000
+    assert app._loop_controller.spec.end_us == 1_300_000
+
+    # Reaching the bookmark's end (300ms segment) must loop back to its start via
+    # LoopController's own precision boundary timer -- proven by iteration_changed
+    # actually firing -- not just keep playing forward into the rest of the song.
+    qtbot.waitUntil(lambda: len(iterations) >= 1, timeout=2000)
+    assert app._loop_controller.state is LoopState.PLAYING
+
+
+def test_play_bookmark_requested_does_not_loop_when_loop_disabled(qtbot, running_app) -> None:
+    """A bookmark with loop_enabled=False must still play straight through, same
+    as before this fix -- only loop_enabled bookmarks delegate to LoopController."""
+    from uuid import uuid4
+
+    from bookmark_studio.domain.bookmark import Bookmark
+    from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction, LoopState
+
+    adapter = MockPlaybackAdapter([VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=60.0)])
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
+
+    bookmark = Bookmark(
+        id=uuid4(), playlist_id=app._synchronizer.active_playlist_id, media_id=app._current_media_id,
+        scope=BookmarkScope.PLAYLIST_MEDIA, lane_id=None, bookmark_type=BookmarkType.SEGMENT,
+        name="Chorus", start_us=1_000_000, end_us=2_000_000, loop_enabled=False, repeat_count=None,
+        loop_gap_ms=0, completion_action=CompletionAction.CONTINUE,
+    )
+    app._bookmark_repository.insert(bookmark)
+
+    app._on_play_bookmark_requested(bookmark.id)
+
+    assert app._loop_controller.state is LoopState.IDLE
+    qtbot.waitUntil(lambda: adapter.get_status().time_us == 1_000_000, timeout=3000)
+    qtbot.waitUntil(lambda: adapter.get_status().state == "playing", timeout=3000)
+
+
 def test_play_bookmark_re_enables_follow_disabled_by_a_prior_preview(qtbot, running_app) -> None:
     """Worse variant of the same regression: if the user had previewed a different
     song (single-click, which switches off "Follow currently playing VLC song"),

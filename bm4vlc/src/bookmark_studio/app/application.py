@@ -478,7 +478,8 @@ class Application(QObject):
         """"another set below that would play explicitly from the bookmark listing
         itself" -- distinct from the waveform's own Play button (which needs a
         fresh drag-selection) and from the transport bar (which drives the live
-        VLC playlist, not a specific saved bookmark).
+        VLC playlist, not a specific saved bookmark). Also reached by double-
+        clicking a bookmark row (BookmarkPanel._on_item_double_clicked).
 
         Regression, reported live now that the bookmark list spans every song: this
         only ever seeked *whatever VLC currently had loaded*, never switching to the
@@ -486,9 +487,25 @@ class Application(QObject):
         different song than whatever was already playing silently landed at the
         bookmark's start_us offset inside the WRONG track. goto_item() (VLC's
         pl_play&id=<X>) switches song and starts playing before the seek lands.
+
+        Direct user report (three times over, before this fix was found): "when
+        playing a saved bookmark, it start at the right spot, but then it does not
+        stop or loop back to the start when it reaches the end part of the
+        bookmark." Root cause: this handler is a dumb one-shot seek+play with NO
+        loop awareness at all -- every one of the LoopController/precision-timer
+        fixes made earlier in this same area was real and correct, but entirely
+        irrelevant here, since this path never went through LoopController in the
+        first place. Bookmarks default to loop_enabled=True (direct user request,
+        much earlier: "per default, bookmark loop should be enabled"), so "playing
+        a bookmark" via this button/double-click reads, to a user, as exactly the
+        same action as "Loop Bookmark" whenever the bookmark's own loop setting
+        says so -- delegating to that handler is what actually honors it.
         """
         bookmark = self._bookmark_repository.get(bookmark_id)
         if bookmark is None:
+            return
+        if bookmark.loop_enabled and bookmark.end_us is not None:
+            self._on_loop_bookmark_requested(bookmark_id)
             return
         item = self._playlist_item_for_media(bookmark.media_id)
         if item is not None:
