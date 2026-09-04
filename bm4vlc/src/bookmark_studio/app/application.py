@@ -353,6 +353,23 @@ class Application(QObject):
             self._fire_and_forget(self._adapter.play)
 
     def _on_loop_selection_requested(self, start_us: int, end_us: int) -> None:
+        """Direct user request: "if i would select a song whether through the
+        playlist or the bookmark listing, once i highlight an area and press play,
+        i expect it to play the highlighted area of the song in the waveform" --
+        a single click on a playlist row or bookmark row only PREVIEWS a song's
+        waveform (see _on_playlist_item_selected / _on_bookmark_song_display_
+        requested); neither one ever tells VLC to actually load that song. Without
+        this, pressing Play on a selection looped whatever song VLC happened to
+        already have loaded, which could easily be a DIFFERENT song than the one
+        the waveform (and the selection) were showing. Same cross-song fix already
+        applied to Play/Loop Bookmark -- goto_item() first, synchronously, so the
+        switch has landed before the loop's own seek.
+        """
+        if self._current_media_id is not None:
+            item = self._playlist_item_for_media(self._current_media_id)
+            if item is not None and item.vlc_id != self._actually_playing_vlc_item_id:
+                self._adapter.goto_item(item.vlc_id)
+
         from bookmark_studio.domain.enums import CompletionAction
         from bookmark_studio.domain.loop import LoopSpec
 

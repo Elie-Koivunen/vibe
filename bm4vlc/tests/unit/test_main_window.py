@@ -14,6 +14,7 @@ from bookmark_studio.persistence.media_repository import MediaRepository
 from bookmark_studio.persistence.migrations import migrate
 from bookmark_studio.persistence.playlist_repository import PlaylistRepository
 from bookmark_studio.ui.main_window import MainWindow
+from bookmark_studio.ui.transport import format_timecode
 from bookmark_studio.ui.waveform.waveform_item import time_us_to_scene_x
 
 
@@ -362,6 +363,47 @@ def test_dragging_a_bookmark_on_the_waveform_refreshes_the_open_inspector(qtbot)
 
     assert repo.get(bookmark.id).end_us == 5_000_000
     assert window._inspector._end_edit.text() == "00:00:05.000"
+
+
+def test_inspector_start_end_update_after_a_real_drag_created_and_then_resized_bookmark(qtbot) -> None:
+    """Direct user report: "these fields are not getting dynamically updated when
+    creating a bookmark or adjusting a bookmark" -- drives the exact real gesture
+    (mouse-drag a selection on the waveform, click Bookmark Selection, then
+    mouse-drag the new bookmark's own left handle) rather than calling the
+    handlers directly, in case the real drag path behaves differently from the
+    synthetic one other tests already cover.
+    """
+    window, repo, playlist, media = _build_window(qtbot)
+    view = window._waveform_view
+
+    start_pos = view.mapFromScene(time_us_to_scene_x(4_000_000), 40)
+    end_pos = view.mapFromScene(time_us_to_scene_x(9_000_000), 40)
+    QTest.mousePress(view.viewport(), Qt.LeftButton, pos=start_pos)
+    QTest.mouseMove(view.viewport(), pos=end_pos)
+    QTest.mouseRelease(view.viewport(), Qt.LeftButton, pos=end_pos)
+    assert window._waveform_scene.selection() is not None
+
+    window._bookmark_selection_button.click()
+    bookmark = repo.list_for_playlist_media(playlist.id, media.id)[0]
+    assert window._inspector.current_bookmark().id == bookmark.id
+    assert window._inspector._start_edit.text() == "00:00:04.000"
+    assert window._inspector._end_edit.text() == "00:00:09.000"
+
+    # Now drag the newly created bookmark's own LEFT handle on the waveform --
+    # the real BookmarkRegionItem drag path, not a direct handler call.
+    region = window._waveform_scene.bookmark_item(bookmark.id)
+    assert region is not None
+    handle_scene_x = time_us_to_scene_x(bookmark.start_us) + 2  # a couple px into the left handle
+    drag_start = view.mapFromScene(handle_scene_x, 40)
+    drag_end = view.mapFromScene(time_us_to_scene_x(bookmark.start_us + 500_000), 40)
+    QTest.mousePress(view.viewport(), Qt.LeftButton, pos=drag_start)
+    QTest.mouseMove(view.viewport(), pos=drag_end)
+    QTest.mouseRelease(view.viewport(), Qt.LeftButton, pos=drag_end)
+
+    updated = repo.get(bookmark.id)
+    assert updated.start_us > bookmark.start_us  # actually persisted
+    assert window._inspector.current_bookmark().id == bookmark.id
+    assert window._inspector._start_edit.text() == format_timecode(updated.start_us)
 
 
 def test_ctrl_b_menu_action_creates_bookmark_from_selection(qtbot) -> None:
