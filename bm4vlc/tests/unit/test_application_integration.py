@@ -655,6 +655,85 @@ def test_clearing_the_selection_while_looping_it_stops_the_loop(qtbot, running_a
     assert app._selection_loop_active is False
 
 
+def test_pausing_via_transport_button_stops_a_running_loop(qtbot, running_app) -> None:
+    """Direct user report: "if i play a bookmark in loop or otherwise, then pause
+    or stop... a few seconds later, it starts playing on its own" -- root cause:
+    LoopController's precision boundary timer stays armed through a pause/stop
+    that bypassed it, then fires later and seeks+plays right back to the loop's
+    start. The transport bar's own Pause button must stop the loop immediately.
+    """
+    from bookmark_studio.domain.enums import LoopState
+
+    adapter = MockPlaybackAdapter(
+        [VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0)]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
+
+    app._on_loop_selection_requested(1_000_000, 2_000_000)
+    assert app._loop_controller.state is LoopState.PLAYING
+    app._last_playback_state = "playing"  # what the button handler checks
+
+    app.window._transport.play_pause_clicked.emit()
+
+    assert app._loop_controller.state is LoopState.IDLE
+
+
+def test_stopping_via_transport_button_stops_a_running_loop(qtbot, running_app) -> None:
+    from bookmark_studio.domain.enums import LoopState
+
+    adapter = MockPlaybackAdapter(
+        [VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0)]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
+
+    app._on_loop_selection_requested(1_000_000, 2_000_000)
+    assert app._loop_controller.state is LoopState.PLAYING
+
+    app.window._transport.stop_clicked.emit()
+
+    assert app._loop_controller.state is LoopState.IDLE
+
+
+def test_stopping_directly_in_vlc_stops_the_loop_and_does_not_resurrect_playback(qtbot, running_app) -> None:
+    """Direct user follow-up: "i tested by stopping from vlc player itself, it
+    still occurs" -- a stop issued entirely outside this app (VLC's own window, a
+    keyboard shortcut inside VLC) never reaches our transport handlers at all, so
+    the fix has to live in the status poll: if the loop thinks it's still PLAYING
+    but VLC itself reports anything other than "playing", something external took
+    over and the loop must yield -- verified here by stopping the MOCK adapter
+    directly (bypassing every Application method), the same way an out-of-band
+    VLC stop would.
+
+    Uses a loop segment comfortably longer than one status-poll interval
+    (STATUS_POLL_MS=400ms) so the poll-based detection reliably wins the race
+    against LoopController's own precision boundary timer -- a segment shorter
+    than the poll interval is a separate, inherent race this polling-based fix
+    cannot close (the boundary timer can fire before the next poll even runs);
+    that's not the scenario being regression-tested here.
+    """
+    from bookmark_studio.domain.enums import LoopState
+
+    adapter = MockPlaybackAdapter(
+        [VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0)]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
+
+    app._on_loop_selection_requested(1_000_000, 3_000_000)  # 2s segment
+    assert app._loop_controller.state is LoopState.PLAYING
+
+    adapter.stop()  # entirely bypasses Application -- simulates VLC's own Stop
+
+    qtbot.waitUntil(lambda: app._loop_controller.state is LoopState.IDLE, timeout=2000)
+    qtbot.wait(2500)  # past where the (now-cancelled) boundary timer would have fired
+    assert adapter.get_status().state == "stopped"  # never resurrected
+
+
 def test_selecting_a_bookmark_switches_the_waveform_to_its_song_without_playing(qtbot, running_app) -> None:
     """Direct user request: "when i select a bookmarking, i want it to automatically
     select the song from the playlist above and display its waveform along with the

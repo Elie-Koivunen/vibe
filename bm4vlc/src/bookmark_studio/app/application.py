@@ -20,6 +20,7 @@ from bookmark_studio.app.vlc_launcher import (
     discover_vlc_instances, find_free_http_port, has_unmanaged_vlc_process, launch_managed_vlc,
 )
 from bookmark_studio.app.waveform_orchestrator import WaveformOrchestrator
+from bookmark_studio.domain.enums import LoopState
 from bookmark_studio.logging.setup import get_logger
 from bookmark_studio.media.resolver import MediaResolver
 from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
@@ -208,7 +209,7 @@ class Application(QObject):
     def _wire_transport(self) -> None:
         transport = self.window._transport
         transport.play_pause_clicked.connect(self._on_play_pause_clicked)
-        transport.stop_clicked.connect(lambda: self._fire_and_forget(self._adapter.stop))
+        transport.stop_clicked.connect(self._on_stop_clicked)
         transport.seek_back_clicked.connect(
             lambda: self._fire_and_forget(lambda: self._adapter.seek_relative_us(-5_000_000))
         )
@@ -347,10 +348,27 @@ class Application(QObject):
         self._thread_pool.start(_CallWorker(fn, signals))
 
     def _on_play_pause_clicked(self) -> None:
+        # Direct user report: "if i play a bookmark in loop or otherwise, then
+        # pause or stop... a few seconds later, it starts playing on its own" --
+        # LoopController's precision boundary timer (armed the moment a loop
+        # starts, see loop_controller.py) doesn't know about a pause/stop that
+        # bypassed it entirely; left running, it fires later and seeks+plays right
+        # back to the loop's start, resurrecting playback out of nowhere. Stopping
+        # it here covers our own transport Pause button instantly; _on_status_result
+        # below is the general safety net for anything else (VLC's own UI, a
+        # keyboard shortcut inside VLC, etc. -- confirmed live to reproduce the
+        # same way).
         if self._last_playback_state == "playing":
+            self._loop_controller.stop()
+            self._selection_loop_active = False
             self._fire_and_forget(self._adapter.pause)
         else:
             self._fire_and_forget(self._adapter.play)
+
+    def _on_stop_clicked(self) -> None:
+        self._loop_controller.stop()
+        self._selection_loop_active = False
+        self._fire_and_forget(self._adapter.stop)
 
     def _on_loop_selection_requested(self, start_us: int, end_us: int) -> None:
         """Direct user request: "if i would select a song whether through the
@@ -602,7 +620,21 @@ class Application(QObject):
             # (ignored by the controller itself while a fade is mid-ramp, see
             # LoopController.set_target_volume's docstring).
             self._loop_controller.set_target_volume(status.volume)
-            self._loop_controller.on_tick()
+            # Direct user report: "if i play a bookmark in loop or otherwise, then
+            # pause or stop... a few seconds later, it starts playing on its own" --
+            # confirmed to reproduce even stopping from VLC's own window, which our
+            # transport Pause/Stop handlers never see at all. LoopController.PLAYING
+            # means its precision boundary timer is armed and will fire regardless
+            # of how playback actually stopped; GAP is its OWN deliberate pause
+            # between iterations and must not be treated as an external stop.
+            # status.state is the ground truth VLC itself reports, whatever the
+            # cause -- if the loop thinks it's still driving playback but VLC says
+            # otherwise, something outside the loop took over and it must yield.
+            if self._loop_controller.state is LoopState.PLAYING and status.state != "playing":
+                self._loop_controller.stop()
+                self._selection_loop_active = False
+            else:
+                self._loop_controller.on_tick()
 
             if status.current_playlist_item_id != self._actually_playing_vlc_item_id:
                 self._actually_playing_vlc_item_id = status.current_playlist_item_id
