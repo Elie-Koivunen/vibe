@@ -77,7 +77,9 @@ class PlayheadItem(QGraphicsObject):
         # position marker was reported live as simply never visible. setCosmetic(True)
         # is Qt's built-in fix for exactly this: the pen's width is then always in
         # real device pixels, regardless of the view's current zoom.
-        pen = QPen(PLAYHEAD_COLOR, 2)
+        # Direct user request: "make the red progress bar on the waveform a bit
+        # thicker" -- was 2px.
+        pen = QPen(PLAYHEAD_COLOR, 3)
         pen.setCosmetic(True)
         painter.setPen(pen)
         painter.drawLine(0, 0, 0, self._height)

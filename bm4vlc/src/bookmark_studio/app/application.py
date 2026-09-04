@@ -595,7 +595,20 @@ class Application(QObject):
         happened arrives a moment later.
         """
         self.window._playlist_panel.set_follow_vlc(True)
-        self._fire_and_forget(lambda: self._adapter.goto_item(vlc_id))
+        # Direct follow-up request: "if i double click on a song in this window, it
+        # should start playing it from the beginning, to the end" -- goto_item()'s
+        # pl_play resumes from wherever VLC last left that track (e.g. mid-way
+        # through a previous partial listen), not necessarily 0. Also stops any
+        # bookmark loop still active from a previous selection, so a double-clicked
+        # song plays straight through instead of looping a small segment.
+        self._loop_controller.stop()
+
+        def _play_from_start() -> None:
+            self._adapter.goto_item(vlc_id)
+            self._adapter.seek_absolute_us(0)
+            self._adapter.play()
+
+        self._fire_and_forget(_play_from_start)
 
     def _on_playlist_item_selected(self, vlc_id: int) -> None:
         """Direct user request: "when a user clicks through the songs, [the waveform]

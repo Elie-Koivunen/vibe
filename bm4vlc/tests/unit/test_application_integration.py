@@ -523,6 +523,39 @@ def test_double_click_playlist_item_plays_it_and_the_view_follows(qtbot, running
     assert app.window._playlist_panel.follow_vlc_enabled() is True
     qtbot.waitUntil(lambda: app._actually_playing_vlc_item_id == 2, timeout=3000)
     qtbot.waitUntil(lambda: app._current_vlc_item_id == 2, timeout=3000)
+    # Direct follow-up request: "it should start playing it from the beginning, to
+    # the end" -- goto_item()'s pl_play alone can resume mid-track; must land at 0.
+    assert adapter.get_status().time_us == 0
+
+
+def test_double_click_playlist_item_stops_any_active_bookmark_loop(qtbot, running_app) -> None:
+    """Direct follow-up request: "it should start playing it from the beginning, to
+    the end" -- a bookmark loop left running from a previous selection must not keep
+    seeking back to some earlier bookmark's start while a freshly double-clicked
+    song is supposed to just play straight through.
+    """
+    from bookmark_studio.domain.enums import CompletionAction, LoopState
+    from bookmark_studio.domain.loop import LoopSpec
+
+    adapter = MockPlaybackAdapter(
+        [
+            VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0),
+            VlcPlaylistItem(vlc_id=2, uri="file:///b.mp3", name="Song B", duration_s=20.0),
+        ]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._actually_playing_vlc_item_id == 1, timeout=3000)
+
+    app._loop_controller.start(
+        LoopSpec(start_us=1_000_000, end_us=2_000_000, repeat_count=None, gap_ms=0,
+                 completion_action=CompletionAction.CONTINUE)
+    )
+    assert app._loop_controller.state is LoopState.PLAYING
+
+    app._on_playlist_item_double_clicked(2)
+
+    assert app._loop_controller.state is LoopState.IDLE
 
 
 def test_selection_is_cleared_when_the_displayed_track_changes(qtbot, running_app) -> None:
