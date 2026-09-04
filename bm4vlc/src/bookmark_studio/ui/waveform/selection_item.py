@@ -8,8 +8,10 @@ from PySide6.QtWidgets import QGraphicsItem
 from bookmark_studio.domain.selection import Selection
 from bookmark_studio.ui.waveform.waveform_item import time_us_to_scene_x
 
-SELECTION_FILL = QColor(90, 150, 230, 80)
-SELECTION_BORDER = QColor(90, 150, 230, 200)
+# Direct user request: "when highlighting to bookmark, its still in blue, change
+# to greenish tint" -- a drag-selection destined to become a bookmark.
+SELECTION_FILL = QColor(90, 200, 120, 80)
+SELECTION_BORDER = QColor(90, 200, 120, 200)
 
 
 class SelectionItem(QGraphicsItem):
