@@ -351,16 +351,24 @@ class MainWindow(QMainWindow):
             self._selection_start_label.setText("--:--:--.---")
             self._selection_end_label.setText("--:--:--.---")
             self._set_selection_buttons_enabled(False)
+        # Direct follow-up request: "fix so that the highlight start and end ...
+        # appear in the fields" -- mirrors the same selection in the Inspector's
+        # own Start/End fields, whenever nothing else is already loaded there (see
+        # BookmarkInspector.show_selection's docstring for why it won't clobber an
+        # actively-inspected bookmark).
+        self._inspector.show_selection(selection if isinstance(selection, Selection) else None)
 
     def _on_selection_preview_changed(self, start_us: int, end_us: int) -> None:
         """Live readout while dragging one of SelectionItem's resize handles --
         direct follow-up request: "the start and end should reflect the movement
         ... of the playback" -- fires continuously during the drag, distinct from
         _on_selection_changed (which only fires once the drag settles)."""
+        from bookmark_studio.domain.selection import Selection
         from bookmark_studio.ui.transport import format_timecode
 
         self._selection_start_label.setText(format_timecode(start_us))
         self._selection_end_label.setText(format_timecode(end_us))
+        self._inspector.show_selection(Selection(start_us=start_us, end_us=end_us))
 
     def _on_bookmark_now_clicked(self) -> None:
         if self._waveform_scene.selection() is not None:

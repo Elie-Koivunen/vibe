@@ -161,6 +161,58 @@ def test_selection_label_tracks_the_selection(qtbot) -> None:
     assert window._bookmark_selection_button.isEnabled() is False
 
 
+def test_inspector_mirrors_an_in_progress_selection(qtbot) -> None:
+    """Direct follow-up request: "fix so that the highlight start and end ...
+    appear in the fields ... dynamically updated when a user is marking for
+    bookmarking or adjusting the highlight" -- the Inspector's own Start/End
+    fields (not just the selection bar's compact labels) mirror a raw
+    drag-selection live, whenever no actual bookmark is loaded there.
+    """
+    from bookmark_studio.domain.selection import Selection
+
+    window, _repo, _playlist, _media = _build_window(qtbot)
+    assert window._inspector._start_edit.text() == "00:00:00.000"
+    assert window._inspector._start_edit.isEnabled() is False
+
+    window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=2_000_000))
+    assert window._inspector._start_edit.text() == "00:00:01.000"
+    assert window._inspector._end_edit.text() == "00:00:02.000"
+    assert window._inspector._start_edit.isEnabled() is True
+
+    # Live preview while dragging an edge (WaveformScene.selection_preview_changed).
+    window._on_selection_preview_changed(1_500_000, 2_000_000)
+    assert window._inspector._start_edit.text() == "00:00:01.500"
+
+    window._waveform_scene.clear_selection()
+    assert window._inspector._start_edit.text() == "00:00:00.000"
+    assert window._inspector._start_edit.isEnabled() is False
+
+
+def test_inspector_selection_preview_does_not_clobber_a_loaded_bookmark(qtbot) -> None:
+    """An in-progress drag-selection elsewhere on the waveform must not silently
+    overwrite the fields for a bookmark someone is actively editing."""
+    from bookmark_studio.domain.bookmark import Bookmark
+    from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
+    from bookmark_studio.domain.selection import Selection
+    from uuid import uuid4
+
+    window, repo, playlist, media = _build_window(qtbot)
+    bookmark = Bookmark(
+        id=uuid4(), playlist_id=playlist.id, media_id=media.id, scope=BookmarkScope.PLAYLIST_MEDIA,
+        lane_id=None, bookmark_type=BookmarkType.SEGMENT, name="Chorus", start_us=5_000_000,
+        end_us=6_000_000, loop_enabled=False, repeat_count=None, loop_gap_ms=0,
+        completion_action=CompletionAction.CONTINUE,
+    )
+    repo.insert(bookmark)
+    window._load_bookmark_into_inspector(bookmark)
+    assert window._inspector._start_edit.text() == "00:00:05.000"
+
+    window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=2_000_000))
+
+    assert window._inspector.current_bookmark().id == bookmark.id
+    assert window._inspector._start_edit.text() == "00:00:05.000"  # unchanged
+
+
 def test_delete_bookmark_button_removes_the_selected_bookmark(qtbot) -> None:
     """Direct user request: "there is no button to select and delete a bookmark"."""
     from bookmark_studio.domain.bookmark import Bookmark

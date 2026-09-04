@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 
 from bookmark_studio.domain.bookmark import Bookmark
 from bookmark_studio.domain.enums import CompletionAction
+from bookmark_studio.domain.selection import Selection
 from bookmark_studio.ui.transport import TimecodeEdit, format_timecode, parse_timecode
 
 COMPLETION_LABELS = {
@@ -101,6 +102,8 @@ class BookmarkInspector(QWidget):
         self._notes_edit.textChanged.connect(self._on_notes_committed)
         form.addRow("Notes", self._notes_edit)
 
+        self.show_selection(None)  # starts disabled: nothing loaded or selected yet
+
     def current_bookmark(self) -> Bookmark | None:
         return self._bookmark
 
@@ -129,6 +132,30 @@ class BookmarkInspector(QWidget):
         for widget in (self._name_edit, self._start_edit, self._end_edit, self._tags_edit):
             widget.clear()
         self._notes_edit.clear()
+
+    def show_selection(self, selection: Selection | None) -> None:
+        """Direct follow-up request: "fix so that the highlight start and end ...
+        appear in the fields ... dynamically updated when a user is marking for
+        bookmarking or adjusting the highlight" -- mirrors an in-progress
+        drag-selection (not yet a bookmark) in these same Start/End fields. Only
+        while nothing is actually loaded here: an in-progress drag elsewhere on
+        the waveform must not silently clobber a bookmark someone is mid-edit on.
+        Typing into the fields during a preview is a harmless no-op (see
+        _on_start_committed/_on_end_committed's existing `self._bookmark is None`
+        guard) -- the actual way to edit a raw selection is dragging it on the
+        waveform, not typing here.
+        """
+        if self._bookmark is not None:
+            return
+        self._loading = True
+        try:
+            has_selection = selection is not None
+            self._start_edit.setText(format_timecode(selection.start_us) if has_selection else "")
+            self._start_edit.setEnabled(has_selection)
+            self._end_edit.setText(format_timecode(selection.end_us) if has_selection else "")
+            self._end_edit.setEnabled(has_selection)
+        finally:
+            self._loading = False
 
     def _on_name_committed(self) -> None:
         if not self._loading and self._bookmark is not None:
