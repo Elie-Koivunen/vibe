@@ -698,51 +698,16 @@ def test_stopping_via_transport_button_stops_a_running_loop(qtbot, running_app) 
     assert app._loop_controller.state is LoopState.IDLE
 
 
-def test_stopping_directly_in_vlc_stops_the_loop_and_does_not_resurrect_playback(qtbot, running_app) -> None:
-    """Direct user follow-up: "i tested by stopping from vlc player itself, it
-    still occurs" -- a stop issued entirely outside this app (VLC's own window, a
-    keyboard shortcut inside VLC) never reaches our transport handlers at all, so
-    the fix has to live in the status poll: if the loop thinks it's still PLAYING
-    but VLC itself reports anything other than "playing", something external took
-    over and the loop must yield -- verified here by stopping the MOCK adapter
-    directly (bypassing every Application method), the same way an out-of-band
-    VLC stop would.
-
-    Uses a loop segment comfortably longer than one status-poll interval
-    (STATUS_POLL_MS=400ms) so the poll-based detection reliably wins the race
-    against LoopController's own precision boundary timer -- a segment shorter
-    than the poll interval is a separate, inherent race this polling-based fix
-    cannot close (the boundary timer can fire before the next poll even runs);
-    that's not the scenario being regression-tested here.
-    """
-    from bookmark_studio.domain.enums import LoopState
-
-    adapter = MockPlaybackAdapter(
-        [VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0)]
-    )
-    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
-    app.start()
-    qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
-
-    app._on_loop_selection_requested(1_000_000, 3_000_000)  # 2s segment
-    assert app._loop_controller.state is LoopState.PLAYING
-
-    adapter.stop()  # entirely bypasses Application -- simulates VLC's own Stop
-
-    qtbot.waitUntil(lambda: app._loop_controller.state is LoopState.IDLE, timeout=2000)
-    qtbot.wait(2500)  # past where the (now-cancelled) boundary timer would have fired
-    assert adapter.get_status().state == "stopped"  # never resurrected
-
-
-def test_a_single_transient_non_playing_poll_does_not_kill_the_loop(qtbot, running_app) -> None:
-    """Regression in the fix above: every loop iteration's own seek-back can make
-    VLC's HTTP interface report a transient non-"playing" state for exactly one
-    poll even though nothing external actually stopped anything -- confirmed live
-    as "it does not stop or loop back to the start when it reaches the end part
-    of the bookmark" (the first seek-back's own status blip was being misread as
-    an external stop, silently killing the loop right as it should have looped
-    back). A single stray non-"playing" status result must not stop the loop; two
-    CONSECUTIVE ones (a real external stop, which persists) must.
+def test_status_polls_with_transient_non_playing_states_never_stop_an_ordinary_loop(qtbot, running_app) -> None:
+    """Direct user report, after an earlier attempt at detecting an external VLC
+    stop via comparing status.state on every poll: "still runs on" -- i.e. that
+    detection itself was too fragile (even debounced across two consecutive
+    polls) and could still misfire on an ordinary, uninterrupted loop, silently
+    stopping it instead of letting it loop back. That poll-based detection was
+    removed entirely -- the status poll must now leave a PLAYING loop alone
+    regardless of what status.state momentarily reports, no matter how many
+    non-"playing" polls land while the mock adapter's REAL underlying state is
+    still "playing" throughout.
     """
     from bookmark_studio.domain.enums import LoopState
     from bookmark_studio.playback.status import PlaybackStatus
@@ -761,27 +726,9 @@ def test_a_single_transient_non_playing_poll_does_not_kill_the_loop(qtbot, runni
         state="opening", time_us=1_500_000, position=0.15, rate=1.0,
         current_playlist_item_id=1, duration_us=10_000_000, media_uri="file:///a.mp3", volume=256,
     )
-    app._on_status_result(blip)
-    assert app._loop_controller.state is LoopState.PLAYING  # one blip: not stopped
-    assert app._loop_external_stop_suspected is True
-
-    playing_again = PlaybackStatus(
-        state="playing", time_us=1_600_000, position=0.16, rate=1.0,
-        current_playlist_item_id=1, duration_us=10_000_000, media_uri="file:///a.mp3", volume=256,
-    )
-    app._on_status_result(playing_again)
-    assert app._loop_controller.state is LoopState.PLAYING  # recovered
-    assert app._loop_external_stop_suspected is False
-
-    # Two CONSECUTIVE non-"playing" polls -- a genuine external stop -- must still
-    # actually stop the loop.
-    app._on_status_result(blip)
-    stopped = PlaybackStatus(
-        state="stopped", time_us=1_600_000, position=0.16, rate=1.0,
-        current_playlist_item_id=1, duration_us=10_000_000, media_uri="file:///a.mp3", volume=256,
-    )
-    app._on_status_result(stopped)
-    assert app._loop_controller.state is LoopState.IDLE
+    for _ in range(5):  # well past the two-poll debounce the old, now-removed logic used
+        app._on_status_result(blip)
+    assert app._loop_controller.state is LoopState.PLAYING
 
 
 def test_selecting_a_bookmark_switches_the_waveform_to_its_song_without_playing(qtbot, running_app) -> None:

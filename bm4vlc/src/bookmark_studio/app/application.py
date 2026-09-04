@@ -20,7 +20,6 @@ from bookmark_studio.app.vlc_launcher import (
     discover_vlc_instances, find_free_http_port, has_unmanaged_vlc_process, launch_managed_vlc,
 )
 from bookmark_studio.app.waveform_orchestrator import WaveformOrchestrator
-from bookmark_studio.domain.enums import LoopState
 from bookmark_studio.logging.setup import get_logger
 from bookmark_studio.media.resolver import MediaResolver
 from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
@@ -160,18 +159,6 @@ class Application(QObject):
         # later drag/edit of the SAME selection can live-update what's actually
         # looping; see _on_waveform_selection_changed.
         self._selection_loop_active = False
-        # Debounces the external-stop detection in _on_status_result: a seek (which
-        # every single loop iteration performs) can make VLC's HTTP interface report
-        # something other than "playing" for one transient poll even though nothing
-        # actually stopped it -- confirmed live as the cause of a regression this
-        # detection itself introduced ("it does not stop or loop back to the start
-        # when it reaches the end part of the bookmark": the first seek-back's own
-        # transient status blip was being misread as an external stop, silently
-        # killing the loop right as it should have looped back). Requiring two
-        # consecutive non-"playing" polls before actually stopping the loop still
-        # catches a genuine external pause/stop (which persists across polls) while
-        # ignoring a one-tick blip.
-        self._loop_external_stop_suspected = False
         # Every media_id ever handed to the waveform orchestrator this session, current
         # track or not -- see _preload_playlist_waveforms. Prevents re-dispatching a
         # decode job on every ~2s playlist poll once a track has already been
@@ -632,34 +619,21 @@ class Application(QObject):
             # (ignored by the controller itself while a fade is mid-ramp, see
             # LoopController.set_target_volume's docstring).
             self._loop_controller.set_target_volume(status.volume)
-            # Direct user report: "if i play a bookmark in loop or otherwise, then
-            # pause or stop... a few seconds later, it starts playing on its own" --
-            # confirmed to reproduce even stopping from VLC's own window, which our
-            # transport Pause/Stop handlers never see at all. LoopController.PLAYING
-            # means its precision boundary timer is armed and will fire regardless
-            # of how playback actually stopped; GAP is its OWN deliberate pause
-            # between iterations and must not be treated as an external stop.
-            # status.state is the ground truth VLC itself reports, whatever the
-            # cause -- if the loop thinks it's still driving playback but VLC says
-            # otherwise, something outside the loop took over and it must yield.
-            #
-            # Debounced across two consecutive polls (see _loop_external_stop_
-            # suspected's docstring in __init__): every loop iteration's own
-            # seek-back can make VLC report a transient non-"playing" state for
-            # one poll even though nothing external actually stopped it -- acting
-            # on a single such poll was itself a regression that silently killed
-            # the loop right as it should have looped back.
-            if self._loop_controller.state is LoopState.PLAYING and status.state != "playing":
-                if self._loop_external_stop_suspected:
-                    self._loop_controller.stop()
-                    self._selection_loop_active = False
-                    self._loop_external_stop_suspected = False
-                else:
-                    self._loop_external_stop_suspected = True
-                    self._loop_controller.on_tick()
-            else:
-                self._loop_external_stop_suspected = False
-                self._loop_controller.on_tick()
+            # Reverted: comparing LoopController.state against VLC's own reported
+            # status.state on every poll (added to fix "if i pause or stop, it
+            # starts playing on its own again" when the stop bypassed our own
+            # transport buttons, e.g. stopping directly in VLC's window) turned out
+            # to be too fragile even debounced across two consecutive polls --
+            # confirmed live to still misfire and kill an ordinary, uninterrupted
+            # loop ("still runs on" -- i.e. reintroduced "does not stop or loop
+            # back to the start when it reaches the end part of the bookmark").
+            # The core boundary-timer loop mechanism must not depend on this kind
+            # of noisy status comparison. The transport bar's own Pause/Stop
+            # buttons (_on_play_pause_clicked/_on_stop_clicked) still stop the loop
+            # directly and instantly for the common case of using this app's own
+            # controls; a stop issued entirely outside this app (VLC's own window)
+            # is a known, accepted gap for now rather than risk the core loop again.
+            self._loop_controller.on_tick()
 
             if status.current_playlist_item_id != self._actually_playing_vlc_item_id:
                 self._actually_playing_vlc_item_id = status.current_playlist_item_id
