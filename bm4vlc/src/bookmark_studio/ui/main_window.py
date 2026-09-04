@@ -280,6 +280,7 @@ class MainWindow(QMainWindow):
         self._bookmark_panel.delete_bookmark_requested.connect(self._on_delete_bookmark_requested)
         self._bookmark_panel.reorder_requested.connect(self.bookmark_reorder_requested.emit)
         self._bookmark_panel.loop_edited.connect(self._on_bookmark_panel_loop_edited)
+        self._bookmark_panel.gap_edited.connect(self._on_bookmark_panel_gap_edited)
         self._bookmark_panel.fade_in_edited.connect(self._on_bookmark_panel_fade_in_edited)
         self._bookmark_panel.fade_out_edited.connect(self._on_bookmark_panel_fade_out_edited)
 
@@ -511,6 +512,16 @@ class MainWindow(QMainWindow):
         self._push_bookmark_loop_change(
             bookmark, loop_enabled=loop_enabled, repeat_count=repeat_count,
             gap_ms=bookmark.loop_gap_ms, completion_action=bookmark.completion_action,
+            fade_in_ms=bookmark.fade_in_ms, fade_out_ms=bookmark.fade_out_ms,
+        )
+
+    def _on_bookmark_panel_gap_edited(self, bookmark_id: UUID, gap_ms: int) -> None:
+        bookmark = self._bookmark_repository.get(bookmark_id)
+        if bookmark is None:
+            return
+        self._push_bookmark_loop_change(
+            bookmark, loop_enabled=bookmark.loop_enabled, repeat_count=bookmark.repeat_count,
+            gap_ms=gap_ms, completion_action=bookmark.completion_action,
             fade_in_ms=bookmark.fade_in_ms, fade_out_ms=bookmark.fade_out_ms,
         )
 

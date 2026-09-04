@@ -272,6 +272,28 @@ def test_editing_fade_columns_emits_fade_edited(qtbot) -> None:
     assert fade_out_requests == [(bookmark.id, 250)]
 
 
+def test_editing_gap_column_emits_gap_edited(qtbot) -> None:
+    """Direct follow-up request: "the selection drop box is still missing for
+    loop/fade in/fade out/gap" -- Gap is a fourth dropdown-editable column,
+    alongside Loop/Fade In/Fade Out."""
+    from bookmark_studio.ui.bookmark_panel import GAP_COLUMN
+
+    panel = BookmarkPanel()
+    qtbot.addWidget(panel)
+    media_id = uuid4()
+    bookmark = _bookmark(media_id, "Chorus", 1_000_000)
+    panel.set_bookmarks([bookmark], {media_id: "Song"})
+
+    row = panel._tree.topLevelItem(0)
+    assert row.text(GAP_COLUMN) == "Off"
+
+    requests = []
+    panel.gap_edited.connect(lambda *args: requests.append(args))
+    row.setText(GAP_COLUMN, "500 ms")
+
+    assert requests == [(bookmark.id, 500)]
+
+
 def test_set_bookmarks_preserves_selection_across_refresh(qtbot) -> None:
     panel = BookmarkPanel()
     qtbot.addWidget(panel)
