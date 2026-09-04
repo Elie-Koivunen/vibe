@@ -31,12 +31,14 @@ from bookmark_studio.ui.waveform.view import WaveformView
 class MainWindow(QMainWindow):
     # Re-exposes transport/waveform playback intents at the MainWindow level so a
     # composition root (e.g. app/application.py) has one place to wire real VLC
-    # commands, instead of reaching into private widgets. play_selection_requested and
-    # loop_selection_requested carry (start_us, end_us).
-    # int would marshal through a 32-bit C++ int and silently wrap past ~35.8 minutes
-    # (2^31 microseconds) -- same bug class fixed for TransportBar/BookmarkInspector's
-    # timecode signals; object bypasses that C-type coercion entirely.
-    play_selection_requested = Signal(object, object)
+    # commands, instead of reaching into private widgets. loop_selection_requested
+    # carries (start_us, end_us). object, not int: int would marshal through a
+    # 32-bit C++ int and silently wrap past ~35.8 minutes (2^31 microseconds) --
+    # same bug class fixed for TransportBar/BookmarkInspector's timecode signals.
+    # Direct follow-up request: "remove the play selection button as it is" -- the
+    # separate non-looping Play Selection button/signal is gone; the one remaining
+    # button (labeled "Play", per "rename the loop selection as 'play'") still loops
+    # under the hood, same as every bookmark already defaults to loop-enabled.
     loop_selection_requested = Signal(object, object)
     launch_vlc_requested = Signal()
     play_bookmark_requested = Signal(object)  # UUID
@@ -140,11 +142,12 @@ class MainWindow(QMainWindow):
         self._bookmark_selection_button.clicked.connect(self._on_bookmark_selection_clicked)
         layout.addWidget(self._bookmark_selection_button)
 
-        self._play_selection_button = QPushButton("Play Selection", self)
-        self._play_selection_button.clicked.connect(self._on_play_selection_clicked)
-        layout.addWidget(self._play_selection_button)
-
-        self._loop_selection_button = QPushButton("Loop Selection", self)
+        # Direct follow-up request: "remove the play selection button as it is.
+        # rename the loop selection as 'play'" -- consolidates the two into one
+        # button; it still loops the selection under the hood (matching every
+        # bookmark's own loop-enabled-by-default), just no longer needs a separate
+        # non-looping "Play Selection" alongside it.
+        self._loop_selection_button = QPushButton("Play", self)
         self._loop_selection_button.clicked.connect(self._on_loop_selection_clicked)
         layout.addWidget(self._loop_selection_button)
 
@@ -156,8 +159,7 @@ class MainWindow(QMainWindow):
 
     def _set_selection_buttons_enabled(self, enabled: bool) -> None:
         for button in (
-            self._bookmark_selection_button, self._play_selection_button,
-            self._loop_selection_button, self._clear_selection_button,
+            self._bookmark_selection_button, self._loop_selection_button, self._clear_selection_button,
         ):
             button.setEnabled(enabled)
 
@@ -365,11 +367,6 @@ class MainWindow(QMainWindow):
         )
         self._create_bookmark_and_focus_name(bookmark)
         self._waveform_scene.clear_selection()
-
-    def _on_play_selection_clicked(self) -> None:
-        selection = self._waveform_scene.selection()
-        if selection is not None:
-            self.play_selection_requested.emit(selection.start_us, selection.end_us)
 
     def _on_loop_selection_clicked(self) -> None:
         selection = self._waveform_scene.selection()

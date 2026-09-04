@@ -218,7 +218,6 @@ class Application(QObject):
         self.window._playlist_panel.item_double_clicked.connect(self._on_playlist_item_double_clicked)
         self.window._playlist_panel.item_selected.connect(self._on_playlist_item_selected)
         self.window._playlist_panel.follow_vlc_toggled.connect(self._on_follow_vlc_toggled)
-        self.window.play_selection_requested.connect(self._on_play_selection_requested)
         self.window.loop_selection_requested.connect(self._on_loop_selection_requested)
         self.window.launch_vlc_requested.connect(self.prompt_vlc_launch_dialog)
         self.window.play_bookmark_requested.connect(self._on_play_bookmark_requested)
@@ -344,13 +343,6 @@ class Application(QObject):
         else:
             self._fire_and_forget(self._adapter.play)
 
-    def _on_play_selection_requested(self, start_us: int, end_us: int) -> None:
-        def _play() -> None:
-            self._adapter.seek_absolute_us(start_us)
-            self._adapter.play()
-
-        self._fire_and_forget(_play)
-
     def _on_loop_selection_requested(self, start_us: int, end_us: int) -> None:
         from bookmark_studio.domain.enums import CompletionAction
         from bookmark_studio.domain.loop import LoopSpec
@@ -413,9 +405,9 @@ class Application(QObject):
 
     def _on_play_bookmark_requested(self, bookmark_id: UUID) -> None:
         """"another set below that would play explicitly from the bookmark listing
-        itself" -- distinct from Play/Loop Selection (which needs a fresh waveform
-        drag) and from the transport bar (which drives the live VLC playlist, not a
-        specific saved bookmark).
+        itself" -- distinct from the waveform's own Play button (which needs a
+        fresh drag-selection) and from the transport bar (which drives the live
+        VLC playlist, not a specific saved bookmark).
 
         Regression, reported live now that the bookmark list spans every song: this
         only ever seeked *whatever VLC currently had loaded*, never switching to the

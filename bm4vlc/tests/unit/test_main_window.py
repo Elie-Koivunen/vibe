@@ -101,7 +101,7 @@ def test_bookmark_now_button_bookmarks_the_selection_when_one_exists(qtbot) -> N
 
 def test_bookmark_panel_play_loop_buttons_track_selection(qtbot) -> None:
     """Direct user request: dedicated controls "that would play explicitly from the
-    bookmark listing itself", separate from Play/Loop Selection above the waveform."""
+    bookmark listing itself", separate from the waveform's own Play button above."""
     from bookmark_studio.domain.bookmark import Bookmark
     from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
 
