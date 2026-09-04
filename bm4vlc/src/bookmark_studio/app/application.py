@@ -160,6 +160,18 @@ class Application(QObject):
         # later drag/edit of the SAME selection can live-update what's actually
         # looping; see _on_waveform_selection_changed.
         self._selection_loop_active = False
+        # Debounces the external-stop detection in _on_status_result: a seek (which
+        # every single loop iteration performs) can make VLC's HTTP interface report
+        # something other than "playing" for one transient poll even though nothing
+        # actually stopped it -- confirmed live as the cause of a regression this
+        # detection itself introduced ("it does not stop or loop back to the start
+        # when it reaches the end part of the bookmark": the first seek-back's own
+        # transient status blip was being misread as an external stop, silently
+        # killing the loop right as it should have looped back). Requiring two
+        # consecutive non-"playing" polls before actually stopping the loop still
+        # catches a genuine external pause/stop (which persists across polls) while
+        # ignoring a one-tick blip.
+        self._loop_external_stop_suspected = False
         # Every media_id ever handed to the waveform orchestrator this session, current
         # track or not -- see _preload_playlist_waveforms. Prevents re-dispatching a
         # decode job on every ~2s playlist poll once a track has already been
@@ -630,10 +642,23 @@ class Application(QObject):
             # status.state is the ground truth VLC itself reports, whatever the
             # cause -- if the loop thinks it's still driving playback but VLC says
             # otherwise, something outside the loop took over and it must yield.
+            #
+            # Debounced across two consecutive polls (see _loop_external_stop_
+            # suspected's docstring in __init__): every loop iteration's own
+            # seek-back can make VLC report a transient non-"playing" state for
+            # one poll even though nothing external actually stopped it -- acting
+            # on a single such poll was itself a regression that silently killed
+            # the loop right as it should have looped back.
             if self._loop_controller.state is LoopState.PLAYING and status.state != "playing":
-                self._loop_controller.stop()
-                self._selection_loop_active = False
+                if self._loop_external_stop_suspected:
+                    self._loop_controller.stop()
+                    self._selection_loop_active = False
+                    self._loop_external_stop_suspected = False
+                else:
+                    self._loop_external_stop_suspected = True
+                    self._loop_controller.on_tick()
             else:
+                self._loop_external_stop_suspected = False
                 self._loop_controller.on_tick()
 
             if status.current_playlist_item_id != self._actually_playing_vlc_item_id:
