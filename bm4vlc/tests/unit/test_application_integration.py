@@ -585,6 +585,76 @@ def test_selection_is_cleared_when_the_displayed_track_changes(qtbot, running_ap
     assert app.window._waveform_scene.selection() is None
 
 
+def test_dragging_selection_edge_while_looping_it_updates_the_active_loop(qtbot, running_app) -> None:
+    """Direct follow-up request: "when i press play to listen to the selection, i
+    want the ability to adjust the selection by dragging the sides" -- while the
+    waveform's own Play button is looping a raw selection, adjusting its bounds
+    (SelectionItem's resize_finished -> WaveformScene.selection_changed) must
+    restart the loop with the new range, not keep looping the stale one.
+    """
+    from bookmark_studio.domain.enums import LoopState
+    from bookmark_studio.domain.selection import Selection
+
+    adapter = MockPlaybackAdapter(
+        [VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0)]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
+
+    app.window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=2_000_000))
+    app._on_loop_selection_requested(1_000_000, 2_000_000)
+    assert app._loop_controller.state is LoopState.PLAYING
+    assert app._loop_controller.spec.start_us == 1_000_000
+
+    # Simulates SelectionItem.resize_finished settling a drag of the right edge.
+    app.window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=3_000_000))
+
+    assert app._loop_controller.state is LoopState.PLAYING
+    assert app._loop_controller.spec.end_us == 3_000_000  # picked up the new bound
+    assert adapter.get_status().time_us == 1_000_000  # reseeked to (unchanged) start
+
+
+def test_adjusting_selection_when_not_looping_it_does_not_touch_the_loop_controller(qtbot, running_app) -> None:
+    """An ordinary selection edit must not start or restart a loop when the
+    waveform's own Play button was never clicked for it."""
+    from bookmark_studio.domain.enums import LoopState
+    from bookmark_studio.domain.selection import Selection
+
+    adapter = MockPlaybackAdapter(
+        [VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0)]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
+
+    app.window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=2_000_000))
+    app.window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=3_000_000))
+
+    assert app._loop_controller.state is LoopState.IDLE
+
+
+def test_clearing_the_selection_while_looping_it_stops_the_loop(qtbot, running_app) -> None:
+    from bookmark_studio.domain.enums import LoopState
+    from bookmark_studio.domain.selection import Selection
+
+    adapter = MockPlaybackAdapter(
+        [VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0)]
+    )
+    app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
+    app.start()
+    qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
+
+    app.window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=2_000_000))
+    app._on_loop_selection_requested(1_000_000, 2_000_000)
+    assert app._loop_controller.state is LoopState.PLAYING
+
+    app.window._waveform_scene.clear_selection()
+
+    assert app._loop_controller.state is LoopState.IDLE
+    assert app._selection_loop_active is False
+
+
 def test_selecting_a_bookmark_switches_the_waveform_to_its_song_without_playing(qtbot, running_app) -> None:
     """Direct user request: "when i select a bookmarking, i want it to automatically
     select the song from the playlist above and display its waveform along with the

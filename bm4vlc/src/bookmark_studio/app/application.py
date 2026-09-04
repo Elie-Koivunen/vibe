@@ -151,6 +151,14 @@ class Application(QObject):
         self._last_playback_state: str = "stopped"
         self._playlist_items: list = []
         self._connected = False
+        # Direct follow-up request: "when i press play to listen to the selection,
+        # i want the ability to adjust the selection by dragging the sides. in
+        # addition, the start and end should reflect the movement and progress of
+        # the playback" -- True only between _on_loop_selection_requested (the
+        # waveform's own Play button) and whatever ends that ad-hoc loop, so a
+        # later drag/edit of the SAME selection can live-update what's actually
+        # looping; see _on_waveform_selection_changed.
+        self._selection_loop_active = False
         # Every media_id ever handed to the waveform orchestrator this session, current
         # track or not -- see _preload_playlist_waveforms. Prevents re-dispatching a
         # decode job on every ~2s playlist poll once a track has already been
@@ -215,6 +223,7 @@ class Application(QObject):
         self.window._waveform_scene.seek_requested.connect(
             lambda time_us: self._fire_and_forget(lambda: self._adapter.seek_absolute_us(time_us))
         )
+        self.window._waveform_scene.selection_changed.connect(self._on_waveform_selection_changed)
         self.window._playlist_panel.item_double_clicked.connect(self._on_playlist_item_double_clicked)
         self.window._playlist_panel.item_selected.connect(self._on_playlist_item_selected)
         self.window._playlist_panel.follow_vlc_toggled.connect(self._on_follow_vlc_toggled)
@@ -347,8 +356,36 @@ class Application(QObject):
         from bookmark_studio.domain.enums import CompletionAction
         from bookmark_studio.domain.loop import LoopSpec
 
+        self._selection_loop_active = True
         self._loop_controller.start(
             LoopSpec(start_us=start_us, end_us=end_us, repeat_count=None, gap_ms=0,
+                      completion_action=CompletionAction.CONTINUE)
+        )
+
+    def _on_waveform_selection_changed(self, selection: object) -> None:
+        """Direct follow-up request: "when i press play to listen to the
+        selection, i want the ability to adjust the selection by dragging the
+        sides" -- while the waveform's own Play button is actively looping a raw
+        selection (not yet a bookmark), dragging one of its edges restarts the
+        loop with the new bounds, so what's playing tracks what's shown. Only
+        active between _on_loop_selection_requested and whatever ends that ad-hoc
+        loop (playing a bookmark, double-clicking a different song, etc. --
+        see the sites that clear _selection_loop_active) -- it does nothing to
+        an ordinary selection made while nothing is looping.
+        """
+        if not self._selection_loop_active:
+            return
+        from bookmark_studio.domain.selection import Selection
+
+        if not isinstance(selection, Selection):
+            self._selection_loop_active = False
+            self._loop_controller.stop()
+            return
+        from bookmark_studio.domain.enums import CompletionAction
+        from bookmark_studio.domain.loop import LoopSpec
+
+        self._loop_controller.start(
+            LoopSpec(start_us=selection.start_us, end_us=selection.end_us, repeat_count=None, gap_ms=0,
                       completion_action=CompletionAction.CONTINUE)
         )
 

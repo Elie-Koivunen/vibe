@@ -95,12 +95,22 @@ class MainWindow(QMainWindow):
         self._selection_label = QLabel("No selection", self)
         layout.addWidget(self._selection_label)
 
-        # The editable Start/End fields that used to sit here were removed per
-        # direct follow-up request -- "these do not serve a purpose" -- once the
-        # bookmark list's own Start/End columns and the Inspector's fields already
-        # cover editing a saved bookmark's range; the pair here only ever edited an
-        # in-progress drag-selection, which is more naturally adjusted by dragging
-        # the selection itself on the waveform.
+        # The editable (typed-value) Start/End fields that used to sit here were
+        # removed per direct follow-up request -- "these do not serve a purpose" --
+        # once the bookmark list's own Start/End columns and the Inspector's fields
+        # already cover editing a SAVED bookmark's range. This pair is different:
+        # read-only, and specifically for an in-progress drag-selection -- direct
+        # follow-up request: "when i press play to listen to the selection, i want
+        # the ability to adjust the selection by dragging the sides. in addition,
+        # the start and end should reflect the movement ... of the playback".
+        # Dragging is the editing mechanism now (see SelectionItem's resize
+        # handles); these just show the numbers as that happens.
+        self._selection_start_label = QLabel("--:--:--.---", self)
+        layout.addWidget(self._selection_start_label)
+        layout.addWidget(QLabel("→", self))
+        self._selection_end_label = QLabel("--:--:--.---", self)
+        layout.addWidget(self._selection_end_label)
+
         layout.addStretch(1)
 
         # Explicit, always-visible zoom controls (spec #84's Ctrl+wheel/Ctrl+0 still
@@ -274,6 +284,7 @@ class MainWindow(QMainWindow):
         self._waveform_scene.bookmark_move_finished.connect(self._on_bookmark_move_finished)
         self._waveform_scene.bookmark_resize_finished.connect(self._on_bookmark_resize_finished)
         self._waveform_scene.selection_changed.connect(self._on_selection_changed)
+        self._waveform_scene.selection_preview_changed.connect(self._on_selection_preview_changed)
 
         self._bookmark_panel.bookmark_selected.connect(self._on_bookmark_activated)
         self._bookmark_panel.export_requested.connect(self._on_export_project)
@@ -332,10 +343,24 @@ class MainWindow(QMainWindow):
 
         if isinstance(selection, Selection):
             self._selection_label.setText(f"Selection ({format_timecode(selection.duration_us)})")
+            self._selection_start_label.setText(format_timecode(selection.start_us))
+            self._selection_end_label.setText(format_timecode(selection.end_us))
             self._set_selection_buttons_enabled(True)
         else:
             self._selection_label.setText("No selection")
+            self._selection_start_label.setText("--:--:--.---")
+            self._selection_end_label.setText("--:--:--.---")
             self._set_selection_buttons_enabled(False)
+
+    def _on_selection_preview_changed(self, start_us: int, end_us: int) -> None:
+        """Live readout while dragging one of SelectionItem's resize handles --
+        direct follow-up request: "the start and end should reflect the movement
+        ... of the playback" -- fires continuously during the drag, distinct from
+        _on_selection_changed (which only fires once the drag settles)."""
+        from bookmark_studio.ui.transport import format_timecode
+
+        self._selection_start_label.setText(format_timecode(start_us))
+        self._selection_end_label.setText(format_timecode(end_us))
 
     def _on_bookmark_now_clicked(self) -> None:
         if self._waveform_scene.selection() is not None:

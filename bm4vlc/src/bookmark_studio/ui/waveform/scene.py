@@ -27,6 +27,12 @@ class WaveformScene(QGraphicsScene):
     # (2^31 us) -- same bug class fixed for TransportBar/BookmarkInspector's signals.
     seek_requested = Signal(object)
     selection_changed = Signal(object)  # Selection | None
+    # Direct follow-up request: "when i press play to listen to the selection, i
+    # want the ability to adjust the selection by dragging the sides. in addition,
+    # the start and end should reflect the movement ... of the playback" -- fires
+    # continuously WHILE an edge is being dragged (start_us, end_us), for a cheap
+    # live readout; selection_changed above only fires once the drag/edit settles.
+    selection_preview_changed = Signal(object, object)
     point_bookmark_requested = Signal(object)
     bookmark_activated = Signal(object)  # UUID
     bookmark_move_finished = Signal(object, object, object)  # UUID, start_us, end_us
@@ -87,6 +93,8 @@ class WaveformScene(QGraphicsScene):
         if selection is not None:
             self._selection_item = SelectionItem(self._height, selection)
             self._selection_item.setY(RULER_HEIGHT)
+            self._selection_item.resize_preview.connect(self._on_selection_resize_preview)
+            self._selection_item.resize_finished.connect(self._on_selection_resize_finished)
             self.addItem(self._selection_item)
         self.selection_changed.emit(selection)
 
@@ -95,6 +103,20 @@ class WaveformScene(QGraphicsScene):
 
     def clear_selection(self) -> None:
         self.set_selection(None)
+
+    def _on_selection_resize_preview(self, handle: str, value_us: int) -> None:
+        current = self.selection()
+        if current is None:
+            return
+        if handle == "start":
+            self.selection_preview_changed.emit(value_us, current.end_us)
+        else:
+            self.selection_preview_changed.emit(current.start_us, value_us)
+
+    def _on_selection_resize_finished(self, _handle: str, _value_us: int) -> None:
+        # SelectionItem already updated its own internal Selection before emitting
+        # this -- just propagate it as the authoritative, settled change.
+        self.selection_changed.emit(self.selection())
 
     # -- bookmarks --
 

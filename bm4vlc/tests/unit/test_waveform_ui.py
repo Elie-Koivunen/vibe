@@ -294,5 +294,81 @@ def test_bookmark_click_activates_without_moving(qtbot) -> None:
     pos = _to_view_pos(view, mid_time)
     QTest.mousePress(view.viewport(), Qt.LeftButton, pos=pos)
     QTest.mouseRelease(view.viewport(), Qt.LeftButton, pos=pos)
-
     assert activated == [bookmark.id]
+
+
+def test_dragging_selection_left_handle_resizes_start_live_and_on_release(qtbot) -> None:
+    """Direct follow-up request: "when i press play to listen to the selection, i
+    want the ability to adjust the selection by dragging the sides. in addition,
+    the start and end should reflect the movement ... of the playback" --
+    selection_preview_changed fires continuously during the drag; selection_changed
+    only fires once, when it settles.
+    """
+    from bookmark_studio.domain.selection import Selection
+
+    scene, view = _make_view(qtbot)
+    scene.set_selection(Selection(start_us=1_000_000, end_us=2_000_000))
+
+    previews = []
+    finals = []
+    scene.selection_preview_changed.connect(lambda s, e: previews.append((s, e)))
+    scene.selection_changed.connect(lambda sel: finals.append(sel))
+
+    # A couple ms into the region, well within the left handle's hit area.
+    start_pos = _to_view_pos(view, 1_003_000)
+    end_pos = _to_view_pos(view, 1_200_000)
+
+    QTest.mousePress(view.viewport(), Qt.LeftButton, pos=start_pos)
+    QTest.mouseMove(view.viewport(), pos=end_pos)
+    assert previews  # live readout updated mid-drag
+    assert previews[-1][1] == 2_000_000  # end untouched by a start-handle drag
+
+    QTest.mouseRelease(view.viewport(), Qt.LeftButton, pos=end_pos)
+
+    assert len(finals) == 1
+    settled = finals[0]
+    assert isinstance(settled, Selection)
+    assert settled.start_us > 1_000_000  # moved right
+    assert settled.end_us == 2_000_000
+    assert scene.selection() == settled
+
+
+def test_dragging_selection_right_handle_resizes_end_only(qtbot) -> None:
+    from bookmark_studio.domain.selection import Selection
+
+    scene, view = _make_view(qtbot)
+    scene.set_selection(Selection(start_us=1_000_000, end_us=2_000_000))
+
+    finals = []
+    scene.selection_changed.connect(lambda sel: finals.append(sel))
+
+    start_pos = _to_view_pos(view, 1_997_000)  # a couple ms inside the right handle
+    end_pos = _to_view_pos(view, 2_300_000)
+
+    QTest.mousePress(view.viewport(), Qt.LeftButton, pos=start_pos)
+    QTest.mouseMove(view.viewport(), pos=end_pos)
+    QTest.mouseRelease(view.viewport(), Qt.LeftButton, pos=end_pos)
+
+    assert len(finals) == 1
+    settled = finals[0]
+    assert settled.start_us == 1_000_000
+    assert settled.end_us > 2_000_000
+
+
+def test_clicking_inside_selection_body_does_not_resize(qtbot) -> None:
+    """Only the edge handles are draggable -- the middle is inert, same as before
+    this feature existed (no accidental resize from an ordinary click)."""
+    from bookmark_studio.domain.selection import Selection
+
+    scene, view = _make_view(qtbot)
+    scene.set_selection(Selection(start_us=1_000_000, end_us=2_000_000))
+
+    finals = []
+    scene.selection_changed.connect(lambda sel: finals.append(sel))
+
+    mid_pos = _to_view_pos(view, 1_500_000)
+    QTest.mousePress(view.viewport(), Qt.LeftButton, pos=mid_pos)
+    QTest.mouseRelease(view.viewport(), Qt.LeftButton, pos=mid_pos)
+
+    assert finals == []
+    assert scene.selection() == Selection(start_us=1_000_000, end_us=2_000_000)
