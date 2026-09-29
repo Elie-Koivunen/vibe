@@ -74,7 +74,11 @@ def run_pyinstaller(work: Path, icon: Path | None) -> Path:
          "--distpath", str(work / "dist"), "--workpath", str(work / "pyi"), str(HERE / "bm4vlc.spec")],
         check=True, env=env, cwd=ROOT,
     )
-    return work / "dist" / "bm4vlc"
+    app_dir = work / "dist" / "bm4vlc"
+    stray = sorted(p.name for p in (app_dir / "_internal").rglob("libvlc*") if p.is_file())
+    if stray:  # see bm4vlc.spec: a lone libVLC copy can't find its plugins
+        raise SystemExit(f"libVLC was bundled into _internal/ ({', '.join(stray)}); the spec must exclude it")
+    return app_dir
 
 
 def add_vlc(app_dir: Path, vlc_dir: Path) -> None:

@@ -28,6 +28,14 @@ a = Analysis(
 )
 # Qt's software OpenGL fallback (20 MB): the UI is raster-painted widgets, no OpenGL.
 a.binaries = [entry for entry in a.binaries if Path(entry[0]).name.lower() != "opengl32sw.dll"]
+# Never bundle a libVLC found on the build machine (PyInstaller picks it up from
+# python-vlc's ctypes calls). VLC looks for its plugins next to wherever libvlccore was
+# loaded from, so a lone copy in _internal/ finds none and refuses to start. Linux uses
+# the system's VLC; the Windows build ships a complete VLC folder in vlc/ instead.
+a.binaries = [
+    entry for entry in a.binaries
+    if not Path(entry[0]).name.lower().startswith(("libvlc.", "libvlccore."))
+]
 pyz = PYZ(a.pure)
 
 gui = EXE(

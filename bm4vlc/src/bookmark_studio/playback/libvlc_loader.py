@@ -175,6 +175,29 @@ def loaded_location() -> LibVlcLocation | None:
     return _loaded[1] if _loaded is not None else None
 
 
+def instance_failure_hint() -> str:
+    """Why libvlc_new() may have returned NULL, for error messages. VLC looks for its
+    plugins relative to the libvlccore it was loaded from (Linux: via /proc/self/maps),
+    so name that file and the plugin folder VLC will use."""
+    core = None
+    try:
+        with open("/proc/self/maps", encoding="utf-8", errors="replace") as maps:
+            for line in maps:
+                path = line.rstrip("\n").partition("/")[2]
+                if "libvlccore" in path:
+                    core = "/" + path
+                    break
+    except OSError:  # not Linux
+        pass
+    parts = []
+    if core:
+        parts.append(f"libvlccore loaded from {core}")
+    plugin_path = os.environ.get("VLC_PLUGIN_PATH")
+    if plugin_path:
+        parts.append(f"VLC_PLUGIN_PATH={plugin_path}")
+    return "; ".join(parts) or "check that VLC's plugins folder is complete"
+
+
 def libvlc_available(explicit_dir: str | None = None) -> bool:
     try:
         load_vlc_module(explicit_dir)
@@ -187,6 +210,7 @@ __all__ = [
     "LibVlcLocation",
     "LibVlcUnavailable",
     "find_libvlc",
+    "instance_failure_hint",
     "libvlc_available",
     "load_vlc_module",
     "loaded_location",

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from bookmark_studio import platform_support
-from bookmark_studio.playback.libvlc_loader import load_vlc_module
+from bookmark_studio.playback.libvlc_loader import instance_failure_hint, load_vlc_module
 from bookmark_studio.playback.status import PlaybackStatus, VlcPlaylistItem
 
 GOTO_SETTLE_TIMEOUT_S = 2.0
@@ -51,7 +51,7 @@ class LibVlcPlaybackAdapter:
         args = ["--no-video-title-show", "--quiet", *(instance_args or [])]
         self._instance = self._vlc.Instance(args)
         if self._instance is None:
-            raise RuntimeError(f"libVLC refused to start with options {args}")
+            raise RuntimeError(f"libVLC refused to start with options {args} ({instance_failure_hint()})")
         self._player = self._instance.media_player_new()
         self._list = self._instance.media_list_new()
         self._list_player = self._instance.media_list_player_new()

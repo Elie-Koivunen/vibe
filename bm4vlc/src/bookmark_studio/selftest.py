@@ -145,7 +145,12 @@ def _check_vlc(vlc: str | None) -> tuple[str, str]:
 
 
 def _check_libvlc(tmp: Path, libvlc_dir: str | None) -> tuple[str, str]:
-    from bookmark_studio.playback.libvlc_loader import LibVlcUnavailable, load_vlc_module, loaded_location
+    from bookmark_studio.playback.libvlc_loader import (
+        LibVlcUnavailable,
+        instance_failure_hint,
+        load_vlc_module,
+        loaded_location,
+    )
 
     try:
         vlc = load_vlc_module(libvlc_dir)
@@ -153,7 +158,7 @@ def _check_libvlc(tmp: Path, libvlc_dir: str | None) -> tuple[str, str]:
         return "missing", str(exc)
     instance = vlc.Instance(["--quiet", "--aout=adummy", "--vout=dummy", "--no-video-title-show"])
     if instance is None:
-        raise RuntimeError("libVLC loaded but refused to create an instance (plugins missing?)")
+        raise RuntimeError(f"libVLC loaded but refused to create an instance ({instance_failure_hint()})")
     try:
         player = instance.media_player_new()
         player.set_media(instance.media_new_path(str(_tone_wav(tmp / "libvlc.wav"))))

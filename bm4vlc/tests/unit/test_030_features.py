@@ -390,3 +390,10 @@ def test_a_libvlc_that_cannot_be_loaded_is_reported_not_fatal(tmp_path: Path, mo
     with pytest.raises(libvlc_loader.LibVlcUnavailable, match="could not be loaded"):
         libvlc_loader.load_vlc_module(str(broken))
     assert libvlc_loader.loaded_location() is None
+
+
+def test_instance_failure_hint_names_where_vlc_looks_for_plugins(monkeypatch) -> None:
+    monkeypatch.setenv("VLC_PLUGIN_PATH", "/opt/vlc/plugins")
+    assert "VLC_PLUGIN_PATH=/opt/vlc/plugins" in libvlc_loader.instance_failure_hint()
+    monkeypatch.delenv("VLC_PLUGIN_PATH")
+    assert libvlc_loader.instance_failure_hint()  # never empty
