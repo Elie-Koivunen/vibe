@@ -1,0 +1,11 @@
+# Keep line endings right on every platform, whatever core.autocrlf says:
+# shell scripts must stay LF or they break under Linux/WSL ("$'\r': command not found"),
+# Windows batch files stay CRLF.
+* text=auto
+*.sh text eol=lf
+*.lua text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.zip binary
+*.npz binary

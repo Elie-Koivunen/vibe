@@ -33,6 +33,27 @@ class PlaybackClock:
             sampled_at_ns=now_ns if now_ns is not None else time.monotonic_ns(),
         )
 
+    def note_seek(self, time_us: int, *, playing: bool | None = None, now_ns: int | None = None) -> None:
+        """Our own seek just completed: estimate from its target until the next fresh
+        status poll, instead of from the (now wrong) pre-seek sample."""
+        previous = self._sample
+        state = previous.state if previous is not None else "paused"
+        if playing is not None:
+            state = "playing" if playing else ("paused" if state == "playing" else state)
+        self._sample = _Sample(
+            time_us=time_us,
+            state=state,
+            rate=previous.rate if previous is not None else 1.0,
+            sampled_at_ns=now_ns if now_ns is not None else time.monotonic_ns(),
+        )
+
+    @property
+    def rate(self) -> float:
+        """Last known playback rate (1.0 until a poll has reported one)."""
+        if self._sample is None or self._sample.rate <= 0:
+            return 1.0
+        return self._sample.rate
+
     def estimated_position_us(self, *, now_ns: int | None = None) -> int:
         if self._sample is None:
             return 0

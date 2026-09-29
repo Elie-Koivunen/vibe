@@ -10,7 +10,13 @@ _MIGRATION_RE = re.compile(r"^(\d+)_.*\.sql$")
 
 
 def _migrations_dir() -> Path:
-    # migrations/ lives at the repo root, two levels above src/bookmark_studio/persistence/
+    """migrations/ inside the installed package (the wheel force-includes the repo's
+    migrations/ there -- see pyproject.toml), else the repo root when running from a
+    source checkout. Previously only the repo-root location was tried, so an installed
+    (non-editable) copy found no migrations and started with an empty database."""
+    package_dir = Path(__file__).resolve().parents[1] / "migrations"
+    if package_dir.is_dir() and any(package_dir.glob("*.sql")):
+        return package_dir
     return Path(__file__).resolve().parents[3] / "migrations"
 
 
@@ -35,6 +41,31 @@ def current_version(conn: sqlite3.Connection) -> int:
     return row[0] if row and row[0] is not None else 0
 
 
+def _apply_one(conn: sqlite3.Connection, version: int, sql: str) -> None:
+    """Runs one migration file and records it, atomically.
+
+    sqlite3's executescript() commits any open transaction first and then runs the
+    script in autocommit mode, so the old `with conn: conn.executescript(sql)` was not
+    atomic: a failure halfway through a multi-statement migration left the earlier
+    statements applied but the version unrecorded, and every later start failed on the
+    re-run ("duplicate column"). An explicit BEGIN/COMMIT inside the script, with a
+    ROLLBACK on error, makes each migration all-or-nothing (SQLite DDL is transactional).
+    """
+    applied_at = datetime.now(timezone.utc).isoformat()
+    script = (
+        "BEGIN;\n"
+        f"{sql}\n;\n"
+        f"INSERT INTO schema_migrations (version, applied_at) VALUES ({int(version)}, '{applied_at}');\n"
+        "COMMIT;\n"
+    )
+    try:
+        conn.executescript(script)
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+
+
 def migrate(conn: sqlite3.Connection, directory: Path | None = None) -> int:
     """Applies every migration newer than the current schema version. Returns new version.
 
@@ -45,16 +76,11 @@ def migrate(conn: sqlite3.Connection, directory: Path | None = None) -> int:
     """
     conn.execute("PRAGMA foreign_keys = ON")
     applied_from = current_version(conn)
+    conn.commit()
     latest = applied_from
     for version, path in discover_migrations(directory):
         if version <= applied_from:
             continue
-        sql = path.read_text(encoding="utf-8")
-        with conn:
-            conn.executescript(sql)
-            conn.execute(
-                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
-                (version, datetime.now(timezone.utc).isoformat()),
-            )
+        _apply_one(conn, version, path.read_text(encoding="utf-8"))
         latest = version
     return latest

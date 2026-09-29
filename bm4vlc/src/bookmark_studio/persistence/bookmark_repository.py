@@ -53,14 +53,22 @@ class BookmarkRepository:
                 "ORDER BY start_us",
                 (str(media_id), str(playlist_id), BookmarkScope.PLAYLIST_MEDIA.value),
             ).fetchall()
-        return [self._row_to_bookmark(row) for row in rows]
+        return self._rows_to_bookmarks(rows)
+
+    def list_for_context(self, playlist_id: UUID | None, media_id: UUID) -> list[Bookmark]:
+        """The bookmarks shown for one song: that playlist's own bookmarks when a playlist
+        context is active, the song's global bookmarks otherwise. (This decision was
+        repeated inline in five places before.)"""
+        if playlist_id is not None:
+            return self.list_for_playlist_media(playlist_id, media_id)
+        return self.list_global_for_media(media_id)
 
     def list_global_for_media(self, media_id: UUID) -> list[Bookmark]:
         rows = self._conn.execute(
             self._select_sql() + " WHERE media_id = ? AND scope = ? ORDER BY start_us",
             (str(media_id), BookmarkScope.GLOBAL_MEDIA.value),
         ).fetchall()
-        return [self._row_to_bookmark(row) for row in rows]
+        return self._rows_to_bookmarks(rows)
 
     def list_for_playlist(self, playlist_id: UUID) -> list[Bookmark]:
         """Every playlist-scoped bookmark across every song in the playlist -- direct
@@ -76,7 +84,7 @@ class BookmarkRepository:
             self._select_sql() + " WHERE playlist_id = ? AND scope = ? ORDER BY sort_index, start_us",
             (str(playlist_id), BookmarkScope.PLAYLIST_MEDIA.value),
         ).fetchall()
-        return [self._row_to_bookmark(row) for row in rows]
+        return self._rows_to_bookmarks(rows)
 
     def reorder(self, ordered_bookmark_ids: list[UUID]) -> None:
         """Assigns sort_index = position for each id, in the given order -- direct
@@ -106,14 +114,8 @@ class BookmarkRepository:
         return bookmark
 
     def update(self, bookmark: Bookmark) -> None:
-        existing = self.get(bookmark.id)
-        created_at = _now()
-        if existing is not None:
-            row = self._conn.execute(
-                "SELECT created_at FROM bookmarks WHERE id = ?", (str(bookmark.id),)
-            ).fetchone()
-            if row:
-                created_at = row[0]
+        # (Used to re-read the whole bookmark plus its created_at first and then never
+        # use either -- two wasted queries on every edit.)
         self._conn.execute(
             "UPDATE bookmarks SET playlist_id = ?, media_id = ?, scope = ?, lane_id = ?, "
             "bookmark_type = ?, name = ?, start_us = ?, end_us = ?, loop_enabled = ?, "
@@ -225,7 +227,23 @@ class BookmarkRepository:
             "completion_action, color_key, notes, sort_index, fade_in_ms, fade_out_ms FROM bookmarks"
         )
 
-    def _row_to_bookmark(self, row: sqlite3.Row | tuple) -> Bookmark:
+    def _rows_to_bookmarks(self, rows: list) -> list[Bookmark]:
+        """Builds many bookmarks with ONE tag query (chunked under SQLite's parameter
+        limit) instead of one tag query per bookmark."""
+        ids = [row[0] for row in rows]
+        tags_by_id: dict[str, list[str]] = {bookmark_id: [] for bookmark_id in ids}
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            placeholders = ",".join("?" * len(chunk))
+            for bookmark_id, tag in self._conn.execute(
+                f"SELECT bookmark_id, tag FROM bookmark_tags WHERE bookmark_id IN ({placeholders}) "
+                "ORDER BY bookmark_id, tag",
+                chunk,
+            ):
+                tags_by_id[bookmark_id].append(tag)
+        return [self._row_to_bookmark(row, tags=tuple(tags_by_id[row[0]])) for row in rows]
+
+    def _row_to_bookmark(self, row: sqlite3.Row | tuple, *, tags: tuple[str, ...] | None = None) -> Bookmark:
         (
             bookmark_id,
             playlist_id,
@@ -263,7 +281,7 @@ class BookmarkRepository:
             completion_action=CompletionAction(completion_action),
             color_key=color_key,
             notes=notes,
-            tags=self._get_tags(bid),
+            tags=tags if tags is not None else self._get_tags(bid),
             sort_index=sort_index,
             fade_in_ms=fade_in_ms,
             fade_out_ms=fade_out_ms,

@@ -11,7 +11,10 @@ from bookmark_studio.domain.media import Media
 from bookmark_studio.domain.playlist import Playlist
 
 FORMAT_NAME = "vlc-bookmark-studio"
-FORMAT_VERSION = 1
+# 2: bookmarks carry fade_in_ms/fade_out_ms/sort_index; optional playlist_items.json and
+#    playlist_signatures.json let an imported playlist be recognised in VLC. Version 1
+#    files still import (missing fields default to 0 / absent).
+FORMAT_VERSION = 2
 
 
 class ProjectFormatUnsupported(Exception):
@@ -61,6 +64,9 @@ def bookmark_to_dict(bookmark: Bookmark) -> dict:
         "color_key": bookmark.color_key,
         "notes": bookmark.notes,
         "tags": list(bookmark.tags),
+        "sort_index": bookmark.sort_index,
+        "fade_in_ms": bookmark.fade_in_ms,
+        "fade_out_ms": bookmark.fade_out_ms,
     }
 
 
@@ -83,6 +89,9 @@ def bookmark_from_dict(entry: dict) -> Bookmark:
         color_key=entry.get("color_key"),
         notes=entry.get("notes"),
         tags=tuple(entry.get("tags", [])),
+        sort_index=int(entry.get("sort_index", 0) or 0),
+        fade_in_ms=int(entry.get("fade_in_ms", 0) or 0),
+        fade_out_ms=int(entry.get("fade_out_ms", 0) or 0),
     )
 
 

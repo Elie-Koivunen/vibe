@@ -34,6 +34,18 @@ class WaveformPyramid:
     levels: tuple[PyramidLevel, ...]
     sample_rate: int
 
+    @property
+    def duration_us(self) -> int | None:
+        """Decoded media length, from the finest level (accurate to one block: 64
+        samples, 8ms at the 8kHz analysis rate). VLC only reports whole seconds, so
+        this is the better duration for position<->time math. None if empty."""
+        if not self.levels or self.sample_rate <= 0:
+            return None
+        finest = min(self.levels, key=lambda level: level.block_size)
+        if finest.peaks.shape[0] == 0:
+            return None
+        return int(finest.peaks.shape[0] * finest.block_size / self.sample_rate * 1_000_000)
+
     def best_level(self, visible_duration_us: int, pixel_width: int) -> PyramidLevel:
         """Selects the coarsest level giving ~1-2 peak columns per screen pixel (spec #112)."""
         if pixel_width <= 0 or visible_duration_us <= 0:

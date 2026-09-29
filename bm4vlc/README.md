@@ -2,52 +2,103 @@
 
 A playlist-aware visual bookmarking, segment-selection, navigation and
 looping system for VLC Media Player. See [PROJECT_SPEC.md](PROJECT_SPEC.md)
-for the full design and engineering specification (198 sections).
+for the full design and engineering specification (198 sections), and
+[CHANGELOG.md](CHANGELOG.md) for what changed in each version.
+
+Runs on **Windows**, **Linux**, and **WSL (Ubuntu on Windows)**.
 
 ## Status
 
-MVP core is implemented and tested (108 tests, all passing): domain
-model, SQLite persistence + migrations, media fingerprint/resolution,
-playlist recognition/similarity/mutation-tracking, the full FFmpeg
-waveform pipeline (real decode/peaks/pyramid/cache, verified against
-real `ffmpeg`), three playback adapters (Mock / VLC's built-in HTTP /
-the custom Lua bridge), the software loop controller, undo/redo
-commands with drag-compression, project export/import (atomic,
-transactional), and a working PySide6 UI (waveform paint-to-select/
-drag/resize, playlist and bookmark panels, inspector, transport bar)
-wired end-to-end through a live polling `Application` composition
-root. `python -m bookmark_studio` starts, discovers VLC, connects or
-falls back to offline mode, and runs.
+Version 0.2.0. The core is implemented and tested: domain model, SQLite
+persistence + migrations, media fingerprint/resolution, playlist
+recognition across sessions (similarity scoring over stored playlist
+order), the FFmpeg waveform pipeline, three playback adapters (Mock / VLC's
+built-in HTTP / the custom Lua bridge), the software loop controller (gaps,
+fades, completion actions), undo/redo, project export/import (format v2,
+merging), and a PySide6 UI wired end-to-end through a live polling
+`Application`. All playback commands run on one ordered queue off the UI
+thread.
 
-**The full live loop was confirmed working end-to-end against a real,
-locally installed, running VLC 3.0.23**: launch a managed VLC instance,
-connect, resolve the current track, load its waveform via real
-`ffmpeg`, and stream live playback position back into the UI's
-transport bar and playhead — not mocked, not simulated. **The default
-connection is VLC's built-in HTTP interface (`StandardHttpPlaybackAdapter`,
-spec #28), not the custom Lua bridge spec #196 named as primary** —
-see "The Lua bridge vs. VLC's built-in HTTP interface" below for why
-that reversal happened and what it cost to find out.
+Tests: 300+ unit/integration tests (offscreen Qt, mock VLC) plus opt-in live
+tests against a real VLC (`tests/vlc/`). Verified on Windows 11 (Python 3.12,
+VLC 3.0.23) and WSL Ubuntu 24.04 (Python 3.10–3.13, driving the Windows VLC).
 
-**Known simplifications / not yet built:**
-- The custom Lua bridge (`vlc/bookmarkstudio.lua`, `EnhancedLuaPlaybackAdapter`)
-  is fully implemented, live-debugged, and still available via
-  `app/vlc_launcher.py`'s `launch_managed_vlc_with_lua_bridge()`, but is
-  no longer the default a normal launch uses — see below.
-- `PlaylistSynchronizer`'s similarity scoring against *other* known
-  playlists always sees an empty candidate list (`_list_ordered_media_ids_for_playlist`
-  in `app/application.py` is a documented stub) — ad-hoc context
-  creation and mutation-of-the-active-playlist both work correctly;
-  only cross-playlist re-recognition after a VLC restart is simplified.
-  Bridge tokens are stored via `QSettings` (Windows registry), not
-  Windows Credential Manager as spec #121 suggests as the ideal.
-- Bookmark lanes, tags, and delete have repository/domain support and
-  are unit-tested, but the UI doesn't yet expose lane assignment,
-  tag editing beyond the Inspector's tags field, or a delete action/
-  context menu.
-- P1/P2 features (Segment Queue, Loop Trainer, clip export, Audacity
-  label import/export, beat detection, video thumbnails) are out of
-  scope for this pass — see PROJECT_SPEC.md #175-176.
+**Not built yet** (see PROJECT_SPEC.md #175-176): Segment Queue, Loop
+Trainer, clip export, Audacity label import/export, beat detection, video
+thumbnails, lane assignment in the UI.
+
+## Setup
+
+You need Python 3.10+, VLC 3.x and (for waveforms) ffmpeg. The app finds VLC
+and ffmpeg in their usual places; a path can also be saved in the settings
+(`vlc/path`, `ffmpeg/path`).
+
+### Windows
+
+1. Install [VLC](https://www.videolan.org/), [Python](https://www.python.org/)
+   (3.10 or newer) and ffmpeg (e.g. `winget install Gyan.FFmpeg`, or unpack it
+   to `C:\Program Files\ffmpeg`).
+2. In the `bm4vlc` folder:
+
+   ```bat
+   py -3 -m venv .venv
+   .venv\Scripts\pip install -e .
+   ```
+
+3. Double-click `launch_bm4vlc.bat`.
+
+PySide6 installs deep folder trees. If pip fails with *"The filename or
+extension is too long"* (Windows' 260-character path limit), put the venv on
+a short path instead (`py -3 -m venv C:\v` then `C:\v\Scripts\pip install -e .`;
+`launch_bm4vlc.bat` also looks there) or enable Windows long paths.
+
+### Linux (Ubuntu/Debian)
+
+```bash
+sudo apt install vlc ffmpeg python3-venv libegl1 libxkbcommon0 libxcb-cursor0
+python3 -m venv .venv
+.venv/bin/pip install -e .
+./launch_bm4vlc.sh
+```
+
+### WSL (Ubuntu on Windows 11)
+
+The app runs as a Linux program inside WSL and shows its window through WSLg.
+
+- **Simplest:** install VLC inside WSL (`sudo apt install vlc ffmpeg`) and
+  follow the Linux steps. Audio plays through WSLg; paths and networking are
+  native.
+- **Using the Windows VLC** (no VLC installed in WSL): the app finds
+  `C:\Program Files\VideoLAN\VLC\vlc.exe` automatically, translates file paths
+  both ways (`/mnt/c/...` <-> `C:\...`, WSL files via `\\wsl.localhost\...`),
+  and, under WSL's default NAT networking, has VLC listen on the WSL virtual
+  switch address (reachable from WSL and Windows only). Windows Firewall must
+  allow VLC (VLC's installer normally adds that rule; otherwise Windows asks the
+  first time). With `networkingMode=mirrored` in `.wslconfig`, plain
+  127.0.0.1 is used.
+
+Data lives in `%LOCALAPPDATA%\VLCBookmarkStudio` on Windows and
+`~/.local/share/VLCBookmarkStudio` on Linux/WSL (database, waveform cache,
+logs). The two are separate: a WSL session and a Windows session don't share
+bookmarks (use Save Bookmarks / Import Project to move them).
+
+## Tests
+
+```bash
+# Linux / WSL
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest
+# Windows (PowerShell)
+$env:QT_QPA_PLATFORM="offscreen"; .venv\Scripts\python -m pytest
+```
+
+Live tests start a real, silent, window-less VLC (`-I dummy --aout=adummy`):
+
+```bash
+BM4VLC_LIVE_VLC=1 QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests/vlc
+```
+
+CI (`.github/workflows/bm4vlc-tests.yml` at the repository root) runs the suite
+on Windows and Ubuntu 22.04/24.04 with Python 3.10, 3.12 and 3.13.
 
 ## The Lua bridge vs. VLC's built-in HTTP interface
 
@@ -59,72 +110,68 @@ responding**, confirmed via `netstat`: every request leaked one socket
 into `CLOSE_WAIT` on VLC's side. At the app's polling cadence that was
 enough to degrade a real session from "works" to "VLC refuses every
 new connection" within about 15-20 seconds. Client-side mitigations
-(reusing one persistent connection, widening timeouts to 3-4s, slowing
-polling to 400ms/2000ms) cut the leak rate substantially but never to
-zero — a live session still degraded within a few minutes.
+(reusing one persistent connection, widening timeouts, slowing polling)
+cut the leak rate but never to zero. (Testing for 0.2.0 found and fixed a
+separate bridge bug that made it look even flakier: the script let Lua's
+garbage collector unregister its HTTP handlers, so VLC answered 404 on random
+routes. With that fixed, one persistent connection serves every request.)
 
 VLC's *built-in* HTTP interface is different, more mature code and
-does not share the bug: verified live, 100 requests over ~45 seconds
+does not share the leak: verified live, 100 requests over ~45 seconds
 of realistic polling left **zero** leaked sockets, using a plain
-`requests.Session()` with no raw-socket workaround needed at all (it's
-also fully RFC 7230 compliant, unlike the Lua bridge's malformed
-responses — see point 4 below). `bootstrap.select_playback_adapter()`
-and `app/vlc_launcher.py`'s `launch_managed_vlc()` now default to this
-adapter. The Lua bridge remains fully working and available for its
-microsecond seek precision (`launch_managed_vlc_with_lua_bridge()`),
-for anyone willing to trade reliability for that.
+`requests.Session()`. `bootstrap.select_playback_adapter()` and
+`app/vlc_launcher.py`'s `launch_managed_vlc()` default to this adapter.
+Its only weakness, whole-second time/length values, is covered by deriving
+time from VLC's fractional position and the exact decoded media length.
+The Lua bridge remains available (`launch_managed_vlc_with_lua_bridge()`)
+for its microsecond seek precision.
 
 ## Verified live against real VLC
 
 `vlc/bookmarkstudio.lua` was iteratively debugged against a real,
 locally installed VLC 3.0.23 (not just written and assumed correct).
-Six real bugs were caught this way, several directly contradicting
-spec #196's own claims about VLC's Lua API:
+Bugs caught this way, several directly contradicting spec #196's own
+claims about VLC's Lua API:
 
 1. `obj:method and obj:method()` is invalid Lua (colon-call syntax
    needs immediate parens) — rejected at script-load time.
 2. `vlc.getenv(...)` does not exist in VLC's Lua API. Config comes from
-   a file at `vlc.config.configdir()` instead (verified live: resolves
-   to `%APPDATA%\vlc`, exactly spec #153's "VLC user config" directory).
+   a file at `vlc.config.configdir()` instead (resolves to `%APPDATA%\vlc`
+   on Windows, `~/.config/vlc` on Linux), with VLC's own `--http-password`
+   as a fallback (read with `vlc.var.inherit`; `vlc.config.get` only sees
+   the saved config file). VLC 3 refuses every request (403) on a handler
+   with an empty password.
 3. `vlc.httpd()` does not let a script pick its own host/port — it
    binds according to VLC's own `--http-host`/`--http-port` startup
-   flags (default, unset: **all interfaces**, port 8080 — confirmed
-   live). `app/vlc_launcher.py`'s `launch_managed_vlc()` always passes
-   `--http-host=127.0.0.1` explicitly for this reason (spec #20).
+   flags (default, unset: **all interfaces**, port 8080). The launcher
+   always passes `--http-host` explicitly (spec #20).
 4. **`vlc.httpd():handler()`'s response is not RFC 7230 compliant** —
    it sends a bare status line straight into the body with no
    header-terminating blank line, no `Content-Length`, and never
-   closes the connection. Every standard HTTP client (`requests`,
-   `curl`, browsers) hangs forever waiting for headers that never
-   arrive, even though the correct body is delivered in milliseconds.
-   `playback/bridge_client.py` reads over a raw socket with an
-   idle-gap heuristic instead of relying on a header terminator or
-   connection close, which handles both this and a normal
-   RFC-compliant server (VLC's built-in HTTP interface, and every test
-   fixture, use the latter).
-5. `vlc.player.seek_by_time_absolute` (spec #196's own reference)
-   **does not exist** in VLC 3.0.23's Lua API at all (`vlc.player` is
-   `nil`) — every `/seek` request hung with no response. Seeking is
-   instead `vlc.var.set(input, "time", us)`, the same mechanism already
-   used to *read* time/length/rate.
-6. `vlc.playlist.get("playlist", false)` has no `.current` field —
-   there is no built-in "which item is playing" indicator. The bridge
-   now matches the currently-playing input item's URI against each
-   playlist child's `.path` instead.
+   closes the connection. `playback/bridge_client.py` reads over a raw
+   socket with an idle-gap heuristic.
+5. `vlc.player.seek_by_time_absolute` does not exist in VLC 3.0.23's
+   Lua API (`vlc.player` is `nil`). Seeking is `vlc.var.set(input, "time", us)`.
+6. `vlc.playlist.get("playlist", false)` has no `.current` field. The
+   bridge matches the playing input item's URI against each playlist
+   child's `.path` instead.
+7. The objects returned by `vlc.httpd()` and `httpd:handler()` must stay
+   referenced (globals), or Lua's garbage collector unregisters the URLs and
+   VLC answers 404 on random routes.
+8. `vlc.playlist.pause()` toggles; the bridge's `pause` only pauses a playing
+   item.
 
-Also found and fixed while closing this out: `Application`'s status/
-playlist polling called the adapter's blocking network I/O directly
-from a `QTimer` callback on the Qt main thread — a slow or stalled
-bridge response froze the entire GUI for the call's timeout window,
-contradicting spec #108's "no network calls on a UI-blocking thread."
-Polling now dispatches through a `QThreadPool` worker with an in-flight
-guard per poll kind, mirroring the pattern already used for waveform
-generation.
+Also verified live for 0.2.0 (see `tests/vlc/test_live_vlc.py`): precise
+seeking right after switching songs, a gap + fade-out loop running to its
+completion action, the free-port probe skipping VLC's own port, and the whole
+Application playing a bookmark in another song.
 
 ## Architecture
 
 ```text
 PySide6 UI  +  Domain Logic  +  SQLite
+                    |
+   ordered command queue (off the UI thread)
                     |
              Playback Adapter
               /            \
@@ -134,28 +181,19 @@ PySide6 UI  +  Domain Logic  +  SQLite
                VLC Media Player
 ```
 
-VLC performs playback; Python performs the product logic. Full rationale
-in PROJECT_SPEC.md sections 2, 18-30, 196.
+VLC performs playback; Python performs the product logic. OS differences
+(paths, directories, discovery, WSL interop) live in
+`src/bookmark_studio/platform_support.py`. Full rationale in PROJECT_SPEC.md
+sections 2, 18-30, 196.
 
 ## Layout
 
 ```text
 src/bookmark_studio/   application package (see PROJECT_SPEC.md #116)
 vlc/bookmarkstudio.lua thin VLC Lua HTTP bridge (spec #18-#27)
-migrations/            SQLite schema migrations (spec #126)
-tests/                 unit / integration / ui / vlc / fixtures
-```
-
-## Setup
-
-This machine's system Python (3.10) doesn't have PySide6 installable
-in-place due to a Windows long-path limit hit by PySide6's wheel; a
-venv at a short path (e.g. `C:\v`) sidesteps it:
-
-```bash
-python -m venv C:\v
-C:\v\Scripts\pip install -e ".[dev]"
-C:\v\Scripts\pytest
+migrations/            SQLite schema migrations (spec #126), also packaged into the wheel
+tests/                 unit (offscreen Qt) and vlc (live, opt-in)
+archive/               every previous version, unchanged
 ```
 
 ## Non-goals

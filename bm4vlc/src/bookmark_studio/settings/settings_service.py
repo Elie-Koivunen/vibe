@@ -47,6 +47,12 @@ class SettingsService:
     def set_vlc_path(self, path: str) -> None:
         self._settings.setValue("vlc/path", path)
 
+    def ffmpeg_path(self) -> str | None:
+        return self._settings.value("ffmpeg/path") or None
+
+    def set_ffmpeg_path(self, path: str) -> None:
+        self._settings.setValue("ffmpeg/path", path)
+
     def bridge_port(self) -> int:
         return int(self._settings.value("bridge/port", DEFAULT_BRIDGE_PORT))
 

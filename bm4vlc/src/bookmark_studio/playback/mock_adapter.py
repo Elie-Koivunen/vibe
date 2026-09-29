@@ -17,6 +17,7 @@ class MockPlaybackAdapter:
         self._rate = 1.0
         self._volume = 256
         self.connected = False
+        self.exact_durations: dict[int, int | None] = {}
 
     def connect(self) -> None:
         self.connected = True
@@ -91,6 +92,9 @@ class MockPlaybackAdapter:
 
     def set_volume(self, level: int) -> None:
         self._volume = level
+
+    def set_exact_duration(self, vlc_id: int, duration_us: int | None) -> None:
+        self.exact_durations[vlc_id] = duration_us
 
     # -- test-only helpers, not part of the PlaybackAdapter protocol --
 

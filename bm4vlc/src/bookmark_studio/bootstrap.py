@@ -1,8 +1,6 @@
 """Startup sequence per spec #178: settings, DB, UI, VLC discovery."""
 from __future__ import annotations
 
-import os
-import shutil
 import sqlite3
 import sys
 from pathlib import Path
@@ -10,6 +8,7 @@ from pathlib import Path
 from PySide6.QtGui import QUndoStack
 from PySide6.QtWidgets import QApplication
 
+from bookmark_studio import __version__, platform_support
 from bookmark_studio.app.application import Application
 from bookmark_studio.logging.setup import configure_logging, get_logger
 from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
@@ -21,16 +20,30 @@ from bookmark_studio.playback.mock_adapter import MockPlaybackAdapter
 from bookmark_studio.settings.settings_service import SettingsService
 from bookmark_studio.ui.main_window import MainWindow
 
+_PLAYLIST_PATTERNS = ["*.m3u", "*.m3u8"]
+_MEDIA_PATTERNS = [
+    "*.mp3", "*.wav", "*.flac", "*.m4a", "*.aac", "*.ogg", "*.opus", "*.wma",
+    "*.mp4", "*.mkv", "*.avi", "*.mov", "*.webm",
+]
+
+
+def _both_cases(patterns: list[str]) -> str:
+    # Qt's own (non-native) file dialog on Linux matches name filters case-sensitively,
+    # so "*.mp3" alone hid SONG.MP3.
+    return " ".join(patterns + [p.upper() for p in patterns])
+
+
 STARTUP_MEDIA_FILTER = (
-    "Playlists (*.m3u *.m3u8);;"
-    "Media files (*.mp3 *.wav *.flac *.m4a *.aac *.ogg *.wma *.mp4 *.mkv *.avi *.mov *.webm);;"
-    "All files (*.*)"
+    f"Playlists ({_both_cases(_PLAYLIST_PATTERNS)});;"
+    f"Media files ({_both_cases(_MEDIA_PATTERNS)});;"
+    "All files (*)"
 )
 
 
 def default_data_dir() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".local" / "share")
-    return Path(base) / "VLCBookmarkStudio" / "data"
+    """Windows: %LOCALAPPDATA%\\VLCBookmarkStudio\\data; Linux/WSL:
+    ~/.local/share/VLCBookmarkStudio/data (honouring $XDG_DATA_HOME)."""
+    return platform_support.user_data_dir() / "data"
 
 
 def default_database_path() -> Path:
@@ -38,22 +51,13 @@ def default_database_path() -> Path:
 
 
 def find_vlc_path(settings: SettingsService) -> str | None:
-    """spec #178 'discover VLC': a saved path first, then well-known install locations."""
-    saved = settings.vlc_path()
-    if saved and Path(saved).exists():
-        return saved
+    """spec #178 'discover VLC': a saved path first, then the platform's usual install
+    locations (see platform_support.vlc_candidates)."""
+    return platform_support.find_vlc(settings.vlc_path())
 
-    on_path = shutil.which("vlc")
-    if on_path:
-        return on_path
 
-    for candidate in (
-        r"C:\Program Files\VideoLAN\VLC\vlc.exe",
-        r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
-    ):
-        if Path(candidate).exists():
-            return candidate
-    return None
+def find_ffmpeg_path(settings: SettingsService) -> str | None:
+    return platform_support.find_ffmpeg(settings.ffmpeg_path())
 
 
 def probe_bridge(host: str, port: int, password: str, *, timeout_s: float = 1.0) -> bool:
@@ -63,7 +67,7 @@ def probe_bridge(host: str, port: int, password: str, *, timeout_s: float = 1.0)
     VLC's built-in HTTP interface, not the custom Lua bridge -- see vlc_launcher.py's
     module docstring for why that's the reliable default now.
     """
-    adapter = StandardHttpPlaybackAdapter(host, port, password)
+    adapter = StandardHttpPlaybackAdapter(host, port, password, timeout_scale=max(0.1, timeout_s / 0.5))
     try:
         adapter.connect()
         return True
@@ -88,68 +92,69 @@ def build_main_window(bookmark_repository: BookmarkRepository) -> MainWindow:
 def select_playback_adapter(settings: SettingsService) -> tuple[PlaybackAdapter, str | None]:
     """spec #178 'probe enhanced bridge -> fallback probe -> connected? / offline mode'.
 
-    Returns (adapter, vlc_path). Whenever VLC is found at all, this returns a
-    StandardHttpPlaybackAdapter (VLC's built-in HTTP interface, spec #28) -- not the
-    custom Lua bridge spec #196 named as primary. See vlc_launcher.py's module
-    docstring for why: the Lua bridge leaks a socket on every request and degrades a
-    real session to fully unresponsive within minutes, confirmed live; the built-in
-    interface, also confirmed live (100 requests over ~45s of realistic polling),
-    leaks nothing.
-
-    This does NOT gate the choice on a one-shot probe_bridge() success/failure. VLC's
-    HTTP interface takes a little while to finish loading after the VLC process
-    starts, and Application's own per-tick polling already tolerates a not-yet-
-    reachable adapter gracefully (spec #104) -- each failed poll is logged and
-    skipped, not fatal -- so it self-heals automatically once the interface comes up.
-    Only fall back to Mock when VLC itself isn't installed/found at all, since there
-    is then nothing to ever reconnect to.
-
-    probe_bridge() is kept and still used by bootstrap.main() purely for an
-    informative startup log line, not for this decision.
+    Returns (adapter, vlc_path): a StandardHttpPlaybackAdapter (VLC's built-in HTTP
+    interface, spec #28) whenever VLC is installed -- not the custom Lua bridge, which
+    leaks a socket per request (see vlc_launcher.py). Not gated on a one-shot probe:
+    VLC's HTTP interface takes a moment to come up, and the polling loop self-heals.
+    Mock only when VLC isn't installed at all. (main() currently starts with a Mock and
+    lets the launch/attach dialog pick the real instance; this remains for callers that
+    want a direct adapter.)
     """
     vlc_path = find_vlc_path(settings)
     if vlc_path is not None:
-        return StandardHttpPlaybackAdapter("127.0.0.1", settings.bridge_port(), settings.bridge_token()), vlc_path
+        _bind_host, connect_host = platform_support.vlc_http_hosts(vlc_path)
+        return StandardHttpPlaybackAdapter(connect_host, settings.bridge_port(), settings.bridge_token()), vlc_path
     return MockPlaybackAdapter([]), vlc_path
 
 
 def main(argv: list[str] | None = None) -> int:
     """Follows spec #178's sequence: settings -> DB -> UI -> VLC discovery -> connect
     or fall back to offline mode (spec #104) -- never crash just because VLC isn't
-    running or the bridge isn't installed.
+    running or ffmpeg isn't installed.
 
     Starts the UI with a placeholder Mock adapter, then immediately runs the same
-    launch/attach picker the "Launch VLC..." button uses later (Application.
-    prompt_vlc_launch_dialog) -- one code path for both the first-run flow and any
-    later re-launch, per the user's explicit ask for a dropdown of already-open VLC
-    instances as an alternative to browsing for a playlist and launching a fresh one.
+    launch/attach picker the "Launch VLC..." button uses later.
     """
     configure_logging()
     log = get_logger("APP")
+    log.info("VLC Bookmark Studio %s on %s (WSL: %s)", __version__, sys.platform, platform_support.is_wsl())
 
     qt_app = QApplication(argv if argv is not None else sys.argv)
+    qt_app.setApplicationName("VLC Bookmark Studio")
+    qt_app.setApplicationVersion(__version__)
     settings = SettingsService()
 
     conn = open_database()
     vlc_path = find_vlc_path(settings)
     log.info("VLC path: %s", vlc_path)
+    ffmpeg_path = find_ffmpeg_path(settings)
+    if ffmpeg_path is None:
+        log.warning("ffmpeg not found; waveforms will be unavailable until it is installed")
+    log.info("ffmpeg path: %s", ffmpeg_path)
 
-    ffmpeg_path = shutil.which("ffmpeg") or "ffmpeg"
     application = Application(
         conn=conn,
         adapter=MockPlaybackAdapter([]),
-        ffmpeg_path=ffmpeg_path,
-        waveform_cache_dir=default_data_dir().parent / "waveforms",
+        ffmpeg_path=ffmpeg_path or "ffmpeg",
+        waveform_cache_dir=platform_support.user_data_dir() / "waveforms",
         settings=settings,
         vlc_path=vlc_path,
     )
+    # Application.stop() existed but was never called: a VLC this app launched kept
+    # running after the app closed, and worker threads were abandoned mid-request.
+    qt_app.aboutToQuit.connect(application.stop)
     application.start()
     if vlc_path is not None:
         application.prompt_vlc_launch_dialog()
     else:
         log.info("VLC not found; starting in offline mode")
 
-    return qt_app.exec()
+    try:
+        return qt_app.exec()
+    finally:
+        application.stop()
+        settings.sync()
+        conn.close()
 
 
 if __name__ == "__main__":

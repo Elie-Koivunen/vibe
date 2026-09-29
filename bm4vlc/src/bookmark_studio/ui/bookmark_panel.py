@@ -41,10 +41,21 @@ _MS_CHOICES = [0, 100, 250, 500, 1000, 1500, 2000, 3000, 5000]
 
 
 def _loop_label(loop_enabled: bool, repeat_count: int | None) -> str:
-    for label, enabled, count in _LOOP_CHOICES:
-        if enabled == loop_enabled and count == repeat_count:
-            return label
-    return "Off"
+    """Any repeat count gets a label (the old lookup showed e.g. ×4 as "Off")."""
+    if not loop_enabled:
+        return "Off"
+    return "∞" if repeat_count is None else f"×{repeat_count}"
+
+
+def _loop_from_label(label: str) -> tuple[bool, int | None] | None:
+    label = label.strip()
+    if label == "Off":
+        return False, None
+    if label == "∞":
+        return True, None
+    if label.startswith("×") and label[1:].isdigit() and int(label[1:]) >= 1:
+        return True, int(label[1:])
+    return None
 
 
 def _ms_label(value_ms: int) -> str:
@@ -52,9 +63,10 @@ def _ms_label(value_ms: int) -> str:
 
 
 def _ms_from_label(label: str) -> int:
-    for ms in _MS_CHOICES:
-        if _ms_label(ms) == label:
-            return ms
+    """Parses any "<N> ms" label, not just the preset ones."""
+    text = label.strip()
+    if text.endswith(" ms") and text[:-3].strip().isdigit():
+        return int(text[:-3].strip())
     return 0
 
 
@@ -81,15 +93,23 @@ class _ComboColumnDelegate(QStyledItemDelegate):
         if not isinstance(editor, QComboBox):
             super().setEditorData(editor, index)
             return
-        position = editor.findText(index.data(Qt.DisplayRole))
-        editor.setCurrentIndex(position if position >= 0 else 0)
+        current = index.data(Qt.DisplayRole) or ""
+        position = editor.findText(current)
+        if position < 0 and current:
+            # A value set elsewhere (e.g. a 750 ms gap from the Inspector) that isn't one
+            # of the presets. Offer it too, selected -- previously the combo fell back to
+            # the first entry ("Off"), and merely clicking away saved "Off" over it.
+            editor.insertItem(1, current)
+            position = 1
+        editor.setCurrentIndex(max(position, 0))
         editor.showPopup()  # opens immediately -- "clicking would give a drop menu"
 
     def setModelData(self, editor, model, index) -> None:  # noqa: N802 - Qt override
         if not isinstance(editor, QComboBox):
             super().setModelData(editor, model, index)
             return
-        model.setData(index, editor.currentText(), Qt.EditRole)
+        if editor.currentText() != (index.data(Qt.DisplayRole) or ""):
+            model.setData(index, editor.currentText(), Qt.EditRole)
 
 
 class BookmarkPanel(QWidget):
@@ -110,6 +130,9 @@ class BookmarkPanel(QWidget):
         super().__init__(parent)
         self._bookmarks: dict[UUID, Bookmark] = {}
         self._song_names: dict[UUID, str] = {}
+        self._bookmark_order: list[Bookmark] = []
+        self._shown_names: dict[UUID, str] = {}
+        self._restoring = False
         layout = QVBoxLayout(self)
 
         toolbar = QHBoxLayout()
@@ -283,10 +306,9 @@ class BookmarkPanel(QWidget):
                 # an invalid Start/End edit.
                 item.setText(LOOP_COLUMN, _loop_label(bookmark.loop_enabled, bookmark.repeat_count))
                 return
-            for label, enabled, count in _LOOP_CHOICES:
-                if label == item.text(LOOP_COLUMN):
-                    self.loop_edited.emit(bookmark_id, enabled, count)
-                    return
+            parsed = _loop_from_label(item.text(LOOP_COLUMN))
+            if parsed is not None and parsed != (bookmark.loop_enabled, bookmark.repeat_count):
+                self.loop_edited.emit(bookmark_id, parsed[0], parsed[1])
         elif column == GAP_COLUMN:
             self.gap_edited.emit(bookmark_id, _ms_from_label(item.text(GAP_COLUMN)))
         elif column == FADE_IN_COLUMN:
@@ -329,34 +351,59 @@ class BookmarkPanel(QWidget):
         via BookmarkRepository.list_for_playlist) is responsible for ordering, so a
         manual reorder (see _move_selected/reorder_requested) actually sticks instead
         of being immediately re-sorted away by this panel re-deriving its own order.
+
+        A refresh that changes nothing is a no-op. Every rebuild used to re-select the
+        previous rows, which re-emitted bookmark_selected: the Inspector reloaded
+        (wiping half-typed text), the view jumped back to that bookmark's song, and
+        column widths were reset -- on every ~2s playlist poll.
         """
+        song_names = dict(song_names or {})
+        shown_names = {b.media_id: song_names.get(b.media_id, "") for b in bookmarks}
+        if list(bookmarks) == self._bookmark_order and shown_names == self._shown_names:
+            return
         previously_selected = set(self._selected_bookmark_ids())
+        current_ids = [b.id for b in bookmarks]
+        refit_columns = current_ids != [b.id for b in self._bookmark_order] or shown_names != self._shown_names
+        scroll_value = self._tree.verticalScrollBar().value()
+
         self._bookmarks = {b.id: b for b in bookmarks}
-        self._song_names = song_names or {}
-        self._tree.clear()
-        for bookmark in bookmarks:
-            row = QTreeWidgetItem(
-                [
-                    self._song_names.get(bookmark.media_id, ""),
-                    bookmark.name,
-                    format_timecode(bookmark.start_us),
-                    format_timecode(bookmark.end_us) if bookmark.end_us is not None else "",
-                    _loop_label(bookmark.loop_enabled, bookmark.repeat_count),
-                    _ms_label(bookmark.loop_gap_ms),
-                    _ms_label(bookmark.fade_in_ms),
-                    _ms_label(bookmark.fade_out_ms),
-                ]
-            )
-            row.setData(0, USER_ROLE, bookmark.id)
-            self._tree.addTopLevelItem(row)
-        # Direct user request: "have the columns resize automatically to the length
-        # of the strings" -- columns stay Interactive (still manually resizable
-        # after this), but every rebuild re-fits each one to its current content so
-        # truncated song/name text isn't the default state.
-        for column in range(len(COLUMNS)):
-            self._tree.resizeColumnToContents(column)
-        if previously_selected:
-            self.select_bookmarks(previously_selected)
+        self._bookmark_order = list(bookmarks)
+        self._song_names = song_names
+        self._shown_names = shown_names
+        self._restoring = True
+        try:
+            self._tree.clear()
+            for bookmark in bookmarks:
+                row = QTreeWidgetItem(
+                    [
+                        shown_names.get(bookmark.media_id, ""),
+                        bookmark.name,
+                        format_timecode(bookmark.start_us),
+                        format_timecode(bookmark.end_us) if bookmark.end_us is not None else "",
+                        _loop_label(bookmark.loop_enabled, bookmark.repeat_count),
+                        _ms_label(bookmark.loop_gap_ms),
+                        _ms_label(bookmark.fade_in_ms),
+                        _ms_label(bookmark.fade_out_ms),
+                    ]
+                )
+                row.setData(0, USER_ROLE, bookmark.id)
+                # Without ItemIsEditable, Qt never opens the Loop/Gap/Fade dropdown
+                # editors at all -- QTreeWidgetItem isn't editable by default.
+                row.setFlags(row.flags() | Qt.ItemIsEditable)
+                self._tree.addTopLevelItem(row)
+            # Direct user request: "have the columns resize automatically to the length
+            # of the strings" -- only when the rows actually changed, so a manual column
+            # width survives ordinary refreshes.
+            if refit_columns:
+                for column in range(len(COLUMNS)):
+                    self._tree.resizeColumnToContents(column)
+            if previously_selected:
+                self.select_bookmarks(previously_selected)
+            self._tree.verticalScrollBar().setValue(scroll_value)
+        finally:
+            self._restoring = False
+        self._update_buttons_for_selection()
+
 
     def select_bookmark(self, bookmark_id: UUID) -> None:
         self.select_bookmarks({bookmark_id})
@@ -367,9 +414,16 @@ class BookmarkPanel(QWidget):
             row.setSelected(row.data(0, USER_ROLE) in bookmark_ids)
 
     def _on_selection_changed(self) -> None:
+        if self._restoring:
+            return  # re-selecting after a refresh is not a user selection
         ids = self._selected_bookmark_ids()
         if len(ids) == 1:
             self.bookmark_selected.emit(ids[0])
+        self._update_buttons_for_selection()
+
+    def _update_buttons_for_selection(self) -> None:
+        ids = self._selected_bookmark_ids()
+        if len(ids) == 1:
             bookmark = self._bookmarks.get(ids[0])
             self._set_playback_buttons_enabled(1, allow_loop=bookmark is not None and bookmark.end_us is not None)
         else:

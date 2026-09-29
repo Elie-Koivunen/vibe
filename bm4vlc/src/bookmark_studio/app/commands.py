@@ -20,6 +20,8 @@ from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
 # they target the same bookmark before actually merging.
 _ID_MOVE = 1
 _ID_RESIZE = 2
+_ID_LOOP = 3
+_ID_FIELDS = 4
 
 
 class CreateBookmarkCommand(QUndoCommand):
@@ -177,6 +179,17 @@ class ChangeLoopCommand(QUndoCommand):
     def undo(self) -> None:
         self._apply(self._old)
 
+    def id(self) -> int:  # noqa: A003
+        return _ID_LOOP
+
+    def mergeWith(self, other: QUndoCommand) -> bool:  # noqa: N802
+        """Consecutive loop-setting edits to one bookmark (e.g. every arrow-key step in
+        the Gap spinbox) collapse into a single undo step."""
+        if not isinstance(other, ChangeLoopCommand) or other._bookmark_id != self._bookmark_id:
+            return False
+        self._new = other._new
+        return True
+
     def _apply(self, values: tuple[bool, int | None, int, CompletionAction, int, int]) -> None:
         bookmark = self._repository.get(self._bookmark_id)
         if bookmark is None:
@@ -193,6 +206,47 @@ class ChangeLoopCommand(QUndoCommand):
                 fade_out_ms=fade_out_ms,
             )
         )
+
+
+class EditBookmarkFieldsCommand(QUndoCommand):
+    """Sets arbitrary Bookmark fields (e.g. tags, notes). `old`/`new` map field name ->
+    value. Consecutive edits of the same fields on the same bookmark merge into one
+    undo step (typing notes shouldn't create one step per commit)."""
+
+    def __init__(self, repository: BookmarkRepository, bookmark_id: UUID, text: str,
+                 *, old: dict[str, object], new: dict[str, object]) -> None:
+        super().__init__(text)
+        if set(old) != set(new):
+            raise ValueError("old and new must name the same fields")
+        self._repository = repository
+        self._bookmark_id = bookmark_id
+        self._old = dict(old)
+        self._new = dict(new)
+
+    def id(self) -> int:  # noqa: A003
+        return _ID_FIELDS
+
+    def mergeWith(self, other: QUndoCommand) -> bool:  # noqa: N802
+        if (
+            not isinstance(other, EditBookmarkFieldsCommand)
+            or other._bookmark_id != self._bookmark_id
+            or set(other._new) != set(self._new)
+        ):
+            return False
+        self._new = dict(other._new)
+        return True
+
+    def redo(self) -> None:
+        self._apply(self._new)
+
+    def undo(self) -> None:
+        self._apply(self._old)
+
+    def _apply(self, values: dict[str, object]) -> None:
+        bookmark = self._repository.get(self._bookmark_id)
+        if bookmark is None:
+            return
+        self._repository.update(replace(bookmark, **values))
 
 
 class MoveBookmarkLaneCommand(QUndoCommand):

@@ -1,9 +1,7 @@
 """VLC playlist sidebar: filter, bookmark-count column, Follow VLC mode (spec #145-#148)."""
 from __future__ import annotations
 
-from uuid import UUID
-
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QSignalBlocker, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QCheckBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -158,13 +156,22 @@ class PlaylistPanel(QWidget):
             self._connection_label.setText("● Offline")
             self._connection_label.setStyleSheet("color: #a33;")
 
-    def set_follow_vlc(self, enabled: bool) -> None:
+    def set_follow_vlc(self, enabled: bool, *, notify: bool = True) -> None:
         """Programmatic version of the checkbox -- used when previewing a different,
         not-currently-playing song single-clicks the checkbox off (see
         Application._on_playlist_item_selected) so live playback progression doesn't
         yank the waveform view away from what the user just chose to look at.
+
+        notify=False changes the box without emitting follow_vlc_toggled: for callers
+        that are about to switch the displayed song themselves, where the toggle
+        handler's own "snap back to the playing song" would load the wrong song first.
         """
-        self._follow_checkbox.setChecked(enabled)
+        blocker = QSignalBlocker(self._follow_checkbox) if not notify else None
+        try:
+            self._follow_checkbox.setChecked(enabled)
+        finally:
+            if blocker is not None:
+                blocker.unblock()
 
     def follow_vlc_enabled(self) -> bool:
         return self._follow_checkbox.isChecked()
@@ -217,8 +224,9 @@ def _set_row_playing(row: QTreeWidgetItem, is_current: bool, is_playing: bool) -
 
 
 def _format_duration(duration_s: float | None) -> str:
-    if duration_s is None:
+    if duration_s is None or duration_s <= 0:  # VLC reports -1 for "not parsed yet"
         return ""
     total = int(duration_s)
-    minutes, seconds = divmod(total, 60)
-    return f"{minutes}:{seconds:02d}"
+    hours, rest = divmod(total, 3600)
+    minutes, seconds = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"

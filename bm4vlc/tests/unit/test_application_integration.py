@@ -354,7 +354,7 @@ def test_play_bookmark_requested_loops_when_the_bookmark_is_loop_enabled(qtbot, 
 
     app._on_play_bookmark_requested(bookmark.id)
 
-    assert app._loop_controller.state is LoopState.PLAYING
+    qtbot.waitUntil(lambda: app._loop_controller.state is LoopState.PLAYING, timeout=3000)
     assert app._loop_controller.spec.start_us == 1_000_000
     assert app._loop_controller.spec.end_us == 1_300_000
 
@@ -362,7 +362,7 @@ def test_play_bookmark_requested_loops_when_the_bookmark_is_loop_enabled(qtbot, 
     # LoopController's own precision boundary timer -- proven by iteration_changed
     # actually firing -- not just keep playing forward into the rest of the song.
     qtbot.waitUntil(lambda: len(iterations) >= 1, timeout=2000)
-    assert app._loop_controller.state is LoopState.PLAYING
+    qtbot.waitUntil(lambda: app._loop_controller.state is LoopState.PLAYING, timeout=3000)
 
 
 def test_play_bookmark_requested_does_not_loop_when_loop_disabled(qtbot, running_app) -> None:
@@ -463,7 +463,7 @@ def test_loop_bookmark_requested_switches_song_when_bookmark_belongs_to_a_differ
 
     app._on_loop_bookmark_requested(bookmark.id)
 
-    assert adapter.get_status().current_playlist_item_id == 2
+    qtbot.waitUntil(lambda: adapter.get_status().current_playlist_item_id == 2, timeout=3000)
     assert app._loop_controller.spec.start_us == 20_000_000
     assert app._loop_controller.spec.end_us == 30_000_000
 
@@ -593,7 +593,7 @@ def test_double_click_playlist_item_plays_it_and_the_view_follows(qtbot, running
     app._on_playlist_item_double_clicked(2)
 
     qtbot.waitUntil(lambda: adapter.get_status().state == "playing", timeout=3000)
-    assert adapter.get_status().current_playlist_item_id == 2
+    qtbot.waitUntil(lambda: adapter.get_status().current_playlist_item_id == 2, timeout=3000)
     assert app.window._playlist_panel.follow_vlc_enabled() is True
     qtbot.waitUntil(lambda: app._actually_playing_vlc_item_id == 2, timeout=3000)
     qtbot.waitUntil(lambda: app._current_vlc_item_id == 2, timeout=3000)
@@ -625,7 +625,7 @@ def test_double_click_playlist_item_stops_any_active_bookmark_loop(qtbot, runnin
         LoopSpec(start_us=1_000_000, end_us=2_000_000, repeat_count=None, gap_ms=0,
                  completion_action=CompletionAction.CONTINUE)
     )
-    assert app._loop_controller.state is LoopState.PLAYING
+    qtbot.waitUntil(lambda: app._loop_controller.state is LoopState.PLAYING, timeout=3000)
 
     app._on_playlist_item_double_clicked(2)
 
@@ -678,15 +678,15 @@ def test_dragging_selection_edge_while_looping_it_updates_the_active_loop(qtbot,
 
     app.window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=2_000_000))
     app._on_loop_selection_requested(1_000_000, 2_000_000)
-    assert app._loop_controller.state is LoopState.PLAYING
+    qtbot.waitUntil(lambda: app._loop_controller.state is LoopState.PLAYING, timeout=3000)
     assert app._loop_controller.spec.start_us == 1_000_000
 
     # Simulates SelectionItem.resize_finished settling a drag of the right edge.
     app.window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=3_000_000))
 
-    assert app._loop_controller.state is LoopState.PLAYING
+    qtbot.waitUntil(lambda: app._loop_controller.state is LoopState.PLAYING, timeout=3000)
     assert app._loop_controller.spec.end_us == 3_000_000  # picked up the new bound
-    assert adapter.get_status().time_us == 1_000_000  # reseeked to (unchanged) start
+    qtbot.waitUntil(lambda: adapter.get_status().time_us == 1_000_000, timeout=3000)  # reseeked to (unchanged) start
 
 
 def test_adjusting_selection_when_not_looping_it_does_not_touch_the_loop_controller(qtbot, running_app) -> None:
@@ -721,7 +721,7 @@ def test_clearing_the_selection_while_looping_it_stops_the_loop(qtbot, running_a
 
     app.window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=2_000_000))
     app._on_loop_selection_requested(1_000_000, 2_000_000)
-    assert app._loop_controller.state is LoopState.PLAYING
+    qtbot.waitUntil(lambda: app._loop_controller.state is LoopState.PLAYING, timeout=3000)
 
     app.window._waveform_scene.clear_selection()
 
@@ -746,7 +746,7 @@ def test_pausing_via_transport_button_stops_a_running_loop(qtbot, running_app) -
     qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
 
     app._on_loop_selection_requested(1_000_000, 2_000_000)
-    assert app._loop_controller.state is LoopState.PLAYING
+    qtbot.waitUntil(lambda: app._loop_controller.state is LoopState.PLAYING, timeout=3000)
     app._last_playback_state = "playing"  # what the button handler checks
 
     app.window._transport.play_pause_clicked.emit()
@@ -765,7 +765,7 @@ def test_stopping_via_transport_button_stops_a_running_loop(qtbot, running_app) 
     qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
 
     app._on_loop_selection_requested(1_000_000, 2_000_000)
-    assert app._loop_controller.state is LoopState.PLAYING
+    qtbot.waitUntil(lambda: app._loop_controller.state is LoopState.PLAYING, timeout=3000)
 
     app.window._transport.stop_clicked.emit()
 
@@ -794,7 +794,7 @@ def test_status_polls_with_transient_non_playing_states_never_stop_an_ordinary_l
     qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
 
     app._on_loop_selection_requested(1_000_000, 3_000_000)
-    assert app._loop_controller.state is LoopState.PLAYING
+    qtbot.waitUntil(lambda: app._loop_controller.state is LoopState.PLAYING, timeout=3000)
 
     blip = PlaybackStatus(
         state="opening", time_us=1_500_000, position=0.15, rate=1.0,
@@ -802,7 +802,7 @@ def test_status_polls_with_transient_non_playing_states_never_stop_an_ordinary_l
     )
     for _ in range(5):  # well past the two-poll debounce the old, now-removed logic used
         app._on_status_result(blip)
-    assert app._loop_controller.state is LoopState.PLAYING
+    qtbot.waitUntil(lambda: app._loop_controller.state is LoopState.PLAYING, timeout=3000)
 
 
 def test_selecting_a_bookmark_switches_the_waveform_to_its_song_without_playing(qtbot, running_app) -> None:
@@ -959,7 +959,6 @@ def test_swap_adapter_retargets_session_at_a_new_instance(qtbot, running_app) ->
     app._swap_adapter(new_adapter, mute_on_connect=True, new_vlc_process=None)
 
     assert app._adapter is new_adapter
-    assert new_adapter.connected is True
     assert old_adapter.connected is False
     assert app._loop_controller._adapter is new_adapter
     assert app._mute_pending is True
@@ -971,6 +970,7 @@ def test_swap_adapter_retargets_session_at_a_new_instance(qtbot, running_app) ->
     # ("VLC restarted, spec #105") but was never called anywhere.
     assert app._synchronizer.active_playlist_id is None
 
+    qtbot.waitUntil(lambda: new_adapter.connected is True, timeout=3000)  # connect is queued off the UI thread
     qtbot.waitUntil(lambda: new_adapter._volume == 0, timeout=3000)
 
 

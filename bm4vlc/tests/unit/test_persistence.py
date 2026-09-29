@@ -13,7 +13,7 @@ from bookmark_studio.domain.media import Media
 from bookmark_studio.domain.playlist import Playlist
 from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
 from bookmark_studio.persistence.media_repository import MediaRepository
-from bookmark_studio.persistence.migrations import current_version, migrate
+from bookmark_studio.persistence.migrations import current_version, discover_migrations, migrate
 from bookmark_studio.persistence.playlist_repository import PlaylistRepository
 from bookmark_studio.persistence.waveform_repository import WaveformCacheEntry, WaveformCacheRepository
 
@@ -27,9 +27,11 @@ def conn() -> sqlite3.Connection:
 
 
 def test_migrate_applies_schema_and_is_idempotent(conn: sqlite3.Connection) -> None:
-    assert current_version(conn) == 3
+    latest = discover_migrations()[-1][0]
+    assert latest >= 4  # 004_waveform_duration.sql
+    assert current_version(conn) == latest
     # Re-running must not error and must not reapply.
-    assert migrate(conn) == 3
+    assert migrate(conn) == latest
     tables = {
         row[0]
         for row in conn.execute(

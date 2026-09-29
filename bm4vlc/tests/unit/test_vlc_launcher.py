@@ -68,6 +68,10 @@ def test_find_free_http_port_skips_a_port_already_in_use() -> None:
 def test_has_unmanaged_vlc_process_true_when_tasklist_lists_vlc(monkeypatch) -> None:
     import subprocess as subprocess_module
 
+    from bookmark_studio import platform_support
+
+    monkeypatch.setattr(platform_support, "IS_WINDOWS", True)  # the tasklist code path
+
     class _FakeResult:
         stdout = 'Image Name  PID  \n========  ===  \nvlc.exe   1234  \n'
 
@@ -77,6 +81,10 @@ def test_has_unmanaged_vlc_process_true_when_tasklist_lists_vlc(monkeypatch) -> 
 
 def test_has_unmanaged_vlc_process_false_when_tasklist_finds_nothing(monkeypatch) -> None:
     import subprocess as subprocess_module
+
+    from bookmark_studio import platform_support
+
+    monkeypatch.setattr(platform_support, "IS_WINDOWS", True)  # the tasklist code path
 
     class _FakeResult:
         stdout = "INFO: No tasks are running which match the specified criteria.\n"

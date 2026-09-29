@@ -1,0 +1,338 @@
+"""Live tests against a real, locally installed VLC (headless, silent audio output).
+
+Opt in with BM4VLC_LIVE_VLC=1. Each test launches its own VLC on a free port with
+``-I dummy --aout=adummy`` (no window, no sound) and closes it afterwards. Works on
+Windows, Linux, and in WSL (where it drives the Windows vlc.exe through interop when no
+Linux VLC is installed).
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import threading
+import time
+import wave
+from pathlib import Path
+from uuid import uuid4
+
+import numpy as np
+import pytest
+
+from bookmark_studio import platform_support as ps
+from bookmark_studio.app.vlc_launcher import find_free_http_port, launch_managed_vlc
+from bookmark_studio.domain.enums import CompletionAction, LoopState
+from bookmark_studio.domain.loop import LoopSpec
+from bookmark_studio.playback.http_fallback import StandardHttpPlaybackAdapter
+
+pytestmark = [
+    pytest.mark.live_vlc,
+    pytest.mark.skipif(os.environ.get("BM4VLC_LIVE_VLC") != "1", reason="set BM4VLC_LIVE_VLC=1 to run live VLC tests"),
+]
+
+PASSWORD = "bm4vlc-live-test"
+LUA_TOKEN = "bm4vlc-lua-live-test"
+SONG_SECONDS = (12.3, 20.7)  # deliberately not whole seconds
+
+
+def _vlc() -> str:
+    path = os.environ.get("BM4VLC_VLC") or ps.find_vlc()
+    if not path:
+        pytest.skip("VLC is not installed")
+    return path
+
+
+def _headless_args(vlc: str) -> list[str]:
+    args = ["-I", "dummy", "--aout=adummy", "--no-video"]
+    if ps.is_windows_executable(vlc):
+        args.append("--dummy-quiet")  # Windows-only option: no console window for the dummy interface
+    return args
+
+
+def _write_song(path: Path, seconds: float, frequency: float) -> Path:
+    rate = 22050
+    n = int(seconds * rate)
+    samples = (np.sin(2 * np.pi * frequency * np.arange(n) / rate) * 0.2 * 32767).astype(np.int16)
+    with wave.open(str(path), "w") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(rate)
+        f.writeframes(samples.tobytes())
+    return path
+
+
+def _wait(predicate, timeout: float = 10.0, interval: float = 0.1):
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            value = predicate()
+            if value:
+                return value
+        except Exception as exc:  # noqa: BLE001 - VLC still starting
+            last_error = exc
+        time.sleep(interval)
+    raise AssertionError(f"condition not met within {timeout}s (last error: {last_error})")
+
+
+class LiveVlc:
+    def __init__(self, tmp_path: Path, *, lua_intf: str | None = None, env: dict | None = None,
+                 extra_args: list[str] | None = None) -> None:
+        self.vlc = _vlc()
+        self.songs = [
+            _write_song(tmp_path / "song one.wav", SONG_SECONDS[0], 330.0),
+            _write_song(tmp_path / "song two.wav", SONG_SECONDS[1], 550.0),
+        ]
+        bind_host, self.host = ps.vlc_http_hosts(self.vlc)
+        windows_vlc_from_wsl = ps.is_wsl() and ps.is_windows_executable(self.vlc)
+        self.port = find_free_http_port(
+            47_300 + (os.getpid() % 500), connect_host=self.host,
+            bind_host=None if windows_vlc_from_wsl else bind_host,
+        )
+        old_env = {}
+        for key, value in (env or {}).items():
+            old_env[key] = os.environ.get(key)
+            os.environ[key] = value
+        try:
+            if lua_intf is None:
+                self.process = launch_managed_vlc(
+                    self.vlc, [str(s) for s in self.songs], http_port=self.port, http_password=PASSWORD,
+                    http_host=bind_host, extra_args=_headless_args(self.vlc) + list(extra_args or []),
+                )
+            else:
+                from bookmark_studio.app.vlc_launcher import launch_managed_vlc_with_lua_bridge
+
+                self.process = launch_managed_vlc_with_lua_bridge(
+                    self.vlc, [str(s) for s in self.songs], http_port=self.port, token=LUA_TOKEN, lua_intf=lua_intf,
+                    http_host=bind_host, extra_args=_headless_args(self.vlc) + list(extra_args or []),
+                )
+        finally:
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def adapter(self) -> StandardHttpPlaybackAdapter:
+        adapter = StandardHttpPlaybackAdapter(self.host, self.port, PASSWORD)
+        _wait(lambda: adapter.connect() or True, timeout=15)
+        return adapter
+
+    def close(self) -> None:
+        from bookmark_studio.app.vlc_launcher import terminate_managed_vlc
+
+        # Also reaches the Windows vlc.exe when driven from WSL (see terminate_managed_vlc).
+        terminate_managed_vlc(self.process, self.vlc, self.port)
+
+
+@pytest.fixture()
+def live(tmp_path):
+    vlc = LiveVlc(tmp_path)
+    yield vlc
+    vlc.close()
+
+
+def _playlist_ready(adapter):
+    items = adapter.get_playlist()
+    return items if len(items) == 2 and all(i.duration_s for i in items) else None
+
+
+def test_live_switch_song_and_seek_precisely(live) -> None:
+    adapter = live.adapter()
+    items = _wait(lambda: _playlist_ready(adapter), timeout=15)
+    assert all(i.duration_s and i.duration_s > 0 for i in items)
+
+    second = items[1]
+    adapter.goto_item(second.vlc_id)  # waits until VLC has actually switched
+    assert adapter.get_status().current_playlist_item_id == second.vlc_id
+    adapter.pause()
+    _wait(lambda: adapter.get_status().state == "paused", timeout=5)
+
+    # VLC reports whole seconds (20 for a 20.7 s file); percent seeks computed from that
+    # land late. With the exact decoded length they land where asked.
+    adapter.set_exact_duration(second.vlc_id, int(SONG_SECONDS[1] * 1_000_000))
+    adapter.seek_absolute_us(18_000_000)
+    time.sleep(0.5)
+    position = float(adapter._status_json()["position"])
+    assert abs(position * SONG_SECONDS[1] - 18.0) < 0.15
+    status = adapter.get_status()
+    assert abs(status.time_us - 18_000_000) < 150_000
+
+
+def test_live_loop_with_gap_fade_and_completion(live, qtbot) -> None:
+    from bookmark_studio.playback.command_queue import ThreadedCommandQueue
+    from bookmark_studio.playback.loop_controller import LoopController
+    from bookmark_studio.playback.playback_clock import PlaybackClock
+
+    adapter = live.adapter()
+    items = _wait(lambda: _playlist_ready(adapter), timeout=15)
+    adapter.set_exact_duration(items[0].vlc_id, int(SONG_SECONDS[0] * 1_000_000))
+    # The silent dummy audio output has no volume control (VLC reports 0 whatever is
+    # set), so check the volume commands this app sends instead of VLC's readback.
+    volumes_sent: list[int] = []
+    real_set_volume = adapter.set_volume
+
+    def recording_set_volume(level: int) -> None:
+        volumes_sent.append(level)
+        real_set_volume(level)
+
+    adapter.set_volume = recording_set_volume  # type: ignore[method-assign]
+    queue = ThreadedCommandQueue()
+    controller = LoopController(adapter, PlaybackClock(), executor=queue)
+    controller.set_target_volume(200)
+    iterations, completions, gaps = [], [], []
+    controller.iteration_changed.connect(lambda r: iterations.append(r))
+    controller.loop_completed.connect(lambda a: completions.append(a))
+    controller.gap_started.connect(lambda ms: gaps.append(ms))
+
+    samples: list[tuple[str, int]] = []
+    stop_sampling = threading.Event()
+    sampler_adapter = StandardHttpPlaybackAdapter(live.host, live.port, PASSWORD)
+    sampler_adapter.set_exact_duration(items[0].vlc_id, int(SONG_SECONDS[0] * 1_000_000))
+
+    def sample() -> None:
+        while not stop_sampling.is_set():
+            try:
+                status = sampler_adapter.get_status()
+                samples.append((status.state, status.time_us))
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.05)
+
+    sampler = threading.Thread(target=sample, daemon=True)
+    first_id = items[0].vlc_id
+    controller.start(
+        LoopSpec(start_us=2_000_000, end_us=2_800_000, repeat_count=3, gap_ms=300,
+                 completion_action=CompletionAction.PAUSE, fade_out_ms=200),
+        before=lambda: adapter.goto_item(first_id),
+    )
+    qtbot.waitUntil(lambda: controller.state is LoopState.PLAYING, timeout=5000)
+    sampler.start()
+    qtbot.waitUntil(lambda: completions == [CompletionAction.PAUSE], timeout=15000)
+    stop_sampling.set()
+    sampler.join(timeout=2)
+
+    assert len(iterations) == 2 and len(gaps) == 2  # 3 passes: 2 restarts, each after a gap
+    qtbot.waitUntil(lambda: adapter.get_status().state == "paused", timeout=3000)
+    qtbot.waitUntil(lambda: queue.is_idle(), timeout=3000)
+    assert min(volumes_sent) < 100  # the fade-out ducked the volume...
+    assert volumes_sent[-1] == 200  # ...and it was restored when the loop finished
+    playing_times = [t for state, t in samples if state == "playing"]
+    assert playing_times, "never observed playback"
+    assert max(playing_times) < 2_800_000 + 600_000
+    assert min(playing_times) > 2_000_000 - 400_000
+    queue.shutdown()
+
+
+def test_live_port_probe_skips_vlcs_port(live) -> None:
+    live.adapter()
+    bind_host, connect_host = ps.vlc_http_hosts(live.vlc)
+    windows_vlc_from_wsl = ps.is_wsl() and ps.is_windows_executable(live.vlc)
+    assert find_free_http_port(
+        live.port, connect_host=connect_host, bind_host=None if windows_vlc_from_wsl else bind_host
+    ) != live.port
+
+
+def test_live_application_plays_a_bookmark_in_another_song(live, qtbot, tmp_path) -> None:
+    from bookmark_studio.app.application import Application
+    from bookmark_studio.domain.bookmark import Bookmark
+    from bookmark_studio.domain.enums import BookmarkScope, BookmarkType
+    from bookmark_studio.persistence.database import connect
+    from bookmark_studio.persistence.migrations import migrate
+
+    ffmpeg = ps.find_ffmpeg()
+    if ffmpeg is None:
+        pytest.skip("ffmpeg is not installed")
+    adapter = live.adapter()
+    _wait(lambda: _playlist_ready(adapter), timeout=15)
+    conn = connect(tmp_path / "live.db")
+    migrate(conn)
+    app = Application(conn=conn, adapter=adapter, ffmpeg_path=ffmpeg, waveform_cache_dir=tmp_path / "wf")
+    qtbot.addWidget(app.window)
+    try:
+        app.start()
+        qtbot.waitUntil(lambda: len(app._resolved) == 2 and app._synchronizer.active_playlist_id is not None,
+                        timeout=15000)
+        # Both songs decoded in the background: exact lengths known for both.
+        qtbot.waitUntil(lambda: len(app._exact_duration_by_media) == 2, timeout=30000)
+        exact = sorted(app._exact_duration_by_media.values())
+        assert abs(exact[0] - SONG_SECONDS[0] * 1_000_000) < 20_000
+        assert abs(exact[1] - SONG_SECONDS[1] * 1_000_000) < 20_000
+
+        (first_item, first_media), (second_item, second_media) = app._resolved
+        playlist_id = app._synchronizer.active_playlist_id
+        point = Bookmark(
+            id=uuid4(), playlist_id=playlist_id, media_id=second_media.id, scope=BookmarkScope.PLAYLIST_MEDIA,
+            lane_id=None, bookmark_type=BookmarkType.POINT, name="verse", start_us=15_500_000, end_us=None,
+            loop_enabled=False, repeat_count=None, loop_gap_ms=0, completion_action=CompletionAction.CONTINUE,
+        )
+        app._bookmark_repository.insert(point)
+        app._on_play_bookmark_requested(point.id)
+
+        seen: list[tuple] = []
+
+        def landed() -> bool:
+            status = adapter.get_status()
+            seen.append((status.current_playlist_item_id, status.state, status.time_us))
+            return (status.current_playlist_item_id == second_item.vlc_id and status.state == "playing"
+                    and 15_300_000 <= status.time_us <= 16_600_000)
+
+        deadline = time.monotonic() + 6
+        while not landed():
+            assert time.monotonic() < deadline, f"never landed at 15.5 s in song 2; VLC reported {seen[-12:]}"
+            qtbot.wait(20)
+
+        segment = Bookmark(
+            id=uuid4(), playlist_id=playlist_id, media_id=first_media.id, scope=BookmarkScope.PLAYLIST_MEDIA,
+            lane_id=None, bookmark_type=BookmarkType.SEGMENT, name="riff", start_us=1_000_000, end_us=1_700_000,
+            loop_enabled=True, repeat_count=2, loop_gap_ms=0, completion_action=CompletionAction.PAUSE,
+        )
+        app._bookmark_repository.insert(segment)
+        completions = []
+        app._loop_controller.loop_completed.connect(lambda a: completions.append(a))
+        app._on_play_bookmark_requested(segment.id)  # loop-enabled: loops, then pauses
+        qtbot.waitUntil(lambda: completions == [CompletionAction.PAUSE], timeout=10000)
+        qtbot.waitUntil(lambda: adapter.get_status().state == "paused", timeout=3000)
+        status = adapter.get_status()
+        assert status.current_playlist_item_id == first_item.vlc_id
+        assert 1_300_000 <= status.time_us <= 2_500_000
+    finally:
+        app.stop()
+        conn.close()
+
+
+@pytest.mark.skipif(ps.is_wsl(), reason="Lua bridge live test runs against a native VLC only")
+def test_live_lua_bridge(tmp_path, qtbot) -> None:
+    """The opt-in Lua bridge, loaded from a private data dir (VLC_DATA_PATH) under a test
+    name, so nothing is installed into the user's own VLC profile."""
+    from bookmark_studio.playback.bridge_client import BridgeClient
+
+    data_dir = tmp_path / "vlcdata"
+    intf_dir = data_dir / "lua" / "intf"
+    intf_dir.mkdir(parents=True)
+    source = Path(__file__).resolve().parents[2] / "vlc" / "bookmarkstudio.lua"
+    shutil.copyfile(source, intf_dir / "bm4vlc_livetest.lua")
+    live = LiveVlc(tmp_path, lua_intf="bm4vlc_livetest", env={"VLC_DATA_PATH": str(data_dir)},
+                   extra_args=[f"--http-password={LUA_TOKEN}"])
+    from bookmark_studio.playback.enhanced_adapter import EnhancedLuaPlaybackAdapter
+
+    try:
+        client = BridgeClient(live.host, live.port, LUA_TOKEN)  # one persistent connection, as in the app
+        adapter = EnhancedLuaPlaybackAdapter(client)
+        _wait(lambda: adapter.connect() or True, timeout=15)  # auth via the --http-password fallback
+        items = _wait(lambda: (lambda i: i if len(i) == 2 else None)(adapter.get_playlist()), timeout=15)
+        assert "volume" in client.status()  # status now reports volume (fades used to assume 100%)
+        adapter.set_volume(128)  # the new command (was rejected before 0.2.0)
+        adapter.goto_item(items[1].vlc_id)  # waits until VLC has switched
+        assert adapter.get_status().current_playlist_item_id == items[1].vlc_id
+        adapter.pause()
+        _wait(lambda: adapter.get_status().state == "paused", timeout=5)
+        adapter.seek_absolute_us(7_250_000)
+        _wait(lambda: abs(adapter.get_status().time_us - 7_250_000) < 50_000, timeout=5)  # microsecond seek
+        # Many requests on the same connection: before 0.2.0 the script let Lua's garbage
+        # collector unregister its handlers, and VLC answered 404 on random routes.
+        for _ in range(30):
+            adapter.get_status()
+            adapter.get_playlist()
+        adapter.disconnect()
+    finally:
+        live.close()

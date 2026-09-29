@@ -13,6 +13,7 @@ from bookmark_studio.app.commands import (
     ChangeLoopCommand,
     CreateBookmarkCommand,
     DeleteBookmarkCommand,
+    EditBookmarkFieldsCommand,
     MoveBookmarkCommand,
     RenameBookmarkCommand,
     ResizeBookmarkCommand,
@@ -46,6 +47,7 @@ class MainWindow(QMainWindow):
     bookmark_reorder_requested = Signal(list)  # ordered list of bookmark UUIDs
     bookmark_song_display_requested = Signal(object)  # UUID -- just selected, not played
     bookmarks_changed = Signal()
+    project_imported = Signal()  # a .vlcbmk was merged in; playlist recognition may change
 
     def __init__(
         self,
@@ -61,6 +63,11 @@ class MainWindow(QMainWindow):
         self._undo_stack = undo_stack or QUndoStack(self)
         self._current_playlist_id: UUID | None = None
         self._current_media_id: UUID | None = None
+        # Undo/redo changed the database but nothing refreshed the waveform, the list
+        # or the Inspector afterwards. indexChanged now does -- except during our own
+        # push(), whose callers refresh precisely themselves.
+        self._pushing = False
+        self._undo_stack.indexChanged.connect(self._on_undo_index_changed)
 
         self._breadcrumb = QLabel("No playlist › No track › 0 bookmarks", self)
         self._breadcrumb.setStyleSheet("padding: 4px 8px; font-weight: 600;")
@@ -301,6 +308,10 @@ class MainWindow(QMainWindow):
         self._inspector.loop_settings_committed.connect(self._on_loop_settings_committed)
         self._inspector.start_committed.connect(self._on_inspector_start_committed)
         self._inspector.end_committed.connect(self._on_inspector_end_committed)
+        # These two were never connected, so Tags/Notes typed in the Inspector were
+        # silently discarded.
+        self._inspector.tags_committed.connect(self._on_tags_committed)
+        self._inspector.notes_committed.connect(self._on_notes_committed)
 
         self._playlist_panel.launch_vlc_requested.connect(self.launch_vlc_requested.emit)
 
@@ -448,7 +459,7 @@ class MainWindow(QMainWindow):
         self._create_bookmark_and_focus_name(bookmark)
 
     def _create_bookmark_and_focus_name(self, bookmark: Bookmark) -> None:
-        self._undo_stack.push(CreateBookmarkCommand(self._bookmark_repository, bookmark))
+        self._push(CreateBookmarkCommand(self._bookmark_repository, bookmark))
         self._refresh_bookmarks()
         # spec #46: inline name editor appears immediately after creation, no modal.
         self._load_bookmark_into_inspector(bookmark)
@@ -470,9 +481,9 @@ class MainWindow(QMainWindow):
 
     def _on_bookmark_move_finished(self, bookmark_id: UUID, start_us: int, end_us: int) -> None:
         bookmark = self._bookmark_repository.get(bookmark_id)
-        if bookmark is None:
-            return
-        self._undo_stack.push(
+        if bookmark is None or (bookmark.start_us, bookmark.end_us) == (start_us, end_us):
+            return  # a plain click on a bookmark is not a move (no empty undo step)
+        self._push(
             MoveBookmarkCommand(self._bookmark_repository, bookmark_id, bookmark.start_us, bookmark.end_us, start_us, end_us)
         )
         self._refresh_bookmarks()
@@ -483,7 +494,9 @@ class MainWindow(QMainWindow):
         if bookmark is None:
             return
         old_value = bookmark.start_us if handle == "start" else bookmark.end_us
-        self._undo_stack.push(
+        if old_value == value_us:
+            return
+        self._push(
             ResizeBookmarkCommand(self._bookmark_repository, bookmark_id, handle, old_value, value_us)
         )
         self._refresh_bookmarks()
@@ -507,8 +520,64 @@ class MainWindow(QMainWindow):
         bookmark = self._current_inspected_bookmark()
         if bookmark is None:
             return
-        self._undo_stack.push(RenameBookmarkCommand(self._bookmark_repository, bookmark.id, bookmark.name, new_name))
+        if new_name == bookmark.name:
+            return
+        self._push(RenameBookmarkCommand(self._bookmark_repository, bookmark.id, bookmark.name, new_name))
         self._refresh_bookmarks()
+        self._sync_inspector_snapshot(bookmark.id)
+
+    def _on_tags_committed(self, tags: tuple) -> None:
+        bookmark = self._current_inspected_bookmark()
+        if bookmark is None or tuple(sorted(tags)) == tuple(sorted(bookmark.tags)):
+            return
+        self._push(
+            EditBookmarkFieldsCommand(
+                self._bookmark_repository, bookmark.id, "Edit bookmark tags",
+                old={"tags": bookmark.tags}, new={"tags": tuple(tags)},
+            )
+        )
+        self._refresh_bookmarks()
+        self._sync_inspector_snapshot(bookmark.id)
+
+    def _on_notes_committed(self, notes: object) -> None:
+        bookmark = self._current_inspected_bookmark()
+        if bookmark is None or notes == bookmark.notes:
+            return
+        self._push(
+            EditBookmarkFieldsCommand(
+                self._bookmark_repository, bookmark.id, "Edit bookmark notes",
+                old={"notes": bookmark.notes}, new={"notes": notes},
+            )
+        )
+        self._refresh_bookmarks()
+        self._sync_inspector_snapshot(bookmark.id)
+
+    def _push(self, command) -> None:
+        self._pushing = True
+        try:
+            self._undo_stack.push(command)
+        finally:
+            self._pushing = False
+
+    def _on_undo_index_changed(self, _index: int) -> None:
+        if self._pushing:
+            return
+        self._refresh_bookmarks()
+        current = self._current_inspected_bookmark()
+        if current is None:
+            return
+        updated = self._bookmark_repository.get(current.id)
+        if updated is None:
+            self._clear_inspector()
+        else:
+            self._load_bookmark_into_inspector(updated)
+
+    def _sync_inspector_snapshot(self, bookmark_id: UUID) -> None:
+        """After an Inspector-originated edit, remember the saved values without
+        touching the fields the user may still be typing in."""
+        current = self._current_inspected_bookmark()
+        if current is not None and current.id == bookmark_id:
+            self._inspector.set_snapshot(self._bookmark_repository.get(bookmark_id))
 
     def _on_loop_settings_committed(
         self, enabled: bool, repeat_count: int | None, gap_ms: int, action: CompletionAction,
@@ -517,7 +586,7 @@ class MainWindow(QMainWindow):
         bookmark = self._current_inspected_bookmark()
         if bookmark is None:
             return
-        self._undo_stack.push(
+        self._push(
             ChangeLoopCommand(
                 self._bookmark_repository, bookmark.id,
                 old=(
@@ -528,6 +597,7 @@ class MainWindow(QMainWindow):
             )
         )
         self._refresh_bookmarks()
+        self._sync_inspector_snapshot(bookmark.id)
 
     # Direct follow-up request: "the columns for loop, fade in/out etc, they should
     # also be directly editable, e.g. clicking would give a drop menu options" --
@@ -579,7 +649,7 @@ class MainWindow(QMainWindow):
         self, bookmark: Bookmark, *, loop_enabled: bool, repeat_count: int | None, gap_ms: int,
         completion_action: CompletionAction, fade_in_ms: int, fade_out_ms: int,
     ) -> None:
-        self._undo_stack.push(
+        self._push(
             ChangeLoopCommand(
                 self._bookmark_repository, bookmark.id,
                 old=(
@@ -604,7 +674,7 @@ class MainWindow(QMainWindow):
         if start_us < 0 or (bookmark.end_us is not None and start_us >= bookmark.end_us):
             self._load_bookmark_into_inspector(bookmark)  # reject and revert the field
             return
-        self._undo_stack.push(
+        self._push(
             ResizeBookmarkCommand(self._bookmark_repository, bookmark.id, "start", bookmark.start_us, start_us)
         )
         self._refresh_bookmarks()
@@ -617,7 +687,7 @@ class MainWindow(QMainWindow):
         if end_us <= bookmark.start_us:
             self._load_bookmark_into_inspector(bookmark)  # reject and revert the field
             return
-        self._undo_stack.push(
+        self._push(
             ResizeBookmarkCommand(self._bookmark_repository, bookmark.id, "end", bookmark.end_us, end_us)
         )
         self._refresh_bookmarks()
@@ -632,7 +702,7 @@ class MainWindow(QMainWindow):
         bookmark = self._current_inspected_bookmark()
         if bookmark is None:
             return
-        self._undo_stack.push(DeleteBookmarkCommand(self._bookmark_repository, bookmark))
+        self._push(DeleteBookmarkCommand(self._bookmark_repository, bookmark))
         self._clear_inspector()
         self._refresh_bookmarks()
 
@@ -650,7 +720,7 @@ class MainWindow(QMainWindow):
             bookmark = self._bookmark_repository.get(bookmark_id)
             if bookmark is None:
                 continue
-            self._undo_stack.push(DeleteBookmarkCommand(self._bookmark_repository, bookmark))
+            self._push(DeleteBookmarkCommand(self._bookmark_repository, bookmark))
             if inspected is not None and inspected.id == bookmark_id:
                 self._clear_inspector()
         self._refresh_bookmarks()
@@ -685,33 +755,71 @@ class MainWindow(QMainWindow):
 
     # -- menu action bodies --
 
+    def build_export_data(self):
+        """Everything "Save Bookmarks..." writes: the active playlist's bookmarks for EVERY
+        song (previously only the song on screen was exported, silently dropping all the
+        others), the media they belong to, the playlist's lanes, and the playlist's order
+        and signatures so the project is recognised again after an import. Without a
+        playlist context, the current song's global bookmarks."""
+        from bookmark_studio.persistence.lane_repository import LaneRepository
+        from bookmark_studio.persistence.media_repository import MediaRepository
+        from bookmark_studio.persistence.playlist_repository import PlaylistRepository
+        from bookmark_studio.project.export_service import ProjectData
+
+        conn = self._bookmark_repository.connection
+        media_repo = MediaRepository(conn)
+        playlist_repo = PlaylistRepository(conn)
+        playlists = []
+        lanes = []
+        items: list = []
+        signatures: list = []
+        if self._current_playlist_id is not None:
+            record = playlist_repo.get(self._current_playlist_id)
+            if record is not None:
+                playlists.append(record.playlist)
+            bookmarks = self._bookmark_repository.list_for_playlist(self._current_playlist_id)
+            lanes = LaneRepository(conn).list_for_playlist(self._current_playlist_id)
+            item_media_ids = playlist_repo.list_item_media_ids(self._current_playlist_id)
+            if item_media_ids:
+                items.append((self._current_playlist_id, item_media_ids))
+            signatures = [(self._current_playlist_id, s) for s in playlist_repo.signatures_for(self._current_playlist_id)]
+        elif self._current_media_id is not None:
+            bookmarks = self._bookmark_repository.list_global_for_media(self._current_media_id)
+            item_media_ids = []
+        else:
+            bookmarks = []
+            item_media_ids = []
+        media_ids = list(dict.fromkeys([b.media_id for b in bookmarks] + list(item_media_ids)))
+        if self._current_media_id is not None and self._current_media_id not in media_ids:
+            media_ids.append(self._current_media_id)
+        media = [m for m in (media_repo.get(mid) for mid in media_ids) if m is not None]
+        return ProjectData(
+            playlists=playlists, media=media, bookmarks=bookmarks, lanes=lanes,
+            playlist_items=items, playlist_signatures=signatures,
+        )
+
     def _on_export_project(self) -> None:
         from pathlib import Path
 
         from PySide6.QtWidgets import QFileDialog
 
-        from bookmark_studio.persistence.lane_repository import LaneRepository
-        from bookmark_studio.persistence.media_repository import MediaRepository
-        from bookmark_studio.persistence.playlist_repository import PlaylistRepository
-        from bookmark_studio.project.export_service import ProjectData, export_project
+        from bookmark_studio.project.export_service import export_project
 
         path_str, _filter = QFileDialog.getSaveFileName(self, "Export Project", "", "Bookmark Studio Project (*.vlcbmk)")
         if not path_str:
             return
-        conn = self._bookmark_repository.connection
-        playlists = [r.playlist for r in PlaylistRepository(conn).list_recent(limit=10_000)]
-        media = []
-        bookmarks = []
-        if self._current_media_id is not None:
-            media_record = MediaRepository(conn).get(self._current_media_id)
-            if media_record:
-                media.append(media_record)
-            bookmarks = self._bookmark_repository.list_for_playlist_media(
-                self._current_playlist_id, self._current_media_id
-            ) if self._current_playlist_id else self._bookmark_repository.list_global_for_media(self._current_media_id)
-        lanes = LaneRepository(conn).list_for_playlist(self._current_playlist_id) if self._current_playlist_id else []
-        export_project(Path(path_str), ProjectData(playlists=playlists, media=media, bookmarks=bookmarks, lanes=lanes))
-        QMessageBox.information(self, "Export Project", f"Exported to {path_str}")
+        path = Path(path_str)
+        if path.suffix.lower() != ".vlcbmk":  # Linux file dialogs don't always add it
+            path = path.with_name(path.name + ".vlcbmk")
+        data = self.build_export_data()
+        try:
+            export_project(path, data)
+        except OSError as exc:
+            QMessageBox.critical(self, "Export Project", f"Export failed: {exc}")
+            return
+        QMessageBox.information(
+            self, "Export Project", f"Exported {len(data.bookmarks)} bookmark(s) to {path}"
+        )
 
     def _on_import_project(self) -> None:
         from pathlib import Path
@@ -730,6 +838,8 @@ class MainWindow(QMainWindow):
             return
         QMessageBox.information(self, "Import Project", f"Imported {len(plan.bookmarks)} bookmarks.")
         self._refresh_bookmarks()
+        self.bookmarks_changed.emit()
+        self.project_imported.emit()
 
     def _on_show_diagnostics(self) -> None:
         lines = [

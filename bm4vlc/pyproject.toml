@@ -1,12 +1,16 @@
 [project]
 name = "bookmark-studio"
-version = "0.1.0"
+version = "0.2.0"
 description = "VLC Bookmark Studio — playlist-aware visual bookmarking and looping for VLC Media Player"
-requires-python = ">=3.13"
+readme = "README.md"
+# Tested on 3.10-3.13 (Linux/WSL) and 3.12 (Windows); see .github/workflows/bm4vlc-tests.yml.
+requires-python = ">=3.10"
 dependencies = [
-    "PySide6",
-    "numpy",
-    "requests",
+    # Only QtCore/QtGui/QtWidgets are used. PySide6-Essentials is a fraction of the full
+    # PySide6 download and avoids most of the Windows long-path install failures.
+    "PySide6-Essentials>=6.5",
+    "numpy>=1.23",
+    "requests>=2.28",
 ]
 
 [project.optional-dependencies]
@@ -19,7 +23,11 @@ dev = [
 ]
 
 [project.scripts]
-bookmark-studio = "bookmark_studio.__main__:main"
+bookmark-studio = "bookmark_studio.bootstrap:main"
+
+[project.gui-scripts]
+# Windows: starts without a console window.
+bookmark-studio-gui = "bookmark_studio.bootstrap:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -28,13 +36,27 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/bookmark_studio"]
 
+[tool.hatch.build.targets.wheel.force-include]
+# The schema migrations and the Lua bridge live outside src/ in the repository; an
+# installed package needs its own copy (persistence/migrations.py looks here first).
+"migrations" = "bookmark_studio/migrations"
+"vlc/bookmarkstudio.lua" = "bookmark_studio/vlc/bookmarkstudio.lua"
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "migrations", "vlc", "tests", "README.md", "CHANGELOG.md", "PROJECT_SPEC.md",
+           "launch_bm4vlc.bat", "launch_bm4vlc.sh"]
+exclude = ["archive"]
+
 [tool.ruff]
-line-length = 100
-target-version = "py313"
+line-length = 120
+target-version = "py310"
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.10"
 strict = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "live_vlc: needs a real VLC installation (opt in with BM4VLC_LIVE_VLC=1)",
+]

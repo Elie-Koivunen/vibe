@@ -68,7 +68,30 @@ local function read_config_file()
 end
 
 local CONFIG = read_config_file()
-local TOKEN = CONFIG.token or ""
+
+-- Fallback when no config file exists: VLC's own --http-password option (the same
+-- mechanism VLC's built-in web interface uses). VLC 3 answers 403 Forbidden to every
+-- request on a handler with an empty password, so an empty token can never work.
+local function http_password_option()
+    -- vlc.var.inherit sees command-line options (VLC's own http.lua reads its password
+    -- this way); vlc.config.get only sees the saved config file -- verified live, it
+    -- returned nil for --http-password under --ignore-config.
+    for _, getter in ipairs({
+        function() return vlc.var.inherit(nil, "http-password") end,
+        function() return vlc.config.get("http-password") end,
+    }) do
+        local ok, value = pcall(getter)
+        if ok and type(value) == "string" and value ~= "" then
+            return value
+        end
+    end
+    return nil
+end
+
+local TOKEN = CONFIG.token or http_password_option() or ""
+if TOKEN == "" then
+    vlc.msg.warn("[bookmarkstudio] no token configured: VLC will refuse every request (403)")
+end
 local USERNAME = "bookmarkstudio"
 local PROTOCOL_VERSION = 1
 local BRIDGE_VERSION = "1.0.0"
@@ -138,7 +161,13 @@ end
 
 local ALLOWED_COMMANDS = {
     play = true, pause = true, stop = true, next = true, previous = true, goto = true,
+    -- volume: needed by fades and mute-on-connect (EnhancedLuaPlaybackAdapter.set_volume);
+    -- without it every set_volume() call was rejected with INVALID_REQUEST.
+    volume = true,
 }
+
+-- VLC's volume scale: 0..512, where 256 is 100%.
+local MAX_VOLUME = 512
 
 local function parse_int(raw)
     if raw == nil then
@@ -184,9 +213,14 @@ local function find_current_playlist_id(current_uri)
 end
 
 local function handle_status(_query)
+    local volume = vlc.volume.get()
     local input = vlc.object.input()
     if input == nil then
-        return error_json("NO_MEDIA", "no media is currently loaded")
+        -- Nothing loaded is a normal state, not an error: an error here made the
+        -- Python side treat every poll as a failure and show "Offline".
+        return ok_json({
+            state = "stopped", time_us = 0, position = 0.0, rate = 1.0, volume = volume,
+        })
     end
 
     local item = vlc.input.item()
@@ -205,6 +239,7 @@ local function handle_status(_query)
         current_playlist_item_id = find_current_playlist_id(current_uri),
         duration_us = (length_us and length_us > 0) and length_us or nil,
         media_uri = current_uri,
+        volume = volume,
     })
 end
 
@@ -241,7 +276,12 @@ local function handle_control(query)
     if command == "play" then
         vlc.playlist.play()
     elseif command == "pause" then
-        vlc.playlist.pause()
+        -- vlc.playlist.pause() TOGGLES (found live: "pause" on an already-paused item
+        -- resumed it). The Python side means "make sure it's paused", like the built-in
+        -- interface's pl_forcepause.
+        if vlc.playlist.status() == "playing" then
+            vlc.playlist.pause()
+        end
     elseif command == "stop" then
         vlc.playlist.stop()
     elseif command == "next" then
@@ -254,6 +294,12 @@ local function handle_control(query)
             return error_json("INVALID_ITEM", "id must be a non-negative integer")
         end
         vlc.playlist.goto(id)
+    elseif command == "volume" then
+        local level = parse_int(query["val"])
+        if level == nil or level < 0 or level > MAX_VOLUME then
+            return error_json("INVALID_REQUEST", "val must be an integer 0.." .. MAX_VOLUME)
+        end
+        vlc.volume.set(level)
     end
 
     return ok_json()
@@ -340,8 +386,15 @@ local function parse_query_string(request)
     return query
 end
 
+-- The httpd host and every handler object MUST stay referenced for the life of the
+-- interface. Found live: this script used to discard the handler objects (and the host
+-- was only a chunk-local), so Lua's garbage collector eventually collected them and
+-- their finalizers unregistered the URLs -- VLC then answered 404 on a random route,
+-- more often the longer a session ran. VLC's own http.lua keeps them in globals too.
+bookmarkstudio_httpd = httpd
+bookmarkstudio_handlers = {}
 for url, _ in pairs(ROUTES) do
-    httpd:handler(
+    bookmarkstudio_handlers[url] = httpd:handler(
         url,
         USERNAME,
         TOKEN,

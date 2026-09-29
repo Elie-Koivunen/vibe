@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -27,8 +26,11 @@ class _RedactAuthorizationFilter(logging.Filter):
 
 
 def default_log_dir() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".local" / "share")
-    return Path(base) / "VLCBookmarkStudio" / "logs"
+    """Windows: %LOCALAPPDATA%\\VLCBookmarkStudio\\logs; Linux/WSL:
+    ~/.local/share/VLCBookmarkStudio/logs (honouring $XDG_DATA_HOME)."""
+    from bookmark_studio.platform_support import user_data_dir
+
+    return user_data_dir() / "logs"
 
 
 def configure_logging(log_dir: Path | None = None, *, level: int = logging.INFO) -> logging.Logger:

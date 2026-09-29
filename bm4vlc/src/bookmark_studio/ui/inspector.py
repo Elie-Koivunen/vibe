@@ -17,9 +17,25 @@ COMPLETION_LABELS = {
     CompletionAction.STOP: "Stop",
     CompletionAction.NEXT_BOOKMARK: "Next Bookmark",
     CompletionAction.PREVIOUS_BOOKMARK: "Previous Bookmark",
-    CompletionAction.NEXT_SEGMENT_QUEUE_ITEM: "Next Segment Queue Item",
+    CompletionAction.NEXT_SEGMENT_QUEUE_ITEM: "Next Segment Queue Item (not available yet)",
     CompletionAction.NEXT_TRACK: "Next Track",
 }
+# The Segment Queue (spec #175, P1) isn't built, so its completion action isn't offered;
+# it's only shown for a bookmark that already has it (e.g. from an imported project).
+OFFERED_COMPLETION_ACTIONS = [
+    action for action in COMPLETION_LABELS if action is not CompletionAction.NEXT_SEGMENT_QUEUE_ITEM
+]
+
+
+class _NotesEdit(QPlainTextEdit):
+    """QPlainTextEdit has no editingFinished; notes used to be committed on every
+    keystroke (textChanged). This commits once, when focus leaves the field."""
+
+    editingFinished = Signal()
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().focusOutEvent(event)
+        self.editingFinished.emit()
 
 
 class BookmarkInspector(QWidget):
@@ -32,7 +48,7 @@ class BookmarkInspector(QWidget):
     # enabled, repeat_count|None, gap_ms, action, fade_in_ms, fade_out_ms
     loop_settings_committed = Signal(bool, object, int, object, int, int)
     tags_committed = Signal(tuple)
-    notes_committed = Signal(str)
+    notes_committed = Signal(object)  # str | None
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -73,8 +89,8 @@ class BookmarkInspector(QWidget):
         form.addRow("Gap", self._gap_spin)
 
         self._completion_combo = QComboBox(self)
-        for action, label in COMPLETION_LABELS.items():
-            self._completion_combo.addItem(label, action)
+        for action in OFFERED_COMPLETION_ACTIONS:
+            self._completion_combo.addItem(COMPLETION_LABELS[action], action)
         self._completion_combo.currentIndexChanged.connect(self._on_loop_settings_changed)
         form.addRow("After loop", self._completion_combo)
 
@@ -98,8 +114,8 @@ class BookmarkInspector(QWidget):
         self._tags_edit.editingFinished.connect(self._on_tags_committed)
         form.addRow("Tags", self._tags_edit)
 
-        self._notes_edit = QPlainTextEdit(self)
-        self._notes_edit.textChanged.connect(self._on_notes_committed)
+        self._notes_edit = _NotesEdit(self)
+        self._notes_edit.editingFinished.connect(self._on_notes_committed)
         form.addRow("Notes", self._notes_edit)
 
         self.show_selection(None)  # starts disabled: nothing loaded or selected yet
@@ -107,11 +123,20 @@ class BookmarkInspector(QWidget):
     def current_bookmark(self) -> Bookmark | None:
         return self._bookmark
 
+    def set_snapshot(self, bookmark: Bookmark | None) -> None:
+        """Updates the inspected bookmark's stored values WITHOUT touching the widgets.
+        Called after every committed edit: the stale snapshot this replaces made each
+        later edit record the wrong "old" value, so undo skipped intermediate states."""
+        if bookmark is not None and self._bookmark is not None and bookmark.id == self._bookmark.id:
+            self._bookmark = bookmark
+
     def load_bookmark(self, bookmark: Bookmark) -> None:
+        self._flush_notes()
         self._loading = True
         try:
             self._bookmark = bookmark
             self._name_edit.setText(bookmark.name)
+            self._start_edit.setEnabled(True)
             self._start_edit.setText(format_timecode(bookmark.start_us))
             self._end_edit.setText(format_timecode(bookmark.end_us) if bookmark.end_us is not None else "")
             self._end_edit.setEnabled(bookmark.end_us is not None)
@@ -119,7 +144,11 @@ class BookmarkInspector(QWidget):
             self._repeat_spin.setValue(bookmark.repeat_count or 0)
             self._gap_spin.setValue(bookmark.loop_gap_ms)
             index = self._completion_combo.findData(bookmark.completion_action)
-            self._completion_combo.setCurrentIndex(max(0, index))
+            if index < 0:
+                self._completion_combo.addItem(COMPLETION_LABELS[bookmark.completion_action],
+                                               bookmark.completion_action)
+                index = self._completion_combo.count() - 1
+            self._completion_combo.setCurrentIndex(index)
             self._fade_in_spin.setValue(bookmark.fade_in_ms)
             self._fade_out_spin.setValue(bookmark.fade_out_ms)
             self._tags_edit.setText(", ".join(bookmark.tags))
@@ -128,10 +157,15 @@ class BookmarkInspector(QWidget):
             self._loading = False
 
     def clear(self) -> None:
-        self._bookmark = None
-        for widget in (self._name_edit, self._start_edit, self._end_edit, self._tags_edit):
-            widget.clear()
-        self._notes_edit.clear()
+        self._flush_notes()
+        self._loading = True
+        try:
+            self._bookmark = None
+            for widget in (self._name_edit, self._start_edit, self._end_edit, self._tags_edit):
+                widget.clear()
+            self._notes_edit.clear()
+        finally:
+            self._loading = False
 
     def show_selection(self, selection: Selection | None) -> None:
         """Direct follow-up request: "fix so that the highlight start and end ...
@@ -157,43 +191,71 @@ class BookmarkInspector(QWidget):
         finally:
             self._loading = False
 
+    def _flush_notes(self) -> None:
+        """Commits notes typed into the field before the inspector switches away."""
+        if self._bookmark is not None and not self._loading:
+            self._on_notes_committed()
+
     def _on_name_committed(self) -> None:
-        if not self._loading and self._bookmark is not None:
-            self.name_committed.emit(self._name_edit.text())
+        if self._loading or self._bookmark is None:
+            return
+        new_name = self._name_edit.text().strip()
+        if not new_name:
+            self._name_edit.setText(self._bookmark.name)  # a bookmark needs a name: revert
+            return
+        if new_name != self._bookmark.name:
+            self.name_committed.emit(new_name)
 
     def _on_start_committed(self) -> None:
         if self._loading or self._bookmark is None:
             return
         try:
-            self.start_committed.emit(parse_timecode(self._start_edit.text()))
+            value = parse_timecode(self._start_edit.text())
         except ValueError:
             self._start_edit.setText(format_timecode(self._bookmark.start_us))
+            return
+        if value != self._bookmark.start_us:
+            self.start_committed.emit(value)
 
     def _on_end_committed(self) -> None:
         if self._loading or self._bookmark is None or self._bookmark.end_us is None:
             return
         try:
-            self.end_committed.emit(parse_timecode(self._end_edit.text()))
+            value = parse_timecode(self._end_edit.text())
         except ValueError:
             self._end_edit.setText(format_timecode(self._bookmark.end_us))
+            return
+        if value != self._bookmark.end_us:
+            self.end_committed.emit(value)
 
     def _on_loop_settings_changed(self, *_args: object) -> None:
         if self._loading or self._bookmark is None:
             return
         repeat_count = self._repeat_spin.value() or None
         action = self._completion_combo.currentData()
-        self.loop_settings_committed.emit(
+        new = (
             self._loop_checkbox.isChecked(), repeat_count, self._gap_spin.value(), action,
             self._fade_in_spin.value(), self._fade_out_spin.value(),
         )
+        bookmark = self._bookmark
+        old = (
+            bookmark.loop_enabled, bookmark.repeat_count, bookmark.loop_gap_ms, bookmark.completion_action,
+            bookmark.fade_in_ms, bookmark.fade_out_ms,
+        )
+        if new != old:
+            self.loop_settings_committed.emit(*new)
 
     def _on_tags_committed(self) -> None:
         if self._loading or self._bookmark is None:
             return
-        tags = tuple(t.strip() for t in self._tags_edit.text().split(",") if t.strip())
-        self.tags_committed.emit(tags)
+        tags = tuple(dict.fromkeys(t.strip() for t in self._tags_edit.text().split(",") if t.strip()))
+        if tuple(sorted(tags)) != tuple(sorted(self._bookmark.tags)):
+            self.tags_committed.emit(tags)
 
     def _on_notes_committed(self) -> None:
         if self._loading or self._bookmark is None:
             return
-        self.notes_committed.emit(self._notes_edit.toPlainText())
+        notes = self._notes_edit.toPlainText()
+        normalized = notes if notes.strip() else None
+        if normalized != (self._bookmark.notes if (self._bookmark.notes or "").strip() else None):
+            self.notes_committed.emit(normalized)

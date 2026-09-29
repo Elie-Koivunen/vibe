@@ -4,7 +4,7 @@ Random vibed stuff
 
 | Project | What it is |
 |---|---|
-| [**bm4vlc**](bm4vlc/) | VLC Bookmark Studio: playlist-aware visual bookmarking, segment selection, navigation and looping for VLC Media Player |
+| [**bm4vlc**](bm4vlc/) | VLC Bookmark Studio: playlist-aware visual bookmarking, segment selection, navigation and looping for VLC Media Player. Windows, Linux and WSL |
 | [**buzz2vlc**](buzz2vlc/) | Control several VLC instances, each with its own playlist, with a PS2/PS3 Buzz controller |
 | [**vcode2bar**](vcode2bar/) | Finnish virtual barcode (*virtuaaliviivakoodi*) ↔ bank barcode: create, validate, render (PNG/SVG/PDF), print, read back from photos/PDFs, batch CSV. GUI + CLI, English/Finnish/Swedish/Norwegian |
 

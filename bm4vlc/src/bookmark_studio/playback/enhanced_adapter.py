@@ -1,15 +1,21 @@
 """PlaybackAdapter backed by the custom Lua bridge (microsecond seek, spec #27)."""
 from __future__ import annotations
 
+import time
+
 from bookmark_studio.playback.bridge_client import BridgeClient
 from bookmark_studio.playback.status import PlaybackStatus, VlcPlaylistItem
+
+GOTO_SETTLE_TIMEOUT_S = 2.0
+_GOTO_POLL_INTERVAL_S = 0.05
 
 
 class EnhancedLuaPlaybackAdapter:
     """Uses bookmarkstudio.lua's JSON bridge for microsecond-precision transport (spec #27)."""
 
-    def __init__(self, client: BridgeClient) -> None:
+    def __init__(self, client: BridgeClient, *, goto_settle_timeout_s: float = GOTO_SETTLE_TIMEOUT_S) -> None:
         self._client = client
+        self._goto_settle_timeout_s = goto_settle_timeout_s
 
     def connect(self) -> None:
         self._client.health()
@@ -19,14 +25,18 @@ class EnhancedLuaPlaybackAdapter:
 
     def get_status(self) -> PlaybackStatus:
         data = self._client.status()
+        duration_us = data.get("duration_us")
         return PlaybackStatus(
-            state=data["state"],
-            time_us=int(data["time_us"]),
-            position=float(data["position"]),
-            rate=float(data["rate"]),
+            state=data.get("state", "stopped"),
+            time_us=int(data.get("time_us") or 0),
+            position=float(data.get("position") or 0.0),
+            rate=float(data.get("rate") or 1.0),
             current_playlist_item_id=data.get("current_playlist_item_id"),
-            duration_us=data.get("duration_us"),
+            duration_us=int(duration_us) if duration_us and duration_us > 0 else None,
             media_uri=data.get("media_uri"),
+            # Without this, every status read 256 (the dataclass default) and a fade
+            # always ramped to 100% regardless of the user's real volume.
+            volume=int(data.get("volume", 256)),
         )
 
     def get_playlist(self) -> list[VlcPlaylistItem]:
@@ -36,7 +46,7 @@ class EnhancedLuaPlaybackAdapter:
                 vlc_id=item["vlc_id"],
                 uri=item["uri"],
                 name=item["name"],
-                duration_s=item.get("duration_s"),
+                duration_s=item.get("duration_s") if (item.get("duration_s") or 0) > 0 else None,
             )
             for item in data.get("items", [])
         ]
@@ -58,6 +68,17 @@ class EnhancedLuaPlaybackAdapter:
 
     def goto_item(self, vlc_id: int) -> None:
         self._client.control("goto", id=vlc_id)
+        # vlc.playlist.goto() only queues the switch; wait until the new item is
+        # actually current so a following seek lands in the right song.
+        deadline = time.monotonic() + self._goto_settle_timeout_s
+        while time.monotonic() < deadline:
+            try:
+                data = self._client.status()
+            except Exception:  # noqa: BLE001 - best effort; the command itself was sent
+                return
+            if data.get("current_playlist_item_id") == vlc_id and (data.get("duration_us") or 0) > 0:
+                return
+            time.sleep(_GOTO_POLL_INTERVAL_S)
 
     def seek_absolute_us(self, time_us: int) -> None:
         self._client.seek(time_us)
@@ -70,4 +91,7 @@ class EnhancedLuaPlaybackAdapter:
         self._client.set_rate(rate)
 
     def set_volume(self, level: int) -> None:
-        self._client.control("volume", val=level)
+        self._client.control("volume", val=max(0, min(512, int(level))))
+
+    def set_exact_duration(self, vlc_id: int, duration_us: int | None) -> None:
+        """No-op: the bridge already reports microsecond time and length."""

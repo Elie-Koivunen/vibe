@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID
 
@@ -10,6 +10,8 @@ from bookmark_studio.waveform.cache import ALGORITHM_VERSION, cache_key, save_py
 from bookmark_studio.waveform.ffmpeg_decoder import CancellationToken, decode_media_to_pcm
 from bookmark_studio.waveform.peaks import decode_pcm_f32le
 from bookmark_studio.waveform.pyramid import WaveformPyramid, build_pyramid
+
+__all__ = ["ALGORITHM_VERSION", "GeneratedWaveform", "WaveformKey", "WaveformService"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +29,17 @@ class GeneratedWaveform:
     channel_mode: str
     file_path: Path
     pyramid: WaveformPyramid
+
+
+@dataclass
+class _Pending:
+    """One in-flight decode. Waiters hold a reference to this object, not to a shared
+    results dict -- the old dict kept every decoded pyramid (and every error) alive for
+    the whole session, so memory grew with every song ever decoded."""
+
+    done: threading.Event = field(default_factory=threading.Event)
+    result: GeneratedWaveform | None = None
+    error: BaseException | None = None
 
 
 class WaveformService:
@@ -47,8 +60,7 @@ class WaveformService:
         self._ffmpeg_path = ffmpeg_path
         self._cache_dir = cache_dir
         self._lock = threading.Lock()
-        self._inflight: dict[WaveformKey, threading.Event] = {}
-        self._results: dict[WaveformKey, GeneratedWaveform | Exception] = {}
+        self._inflight: dict[WaveformKey, _Pending] = {}
 
     @staticmethod
     def compute_cache_key(fast_fingerprint: str, sample_rate: int, channel_mode: str) -> str:
@@ -64,20 +76,18 @@ class WaveformService:
         cancellation: CancellationToken | None = None,
     ) -> GeneratedWaveform:
         with self._lock:
-            existing_event = self._inflight.get(key)
-            if existing_event is not None:
-                is_owner = False
-            else:
-                existing_event = threading.Event()
-                self._inflight[key] = existing_event
-                is_owner = True
+            pending = self._inflight.get(key)
+            is_owner = pending is None
+            if pending is None:
+                pending = _Pending()
+                self._inflight[key] = pending
 
         if not is_owner:
-            existing_event.wait()
-            result = self._results[key]
-            if isinstance(result, Exception):
-                raise result
-            return result
+            pending.done.wait()
+            if pending.error is not None:
+                raise pending.error
+            assert pending.result is not None
+            return pending.result
 
         try:
             raw = decode_media_to_pcm(self._ffmpeg_path, media_path, cancellation=cancellation)
@@ -88,19 +98,18 @@ class WaveformService:
             cache_path = self._cache_dir / f"{cache_id}.npz"
             save_pyramid(cache_path, pyramid)
 
-            generated = GeneratedWaveform(
+            pending.result = GeneratedWaveform(
                 cache_key=cache_id,
                 sample_rate=sample_rate,
                 channel_mode=channel_mode,
                 file_path=cache_path,
                 pyramid=pyramid,
             )
-            self._results[key] = generated
-            return generated
-        except Exception as exc:  # noqa: BLE001 - re-raised to every waiting caller
-            self._results[key] = exc
+            return pending.result
+        except BaseException as exc:  # noqa: BLE001 - re-raised to every waiting caller
+            pending.error = exc
             raise
         finally:
             with self._lock:
-                del self._inflight[key]
-            existing_event.set()
+                self._inflight.pop(key, None)
+            pending.done.set()

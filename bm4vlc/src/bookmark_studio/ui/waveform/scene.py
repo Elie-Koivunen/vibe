@@ -15,7 +15,7 @@ from bookmark_studio.ui.waveform.bookmark_item import BookmarkPointItem, Bookmar
 from bookmark_studio.ui.waveform.playhead_item import PlayheadItem
 from bookmark_studio.ui.waveform.selection_item import SelectionItem
 from bookmark_studio.ui.waveform.time_ruler_item import RULER_HEIGHT, TimeRulerItem
-from bookmark_studio.ui.waveform.waveform_item import WaveformItem, scene_x_to_time_us, time_us_to_scene_x
+from bookmark_studio.ui.waveform.waveform_item import WaveformItem, time_us_to_scene_x
 from bookmark_studio.waveform.pyramid import WaveformPyramid
 
 TRACK_HEIGHT = 160
