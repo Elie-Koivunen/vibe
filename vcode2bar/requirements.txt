@@ -1,0 +1,6 @@
+python-barcode>=0.15
+pillow>=10.1
+# optional - reading barcodes from images and the read-back check
+pyzbar>=0.1.9      # Windows wheel bundles zbar; macOS: brew install zbar; Ubuntu 24.04: apt install libzbar0t64 (22.04: libzbar0)
+# optional - reading invoice PDFs
+pypdfium2>=4.0

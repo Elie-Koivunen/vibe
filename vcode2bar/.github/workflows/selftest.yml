@@ -1,0 +1,50 @@
+# Runs the built-in test suite on real Windows and Linux machines on every push.
+# If vcode2bar lives in a subfolder of a bigger repo (e.g. "vibe/vcode2bar"), move this file to
+# <repo>/.github/workflows/ and set WORKDIR below to that subfolder.
+name: selftest
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  WORKDIR: .
+
+jobs:
+  selftest:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04, ubuntu-22.04]
+        python: ["3.9", "3.12"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # zbar is libzbar0t64 on Ubuntu 24.04 and libzbar0 on 22.04
+          sudo apt-get install -y xvfb libzbar0t64 || sudo apt-get install -y xvfb libzbar0
+      - name: Python packages
+        working-directory: ${{ env.WORKDIR }}
+        run: python -m pip install -r requirements.txt
+      - name: Components
+        working-directory: ${{ env.WORKDIR }}
+        run: python vcode2bar.py --deps
+      - name: Self-test (Linux, virtual display)
+        if: runner.os == 'Linux'
+        working-directory: ${{ env.WORKDIR }}
+        run: xvfb-run -a python vcode2bar.py --selftest 2
+      - name: Self-test (Windows)
+        if: runner.os == 'Windows'
+        working-directory: ${{ env.WORKDIR }}
+        run: python vcode2bar.py --selftest 2
