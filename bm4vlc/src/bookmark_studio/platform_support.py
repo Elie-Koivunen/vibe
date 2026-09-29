@@ -295,13 +295,14 @@ def _windows_program_files() -> list[Path]:
     return unique
 
 
-def _vlc_from_windows_registry() -> str | None:
-    if not IS_WINDOWS:
-        return None
-    try:
-        import winreg
-    except ImportError:  # pragma: no cover - only on Windows
-        return None
+def windows_registry_vlc_dirs() -> list[Path]:
+    """InstallDir of every VLC registered in the Windows registry (64- and 32-bit
+    views, machine and user); empty elsewhere."""
+    if sys.platform != "win32":  # also tells type checkers winreg is Windows-only
+        return []
+    import winreg
+
+    dirs: list[Path] = []
     for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
         for key_path in (r"SOFTWARE\VideoLAN\VLC", r"SOFTWARE\WOW6432Node\VideoLAN\VLC"):
             try:
@@ -309,9 +310,17 @@ def _vlc_from_windows_registry() -> str | None:
                     install_dir, _type = winreg.QueryValueEx(key, "InstallDir")
             except OSError:
                 continue
-            candidate = Path(install_dir) / "vlc.exe"
-            if candidate.is_file():
-                return str(candidate)
+            dirs.append(Path(install_dir))
+    return dirs
+
+
+def _vlc_from_windows_registry() -> str | None:
+    if not IS_WINDOWS:
+        return None
+    for install_dir in windows_registry_vlc_dirs():
+        candidate = install_dir / "vlc.exe"
+        if candidate.is_file():
+            return str(candidate)
     return None
 
 

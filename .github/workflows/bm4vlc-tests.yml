@@ -30,8 +30,8 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - name: System libraries (Linux)
@@ -76,8 +76,8 @@ jobs:
     env:
       BM4VLC_LIVE_VLC: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: VLC and ffmpeg (Linux)
@@ -102,8 +102,8 @@ jobs:
     name: ruff + mypy
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install
@@ -112,6 +112,9 @@ jobs:
       - name: ruff
         working-directory: ${{ env.WORKDIR }}
         run: ruff check src tests packaging
-      - name: mypy
+      - name: mypy (as on Linux)
         working-directory: ${{ env.WORKDIR }}
-        run: mypy
+        run: mypy --platform linux
+      - name: mypy (as on Windows)
+        working-directory: ${{ env.WORKDIR }}
+        run: mypy --platform win32

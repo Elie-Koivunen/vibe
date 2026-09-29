@@ -1,13 +1,17 @@
 # bm4vlc (VLC Bookmark Studio): packaged builds.
 # On a `bm4vlc-v<version>` tag: builds the Windows portable zip (with a 64-bit VLC and
 # ffmpeg) and the Linux tar.gz + AppImage, runs each build's self-test, and publishes
-# them as a GitHub Release. Run by hand (workflow_dispatch) it only builds, and the
-# packages can be downloaded from the run's artifacts.
+# them as a GitHub Release. A change to the packaging (or to this file) on main, or a
+# manual run, only builds: the packages are then in the run's artifacts.
+# A failing build posts the end of its output as an annotation (readable without
+# signing in, unlike the job log).
 name: bm4vlc release
 
 on:
   push:
     tags: ["bm4vlc-v*"]
+    branches: [main]
+    paths: ["bm4vlc/packaging/**", ".github/workflows/bm4vlc-release.yml"]
   workflow_dispatch:
 
 permissions:
@@ -26,8 +30,8 @@ jobs:
         shell: bash
         working-directory: bm4vlc
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Tag matches the package version
@@ -59,7 +63,16 @@ jobs:
           python -m zipfile -e "$BUILD_TMP/ffmpeg.zip" "$BUILD_TMP/ffmpeg"
           echo "FFMPEG_EXE=$(ls "$BUILD_TMP"/ffmpeg/*/bin/ffmpeg.exe)" >> "$GITHUB_ENV"
       - name: Build (runs the packaged self-test)
-        run: python packaging/build.py --vlc-dir "$BUILD_TMP/vlc/vlc-${VLC_VERSION}" --ffmpeg "$FFMPEG_EXE" --out dist
+        env:
+          BM4VLC_SELFTEST_TRACEBACK: "1"
+        run: |
+          LOG="$BUILD_TMP/build.log"
+          if ! python packaging/build.py --vlc-dir "$BUILD_TMP/vlc/vlc-${VLC_VERSION}" --ffmpeg "$FFMPEG_EXE" --out dist 2>&1 | tee "$LOG"
+          then
+            msg=$(tail -n 60 "$LOG" | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Windows build failed::$msg"
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: bm4vlc-windows
@@ -75,8 +88,8 @@ jobs:
         shell: bash
         working-directory: bm4vlc
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Tag matches the package version
@@ -97,9 +110,26 @@ jobs:
       - name: Build (runs the packaged self-test)
         env:
           APPIMAGETOOL: ${{ runner.temp }}/appimagetool
-        run: python packaging/build.py --appimage --require vlc,libvlc,ffmpeg --out dist
+          BM4VLC_SELFTEST_TRACEBACK: "1"
+        run: |
+          LOG="$RUNNER_TEMP/build.log"
+          if ! python packaging/build.py --appimage --require vlc,libvlc,ffmpeg --out dist 2>&1 | tee "$LOG"
+          then
+            msg=$(tail -n 60 "$LOG" | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Linux build failed::$msg"
+            exit 1
+          fi
       - name: The AppImage runs
-        run: APPIMAGE_EXTRACT_AND_RUN=1 dist/*.AppImage --self-test --require vlc,libvlc,ffmpeg --data-dir "$RUNNER_TEMP/st"
+        env:
+          BM4VLC_SELFTEST_TRACEBACK: "1"
+        run: |
+          LOG="$RUNNER_TEMP/appimage.log"
+          if ! APPIMAGE_EXTRACT_AND_RUN=1 dist/*.AppImage --self-test --require vlc,libvlc,ffmpeg --data-dir "$RUNNER_TEMP/st" 2>&1 | tee "$LOG"
+          then
+            msg=$(tail -n 60 "$LOG" | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=AppImage self-test failed::$msg"
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: bm4vlc-linux
@@ -116,7 +146,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           path: packages

@@ -57,20 +57,7 @@ def pe_bits(dll_path: Path) -> int | None:
 
 
 def _windows_candidate_dirs() -> list[tuple[Path, str]]:
-    dirs: list[tuple[Path, str]] = []
-    try:
-        import winreg
-
-        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
-            for key_path in (r"SOFTWARE\VideoLAN\VLC", r"SOFTWARE\WOW6432Node\VideoLAN\VLC"):
-                try:
-                    with winreg.OpenKey(hive, key_path) as key:
-                        install_dir, _type = winreg.QueryValueEx(key, "InstallDir")
-                except OSError:
-                    continue
-                dirs.append((Path(install_dir), "installed VLC (registry)"))
-    except ImportError:  # pragma: no cover - Windows only
-        pass
+    dirs = [(install_dir, "installed VLC (registry)") for install_dir in platform_support.windows_registry_vlc_dirs()]
     for root in platform_support._windows_program_files():
         dirs.append((root / "VideoLAN" / "VLC", f"installed VLC ({root})"))
     return dirs
