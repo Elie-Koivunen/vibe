@@ -69,7 +69,7 @@ jobs:
           LOG="$BUILD_TMP/build.log"
           if ! python packaging/build.py --vlc-dir "$BUILD_TMP/vlc/vlc-${VLC_VERSION}" --ffmpeg "$FFMPEG_EXE" --out dist 2>&1 | tee "$LOG"
           then
-            msg=$(tail -n 60 "$LOG" | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            msg=$(grep -vE '^[0-9]+ INFO:' "$LOG" | tail -n 30 | cut -c1-180 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
             echo "::error title=Windows build failed::$msg"
             exit 1
           fi
@@ -115,7 +115,7 @@ jobs:
           LOG="$RUNNER_TEMP/build.log"
           if ! python packaging/build.py --appimage --require vlc,libvlc,ffmpeg --out dist 2>&1 | tee "$LOG"
           then
-            msg=$(tail -n 60 "$LOG" | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            msg=$(grep -vE '^[0-9]+ INFO:' "$LOG" | tail -n 30 | cut -c1-180 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
             echo "::error title=Linux build failed::$msg"
             exit 1
           fi
@@ -126,7 +126,7 @@ jobs:
           LOG="$RUNNER_TEMP/appimage.log"
           if ! APPIMAGE_EXTRACT_AND_RUN=1 dist/*.AppImage --self-test --require vlc,libvlc,ffmpeg --data-dir "$RUNNER_TEMP/st" 2>&1 | tee "$LOG"
           then
-            msg=$(tail -n 60 "$LOG" | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            msg=$(grep -vE '^[0-9]+ INFO:' "$LOG" | tail -n 30 | cut -c1-180 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
             echo "::error title=AppImage self-test failed::$msg"
             exit 1
           fi

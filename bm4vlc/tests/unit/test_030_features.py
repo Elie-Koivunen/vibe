@@ -373,3 +373,20 @@ def test_source_checkout_leaves_the_library_path_alone(monkeypatch) -> None:
     monkeypatch.setenv("LD_LIBRARY_PATH", "/somewhere")
     platform_support.restore_child_library_path()
     assert platform_support.os.environ["LD_LIBRARY_PATH"] == "/somewhere"
+
+
+def test_a_libvlc_that_cannot_be_loaded_is_reported_not_fatal(tmp_path: Path, monkeypatch, only_explicit_dirs) -> None:
+    """python-vlc exits the process when its library can't be loaded; the loader must
+    turn that into LibVlcUnavailable instead."""
+    monkeypatch.setattr(libvlc_loader, "_loaded", None)
+    broken = tmp_path / "broken-vlc"
+    lib_dir = broken / "usr" / "lib" / "x86_64-linux-gnu"
+    lib_dir.mkdir(parents=True)
+    name = "libvlc.dll" if platform_support.IS_WINDOWS else "libvlc.so.5"
+    target = (broken if platform_support.IS_WINDOWS else lib_dir) / name
+    target.write_bytes(b"not a shared library")
+    if platform_support.IS_WINDOWS:
+        monkeypatch.setattr(libvlc_loader, "pe_bits", lambda _p: None)  # unreadable header: not rejected early
+    with pytest.raises(libvlc_loader.LibVlcUnavailable, match="could not be loaded"):
+        libvlc_loader.load_vlc_module(str(broken))
+    assert libvlc_loader.loaded_location() is None

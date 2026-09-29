@@ -152,13 +152,19 @@ def load_vlc_module(explicit_dir: str | None = None) -> Any:
         os.environ["PYTHON_VLC_MODULE_PATH"] = location.plugins
         os.environ.setdefault("VLC_PLUGIN_PATH", location.plugins)
     try:
+        # Load it ourselves first: python-vlc's import calls sys.exit() when the library
+        # it was pointed at can't be loaded, and hides the reason.
+        ctypes.CDLL(location.library)
+    except OSError as exc:
+        raise LibVlcUnavailable(f"libVLC at {location.library} could not be loaded: {exc}") from exc
+    try:
         import vlc  # noqa: PLC0415 - must happen after the environment is prepared
     except ImportError as exc:
         raise LibVlcUnavailable(
             "python-vlc is not installed (`pip install python-vlc`); the in-app player needs it."
         ) from exc
-    except OSError as exc:
-        raise LibVlcUnavailable(f"libVLC at {location.library} could not be loaded: {exc}") from exc
+    except (OSError, NotImplementedError, SystemExit) as exc:  # python-vlc's own failure modes
+        raise LibVlcUnavailable(f"libVLC at {location.library} could not be loaded: {exc!r}") from exc
     if getattr(vlc, "dll", None) is None:
         raise LibVlcUnavailable(f"python-vlc could not bind libVLC at {location.library}")
     _loaded = (vlc, location)

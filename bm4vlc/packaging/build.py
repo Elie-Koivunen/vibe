@@ -70,7 +70,7 @@ def run_pyinstaller(work: Path, icon: Path | None) -> Path:
     if icon is not None:
         env["BM4VLC_ICON"] = str(icon)
     subprocess.run(
-        [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
+        [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--log-level", "WARN",
          "--distpath", str(work / "dist"), "--workpath", str(work / "pyi"), str(HERE / "bm4vlc.spec")],
         check=True, env=env, cwd=ROOT,
     )
