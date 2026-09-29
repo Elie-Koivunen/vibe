@@ -86,7 +86,12 @@ The self-test needs every component (`--deps` all OK, clipboard tools excepted).
 only if a window can be opened. The tests use a temporary settings file, so they never touch yours.
 A failing run doesn't stop the others: each failure is printed as `FAIL` with its traceback, the
 remaining suites still run, and the summary line reads `FAILED: …` (exit code 1) instead of
-`ALL PASS`.
+`ALL PASS`. A failed GUI run's window is closed before the next run starts.
+
+**Platform-dependent tests.** Code paths that check `sys.platform` (e.g. `component_status()`)
+behave differently on Windows, macOS and Linux. A test of one platform's branch must set
+`sys.platform` itself and restore it in `finally`, as `_t_platform` and `gui_wsl_tests` do. CI
+runs on Windows and Linux precisely to catch this.
 
 | Suite | Checks per run | Covers |
 |---|---|---|
@@ -110,6 +115,7 @@ letting them open. Restore every monkeypatch in a `finally` block.
 key directly.** A synthetic key press only reaches a window that has keyboard focus, and the
 operating system may refuse that: Windows' foreground lock on CI machines, or you working in
 another window while the tests run. `press` sends the real key event when the input box has focus.
+Also note that Tk's `<Control-1>` means Ctrl + *mouse button* 1; the digit key is `<Control-Key-1>`.
 Otherwise it runs the handler that the key is bound to (from `App.shortcut_handlers`) and checks
 that it returns `"break"`, which is what keeps Tk's own text-box bindings from firing. In 1.3.0,
 direct `event_generate` calls made the GUI suite fail on GitHub's Windows runners and on a busy

@@ -186,7 +186,7 @@ CI lives at the repository root: `.github/workflows/vcode2bar-selftest.yml`.
 
 ## Versions and archive
 
-The current version is **1.3.1**. Earlier versions are never deleted. They are kept unchanged in
+The current version is **1.3.2**. Earlier versions are never deleted. They are kept unchanged in
 [`archive/`](archive/) and tagged in git (`vcode2bar-v1.2.0`, `vcode2bar-v1.3.0`, `vcode2bar-v1.3.1`, …).
 
 ## License

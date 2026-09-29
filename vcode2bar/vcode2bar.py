@@ -47,7 +47,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -1682,7 +1682,7 @@ class _Actions:
             im = render_image(parse(self.form_code), with_text=self.show_text.get())
             im.thumbnail((max(self.c_prev.winfo_width() - 20, 300), max(self.c_prev.winfo_height() - 20, 50)),
                          Image.LANCZOS)
-            self._cphoto = ImageTk.PhotoImage(im)
+            self._cphoto = ImageTk.PhotoImage(im, master=self.root)
             self.c_prev.config(image=self._cphoto)
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
@@ -2435,7 +2435,9 @@ class App(_Actions):
         h = max(self.prev.winfo_height() - 20, 60)
         im = self.img.copy()
         im.thumbnail((w, h), Image.LANCZOS)
-        self._photo = ImageTk.PhotoImage(im)
+        # master= ties the image to this window's Tk; without it Tk uses the *first* Tk instance
+        # created, which breaks the preview when more than one exists (e.g. a leftover test window)
+        self._photo = ImageTk.PhotoImage(im, master=self.root)
         self.prev.config(image=self._photo)
 
     # ---------- actions ----------
@@ -3373,10 +3375,16 @@ def gui_wsl_tests(app, root):
         assert popens and popens[-1][0] == "explorer.exe" and popens[-1][1].startswith("\\\\wsl.localhost"); n += 1
         shutil.which = lambda name: "/usr/bin/wslview" if name == "wslview" else None
         app.print_pdf(); assert popens[-1][0] == "wslview"; n += 1
-        # 7 component report mentions the WSL routes
+        # 7 component report mentions the WSL routes. WSL is Linux, so look like Linux too: on real
+        #   Windows/macOS component_status() checks the OS first and never reaches the WSL branch
         shutil.which = lambda name: None
-        names = [c[0] for c in component_status()]
-        assert any("WSL" in x and "clipboard" in x for x in names) and any("print" in x for x in names); n += 1
+        real_platform = sys.platform
+        try:
+            sys.platform = "linux"
+            names = [c[0] for c in component_status()]
+        finally:
+            sys.platform = real_platform
+        assert any("WSL" in x and "clipboard" in x for x in names) and any("print" in x for x in names), names; n += 1
     finally:
         (g["IS_WSL"], subprocess.run, subprocess.Popen, shutil.which, messagebox.showwarning) = saved
         wsl_windows_env.cache_clear()
@@ -3586,6 +3594,12 @@ def selftest(runs: int = 1) -> int:
                         n = fn(i * mult)
                 except Exception:  # noqa: BLE001 - report it and carry on, so one run shows every failure
                     os.chdir(cwd)
+                    # a failed GUI run never reached app.close(): close its window, or the next run
+                    # would start with two Tk instances and fail for that reason alone
+                    leftover = getattr(tk, "_default_root", None) if tk is not None else None
+                    if leftover is not None:
+                        with contextlib.suppress(Exception):
+                            leftover.destroy()
                     failed.append(f"{name} run {i}")
                     print(f"{name:9} run {i:2d}/{runs}: FAIL\n{traceback.format_exc()}", flush=True)
                     continue

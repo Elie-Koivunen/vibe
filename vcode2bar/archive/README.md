@@ -7,6 +7,7 @@ the previous version is kept here unchanged, in the exact form it was delivered 
 |---|---|---|---|
 | [`v1.2.0/`](v1.2.0/) | 1.2.0 | `files.zip` – the original delivery: `vcode2bar.zip` (full project) + a loose copy of `vcode2bar.py` (byte-identical to the one inside the project zip) | `vcode2bar-v1.2.0` |
 | [`v1.3.0/`](v1.3.0/) | 1.3.0 | `vcode2bar-1.3.0.zip` – the released project folder (without `archive/`) plus its CI workflow `.github/workflows/vcode2bar-selftest.yml`, exported with `git archive` from the tag | `vcode2bar-v1.3.0` |
+| [`v1.3.1/`](v1.3.1/) | 1.3.1 | `vcode2bar-1.3.1.zip` – same layout as 1.3.0 | `vcode2bar-v1.3.1` |
 
 Every version is also tagged in git (`git tag -l "vcode2bar-v*"`), so
 `git checkout vcode2bar-v1.2.0 -- vcode2bar/` restores it as it was imported.

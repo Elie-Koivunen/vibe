@@ -4,17 +4,39 @@ All notable changes. Versions follow [semantic versioning](https://semver.org/).
 Every released version is archived unchanged under [`archive/`](archive/) and tagged
 `vcode2bar-v<version>` in git.
 
+## 1.3.2 – 2026-09-29
+
+Fixes the failing Windows jobs of the "vcode2bar selftest" CI. The previous version is archived in
+[`archive/v1.3.1/`](archive/v1.3.1/).
+
+**Correction to 1.3.1.** 1.3.1 blamed the Windows CI failure on keyboard focus. Its new failure
+annotations showed the real cause, which follows below. The focus fix in 1.3.1 was still needed:
+it fixed test failures reproduced locally on a busy desktop. It just wasn't what broke Windows CI.
+
+### Fixed
+- **The Windows CI failure.** A GUI test pretends to run under WSL and checks that the component
+  report lists the WSL clipboard and print routes. On real Windows (and macOS), `component_status()`
+  checks the operating system first, so the WSL branch is unreachable and the check always failed.
+  This test was wrong from 1.2.0 on and never caught, because 1.2.0's workflow sat in a subfolder
+  where GitHub doesn't run it. It now also presents the platform as Linux, which WSL is.
+- **One failed GUI run broke the next.** A failed run never reached `app.close()`, so its window
+  stayed open and the next run started with two Tk instances. The self-test now closes a failed
+  run's window before carrying on.
+- **Barcode previews are tied to their own window** (`PhotoImage(..., master=self.root)`). Without
+  this, Tk attaches images to the *first* Tk instance created, which fails as soon as there is
+  more than one, as in the case above.
+
 ## 1.3.1 – 2026-09-29
 
-Fixes the red "vcode2bar selftest" runs on GitHub. The 1.3.0 run passed on all four Ubuntu jobs but
-failed on both Windows jobs. The previous version is archived in [`archive/v1.3.0/`](archive/v1.3.0/).
+Targeted the red "vcode2bar selftest" runs on GitHub. The 1.3.0 run passed on all four Ubuntu jobs
+but failed on both Windows jobs. The previous version is archived in [`archive/v1.3.0/`](archive/v1.3.0/).
+*(The actual cause of the Windows failure was found and fixed in 1.3.2, see there.)*
 
 ### Fixed
 - **Keyboard tests needed real keyboard focus.** The GUI self-test simulates key presses (`Ctrl+L`,
   `Ctrl+I`, `F1`, `Esc`, …), and a simulated key press only reaches a window that has keyboard
-  focus. The tests failed whenever the operating system didn't give the test window focus: on
-  GitHub's Windows machines (Windows' foreground lock stops a background program from taking focus),
-  or on a desktop where you are working in another window. The same failure was reproduced locally.
+  focus. The tests failed whenever the operating system didn't give the test window focus, which
+  was reproduced locally while working in another window, and can happen on CI machines too.
   The tests now send the real key when the window has focus. Otherwise they run the shortcut's
   handler directly, which is exactly what the key binding runs, and check that it returns `"break"`
   so Tk's own text-box keys stay blocked. The app itself is unchanged, but it now records its
