@@ -6,6 +6,9 @@ name: vcode2bar selftest
 
 on:
   push:
+    # branches only: GitHub ignores `paths` for tag pushes, so without this every tag
+    # (e.g. bm4vlc-v0.2.0) would run this workflow too
+    branches: ["**"]
     paths: ["vcode2bar/**", ".github/workflows/vcode2bar-selftest.yml"]
   pull_request:
     paths: ["vcode2bar/**", ".github/workflows/vcode2bar-selftest.yml"]
@@ -29,8 +32,8 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5         # v5 / v6: Node 24 (v4 / v5 used the deprecated Node 20)
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - name: System libraries (Linux)
@@ -45,14 +48,23 @@ jobs:
       - name: Components
         working-directory: ${{ env.WORKDIR }}
         run: python vcode2bar.py --deps
-      - name: Self-test (Linux, virtual display)
-        if: runner.os == 'Linux'
+      - name: Self-test
         working-directory: ${{ env.WORKDIR }}
-        run: xvfb-run -a python vcode2bar.py --selftest 2
-      - name: Self-test (Windows)
-        if: runner.os == 'Windows'
-        working-directory: ${{ env.WORKDIR }}
-        run: python vcode2bar.py --selftest 2
+        run: |
+          # Linux needs a virtual display for the GUI suite
+          if [ "$RUNNER_OS" = "Linux" ]; then py="xvfb-run -a python"; else py="python"; fi
+          set +e
+          $py vcode2bar.py --selftest 2 2>&1 | tee "$RUNNER_TEMP/selftest.log"
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            # show the failure on the run's summary page (job logs need a GitHub sign-in to read)
+            msg=$(grep -v "PASS (" "$RUNNER_TEMP/selftest.log" | tail -n 60 | tr -d '\r' \
+                  | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g')
+            echo "::error title=vcode2bar selftest failed (${{ matrix.os }}, Python ${{ matrix.python }})::$msg"
+            { echo '### vcode2bar selftest failed'; echo '```'; tail -n 80 "$RUNNER_TEMP/selftest.log"; echo '```'; } \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$rc"
       - name: Install as a package (pip install . -> vcode2bar command)
         working-directory: ${{ env.WORKDIR }}
         run: |

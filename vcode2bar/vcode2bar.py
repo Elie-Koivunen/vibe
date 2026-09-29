@@ -47,7 +47,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -1940,6 +1940,7 @@ class App(_Actions):
         self.root, self.lang = root, lang
         self.vb: VirtualBarcode | None = None
         self.img: Image.Image | None = None
+        self.shortcut_handlers: dict = {}      # "<Control-o>" -> bound handler (used by the self-test)
         self.verified = False                  # last read-back check result
         self.render_error: str | None = None
         self._photo = None
@@ -2051,6 +2052,7 @@ class App(_Actions):
         def handler(_e=None):
             fn()
             return "break"
+        self.shortcut_handlers[seq] = handler
         self.root.bind(seq, handler)
         self.txt.bind(seq, handler)      # widget binding runs first; "break" stops Tk's text defaults
         self.txt.focus_set()
@@ -2767,6 +2769,20 @@ def dec(img):
 def pump(root):
     for _ in range(5): root.update(); root.update_idletasks()
 
+def press(app, root, seq):
+    """Press a key in the input box. A synthetic key event only reaches a window that has keyboard
+    focus, which a busy desktop or a CI machine (Windows foreground lock) may refuse to give. Then the
+    shortcut's handler is run directly instead: it is exactly what the key binding runs, and its
+    "break" result is what stops Tk's own text-box bindings (e.g. Ctrl+O = insert newline)."""
+    for _ in range(3):
+        app.txt.focus_force(); pump(root)
+        if root.focus_get() is app.txt:
+            app.txt.event_generate(seq); pump(root)
+            return "event"
+    assert app.shortcut_handlers[seq]() == "break", seq
+    pump(root)
+    return "handler"
+
 def _t_gui(seed):
     n = 0; rng = random.Random(seed)
     root = tk.Tk(); root.geometry("900x700")
@@ -2977,15 +2993,22 @@ def gui_menu_tests(app, root):
         # 6 shortcuts inside the text box: action runs, Tk's Emacs keys do NOT edit the text
         filedialog.askopenfilenames = lambda **k: ()           # user cancels
         filedialog.asksaveasfilename = lambda **k: ""
-        app.set_input(USER); pump(root); app.txt.focus_force(); pump(root)
-        for key in ("<Control-o>", "<Control-e>", "<Control-l>", "<Control-2>", "<Control-1>"):
-            app.txt.event_generate(key); pump(root)
+        app.set_input(USER); pump(root)
+        # ("<Control-1>" would be Ctrl + mouse button 1 in Tk; the digit keys are "<Control-Key-1>")
+        for key in ("<Control-o>", "<Control-e>", "<Control-l>", "<Control-Key-2>", "<Control-Key-1>"):
+            press(app, root, key)
             assert app.get_input() == USER, (key, repr(app.get_input())); n += 1
-        before = len(app.records); app.list_clear(); app.txt.event_generate("<Control-l>"); pump(root)
-        assert len(app.records) == 1 and before >= 0; n += 1
-        app.txt.event_generate("<F1>"); pump(root)
-        assert app.last_help[1] == T["en"]["guide_text"]; app.last_help[0].destroy(); n += 1
-        app.txt.event_generate("<Escape>"); pump(root); assert app.get_input() == "" and app.vb is None; n += 1
+        press(app, root, "<Control-Key-3>"); assert app.nb.select() == str(app.list_tab); n += 1
+        press(app, root, "<Control-Key-2>"); assert app.nb.select() == str(app.create_tab); n += 1
+        press(app, root, "<Control-Key-1>"); assert app.nb.select() == str(app.main); n += 1
+        app.list_clear(); press(app, root, "<Control-l>")
+        assert len(app.records) == 1; n += 1
+        press(app, root, "<F1>")
+        assert app.last_help[1] == T["en"]["guide_text"]; n += 1
+        had_focus = root.focus_get() is not None
+        app.last_help[0].destroy(); pump(root)
+        assert not had_focus or root.focus_get() is app.txt, root.focus_get(); n += 1   # focus handed back
+        press(app, root, "<Escape>"); assert app.get_input() == "" and app.vb is None; n += 1
         # 7 settings: default English (even with a Finnish locale), language remembered
         g = globals(); saved_cfg, saved_lang = (g["CONFIG_PATH"], g["LEGACY_CONFIG_PATH"]), os.environ.get("LANG")
         g["CONFIG_PATH"] = tmp / "sub" / "cfg.json"; g["LEGACY_CONFIG_PATH"] = tmp / "none.json"
@@ -3123,7 +3146,7 @@ def _t_create(seed):
 def gui_create_tests(app, root, rng):
     n = 0
     app.lang_var.set("en"); pump(root)
-    app.txt.focus_force(); app.txt.event_generate("<Control-n>"); pump(root)
+    press(app, root, "<Control-n>")
     assert app.nb.select() == str(app.create_tab); n += 1
     fv = app.fv
     # 1 empty form waits, buttons disabled
@@ -3239,8 +3262,7 @@ def gui_batch_tests(app, root):
                        "Rikki;FI6014323000208604;10;40905;\n").encode("utf-8-sig"))
         filedialog.askopenfilename = lambda **k: str(p)
         # 1 Ctrl+I from the text box: dialog -> import; Tk's own Ctrl+I (insert tab) must not fire
-        app.set_input(USER); app.txt.focus_force(); pump(root)
-        app.txt.event_generate("<Control-i>"); pump(root)
+        app.set_input(USER); press(app, root, "<Control-i>")
         assert [(vb.raw, s) for vb, s in app.records] == [(USER, "Vuokra"), (RF, "Sähkö")], app.records; n += 1
         assert app.get_input() == USER; n += 1
         assert app.nb.select() == str(app.list_tab) and app.nb.tab(app.list_tab, "text") == "List (2)"; n += 1
@@ -3549,7 +3571,7 @@ def selftest(runs: int = 1) -> int:
         print(f"GUI suite skipped (no display: {e})")
     if gui_ok:
         suites.append(("gui", _t_gui, 104729))
-    total = 0
+    total, failed = 0, []
     # the tests never read or overwrite the user's real settings file
     g = globals()
     saved_cfg = (g["CONFIG_PATH"], g["LEGACY_CONFIG_PATH"])
@@ -3558,13 +3580,23 @@ def selftest(runs: int = 1) -> int:
     try:
         for name, fn, mult in suites:
             for i in range(1, runs + 1):
-                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    n = fn(i * mult)
+                cwd = os.getcwd()
+                try:
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        n = fn(i * mult)
+                except Exception:  # noqa: BLE001 - report it and carry on, so one run shows every failure
+                    os.chdir(cwd)
+                    failed.append(f"{name} run {i}")
+                    print(f"{name:9} run {i:2d}/{runs}: FAIL\n{traceback.format_exc()}", flush=True)
+                    continue
                 total += n
                 print(f"{name:9} run {i:2d}/{runs}: PASS ({n} checks)", flush=True)
     finally:
         g["CONFIG_PATH"], g["LEGACY_CONFIG_PATH"] = saved_cfg
         shutil.rmtree(cfg_dir, ignore_errors=True)
+    if failed:
+        print(f"FAILED: {', '.join(failed)} ({total} checks passed in the other runs)")
+        return 1
     print(f"ALL PASS - {total} checks")
     return 0
 

@@ -84,6 +84,9 @@ xvfb-run -a python vcode2bar.py --selftest 2   # headless Linux: virtual display
 
 The self-test needs every component (`--deps` all OK, clipboard tools excepted). The GUI suite runs
 only if a window can be opened. The tests use a temporary settings file, so they never touch yours.
+A failing run doesn't stop the others: each failure is printed as `FAIL` with its traceback, the
+remaining suites still run, and the summary line reads `FAILED: …` (exit code 1) instead of
+`ALL PASS`.
 
 | Suite | Checks per run | Covers |
 |---|---|---|
@@ -92,7 +95,7 @@ only if a window can be opened. The tests use a temporary settings file, so they
 | `read/csv` | ≈60 | CSV in both dialects, injection guard, images rotated/tilted/scaled/noisy/JPEG, two codes in one image, non-bank barcodes rejected, image-only/text-only/empty PDFs, text extraction with stray digits, CLI `--read` |
 | `batch` | ≈32 | Batch CSV in English/Finnish/Swedish/Norwegian headers, `,`/`;`/tab, UTF-8/BOM/cp1252, line numbers and fields of bad rows, re-import of exports, 60 random rows, CLI `--batch` with every output, `--read` with folders and wildcards, console languages and the saved-language fallback |
 | `platform` | ≈15 | Settings path per OS, legacy settings, consoles that can't print `✓`/`€`, no display → exit 4, string-table completeness, Python 3.9 grammar |
-| `gui` | ≈236 | Clipboard pre-fill, fields and overdue colours, preview and read-back, invalid input, typing debounce, all 4 languages for every menu, help window and widget, shortcuts inside the text box, settings persistence, saving PNG/SVG/PDF, the Create form, file/clipboard reading, list and CSV export, **CSV import**, error reporting when rendering/preview/zbar fail, WSL integration (with stubbed Windows tools) |
+| `gui` | ≈240 | Clipboard pre-fill, fields and overdue colours, preview and read-back, invalid input, typing debounce, all 4 languages for every menu, help window and widget, shortcuts inside the text box, settings persistence, saving PNG/SVG/PDF, the Create form, file/clipboard reading, list and CSV export, **CSV import**, error reporting when rendering/preview/zbar fail, WSL integration (with stubbed Windows tools) |
 
 Random data comes from fixed seeds (`run × prime`), so a failure can be reproduced by running the
 same number of runs. The generators (`random_case`, `mk_iban`, `mk_rf`, `fi_ref`) are independent
@@ -102,6 +105,15 @@ re-implementations, not calls into the code under test.
 For the CLI use `_cli([...], stdin_text=None)`, which returns `(rc, stdout, stderr)`. For the GUI,
 call `pump(root)` after every action, and stub dialogs (`filedialog.*`, `messagebox.*`) instead of
 letting them open. Restore every monkeypatch in a `finally` block.
+
+**Keyboard shortcuts in tests: use `press(app, root, "<Control-l>")`, never `event_generate` on a
+key directly.** A synthetic key press only reaches a window that has keyboard focus, and the
+operating system may refuse that: Windows' foreground lock on CI machines, or you working in
+another window while the tests run. `press` sends the real key event when the input box has focus.
+Otherwise it runs the handler that the key is bound to (from `App.shortcut_handlers`) and checks
+that it returns `"break"`, which is what keeps Tk's own text-box bindings from firing. In 1.3.0,
+direct `event_generate` calls made the GUI suite fail on GitHub's Windows runners and on a busy
+desktop.
 
 ## Adding or changing UI text / a language
 
@@ -115,12 +127,18 @@ letting them open. Restore every monkeypatch in a `finally` block.
 ## Continuous integration
 
 `.github/workflows/vcode2bar-selftest.yml` (at the **repository root**, because GitHub only runs
-workflows from there) runs on every push or PR that touches `vcode2bar/`:
+workflows from there) runs on every branch push or PR that touches `vcode2bar/`. Tag pushes are
+excluded, because GitHub ignores `paths` for tags and would otherwise run it for every project's tags.
 
 - Windows, Ubuntu 22.04 and Ubuntu 24.04 × Python 3.9 and 3.12
 - `pip install -r requirements.txt`, `--deps`, `--selftest 2` (Linux under `xvfb-run`)
 - `pip install .` and a smoke test of the installed `vcode2bar` command, including `--batch` on the
   example file
+
+**When it fails:** GitHub shows full job logs only to signed-in users. The workflow therefore also
+posts the failing part of the self-test output as an error annotation and on the run's **Summary**
+page, where anyone can read it, including through the API
+(`GET /repos/Elie-Koivunen/vibe/check-runs/<job id>/annotations`).
 
 ## Packaging
 
