@@ -3,6 +3,34 @@
 All notable changes to VLC Bookmark Studio (bm4vlc). Previous versions are kept in
 [`archive/`](archive/) and tagged in git (`bm4vlc-v<version>`).
 
+## 0.3.1 — 2026-09-30
+
+Release-pipeline fixes: the first version with published packages. 0.3.0 was tagged,
+but its Linux package failed its own self-test in CI, so no release was published.
+
+### Fixed
+
+- **Linux package: the in-app player could not start.** PyInstaller bundled the build
+  machine's `libvlc.so.5`/`libvlccore.so.9` (found through python-vlc's ctypes calls).
+  VLC looks for its plugins next to wherever libvlccore was loaded from, found none in
+  the bundle and refused to create an instance. libVLC is no longer bundled (Linux
+  uses the system VLC, Windows ships a complete `vlc/` folder), and the build fails
+  if one slips in.
+- **A libVLC that can't be loaded no longer closes the app.** python-vlc calls
+  `sys.exit()` during import when the library it is pointed at fails to load (and
+  raises `NotImplementedError` on Linux); the loader loads the library itself first
+  and reports these as "in-app player unavailable".
+- Errors about libVLC refusing to start now name the libvlccore that was loaded and
+  the plugin path in use.
+- CI: the Linux `mypy` job failed on Windows-only registry code (now behind a
+  `sys.platform` check, in one place); mypy runs for both Linux and Windows.
+
+### CI
+
+- A failing release build posts the end of its output as an annotation, readable
+  without signing in; changes to `packaging/` on main run a build-only release.
+- `actions/checkout@v5`, `actions/setup-python@v6` (Node 24).
+
 ## 0.3.0 — 2026-09-29
 
 Features and portability release. Tested on Windows 11 (Python 3.12, VLC 3.0.23 32-bit
