@@ -1,0 +1,5 @@
+name,iban,amount,reference,due
+Rent October,FI02 5000 4640 0013 02,"850,00",40905,01.10.2026
+Electricity,FI79 4405 2020 0360 82,63.40,RF09 8685 1625 9619 897,2026-10-15
+Donation (payer chooses amount),FI58 1017 1000 0001 22,,559582243294671,
+Typo in account,FI02 5000 4640 0013 03,10,40905,

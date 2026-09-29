@@ -1,0 +1,7 @@
+# Keep LF endings even on Windows checkouts (core.autocrlf=true), so the same working copy
+# runs under WSL/Linux too (a CRLF shebang line breaks ./vcode2bar.py there).
+* text=auto eol=lf
+*.bat text eol=crlf
+*.png binary
+*.zip binary
+*.pdf binary

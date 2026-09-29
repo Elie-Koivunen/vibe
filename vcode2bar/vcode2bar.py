@@ -8,13 +8,15 @@ Single-file tool with GUI and CLI:
     (PNG 600 dpi, SVG, print-ready A4 PDF)
   * read barcodes back from images (photos, scans, screenshots) and invoice PDFs
   * collect codes and export CSV (Excel-Nordic or standard)
-  * GUI in English (default), Finnish, Swedish and Norwegian
+  * batch: build / validate one code per row of a CSV file (GUI import or --batch)
+  * GUI and console output in English (default), Finnish, Swedish and Norwegian
 
 Usage:
     python vcode2bar.py                                  # GUI
     python vcode2bar.py CODE [-o name] [--format png|svg|both] [--verify]
     python vcode2bar.py CODE1 CODE2 --csv out.csv [--excel]
-    python vcode2bar.py --read photo.jpg invoice.pdf [--csv out.csv]
+    python vcode2bar.py --read photo.jpg invoices/ [--csv out.csv]
+    python vcode2bar.py --batch invoices.csv [--csv out.csv] [-o stem --format pdf]
     python vcode2bar.py --deps                           # show optional components
     python vcode2bar.py --selftest [RUNS]                # built-in test suite
 
@@ -45,7 +47,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -81,15 +83,17 @@ class VirtualBarcode:
     reference: str
     due_date: date | None
 
-    def describe(self) -> str:
-        iban_fmt = " ".join(self.iban[i:i + 4] for i in range(0, len(self.iban), 4))
-        amt = "ei annettu" if self.amount == 0 else f"{self.amount:.2f} EUR".replace(".", ",")
-        due = self.due_date.strftime("%d.%m.%Y") if self.due_date else "ei annettu"
-        return (f"Versio:    {self.version}\n"
-                f"Tili:      {iban_fmt}\n"
-                f"Summa:     {amt}\n"
-                f"Viite:     {self.reference}\n"
-                f"Eräpäivä:  {due}")
+    def describe(self, lang: str = "en") -> str:
+        """Console summary in one of LANGUAGES (same labels and formatting as the GUI)."""
+        t = T.get(lang, T["en"])
+        rows = [(t["version"], f"{self.version} ({'RF' if self.version == 5 else 'FI'})"),
+                (t["account"], fmt_iban(self.iban)),
+                (t["amount"], fmt_amount(self, lang if lang in T else "en")),
+                # reference ungrouped, so it can be copied straight into a bank app
+                (t["reference"], self.reference if self.reference.isalnum() else t["rf_nonnum"]),
+                (t["due"], self.due_date.strftime("%d.%m.%Y") if self.due_date else t["none"])]
+        w = max(len(k) for k, _ in rows) + 3
+        return "\n".join(f"{k + ':':<{w}}{v}" for k, v in rows)
 
 
 def _iban_ok(iban: str) -> bool:
@@ -362,7 +366,102 @@ def write_csv(records: list[dict], path: str | Path, excel_fi: bool = False) -> 
     return path
 
 
+# ---------------------------------------------------------------- batch: one code per CSV row
+# Accepted header names, compared after folding case, accents and punctuation
+# ("Eräpäivä" -> "erapaiva", "amount_eur" -> "amounteur"). First matching column wins.
+BATCH_COLUMNS = {
+    "code": ("code", "virtualbarcode", "virtuaaliviivakoodi", "virtuellstreckkod", "virtuellstrekkode"),
+    "iban": ("iban", "account", "tili", "tilinumero", "konto", "kontonummer"),
+    "amount": ("amount", "amounteur", "sum", "summa", "belopp", "belop"),
+    "reference": ("reference", "ref", "viite", "viitenumero", "referens", "referanse"),
+    "due": ("due", "duedate", "erapaiva", "forfallodag", "forfallodatum", "forfallsdato"),
+    "source": ("source", "name", "label", "invoice", "nimi", "lasku", "namn", "faktura", "navn"),
+}
+
+
+@dataclass
+class BatchRow:
+    line: int                        # line number in the file (the header is line 1)
+    source: str                      # 'source'/'name' column, else "file.csv:LINE"
+    vb: VirtualBarcode | None = None
+    error: str = ""
+    field: str = ""                  # iban / amount / reference / due / code, when error is set
+
+
+def _header_key(h: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", ascii_safe(h.strip()).lower())
+
+
+def read_batch_csv(path: str | Path) -> list[BatchRow]:
+    """Read a CSV with one payment per row and return one BatchRow per non-empty row.
+
+    Either a 'code' column (54-digit virtual barcode - so vcode2bar's own CSV exports re-import)
+    or 'iban' + 'reference' columns, optionally 'amount', 'due' and 'source'/'name'. Header names
+    may be English, Finnish, Swedish or Norwegian. Delimiter (',' ';' tab) and encoding (UTF-8 with
+    or without BOM, else Windows-1252 as saved by older Excel) are detected. A bad row does not stop
+    the others: it comes back with .error and .field set. Raises VirtualBarcodeError if the file
+    has no usable header."""
+    path = Path(path)
+    data = path.read_bytes()
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = data.decode("cp1252", "replace")
+    first = text.lstrip().split("\n", 1)[0]
+    delim = max((",", ";", "\t"), key=first.count) if any(c in first for c in ",;\t") else ","
+    reader = csv.reader(io.StringIO(text, newline=""), delimiter=delim)
+    header = next(reader, None)
+    if not header:
+        raise VirtualBarcodeError("the CSV file is empty")
+    keys = [_header_key(h) for h in header]
+    cols: dict[str, int] = {}
+    for fld, names in BATCH_COLUMNS.items():
+        for i, k in enumerate(keys):
+            if k in names and fld not in cols and i not in cols.values():
+                cols[fld] = i
+    if "code" not in cols and not {"iban", "reference"} <= cols.keys():
+        raise VirtualBarcodeError("the CSV needs a 'code' column, or 'iban' and 'reference' columns "
+                                  "(optional: amount, due, source) - found: " + ", ".join(header))
+    out = []
+    for row in reader:
+        if not any(c.strip() for c in row):
+            continue
+
+        def get(fld, row=row):
+            i = cols.get(fld)
+            return row[i].strip() if i is not None and i < len(row) else ""
+
+        r = BatchRow(reader.line_num, get("source") or f"{path.name}:{reader.line_num}")
+        try:
+            code = get("code").strip("=\"' ")        # Excel text form ="…" from write_csv(excel_fi=True)
+            r.vb = parse(code) if code else parse(build_code(get("iban"), get("amount"),
+                                                              get("reference"), get("due")))
+        except FieldError as e:
+            r.error, r.field = str(e), e.field
+        except VirtualBarcodeError as e:
+            r.error, r.field = str(e), "code"
+        out.append(r)
+    return out
+
+
 # ---------------------------------------------------------------- reading images / PDFs
+READ_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp", ".pdf")
+
+
+def expand_inputs(items) -> list[str]:
+    """--read arguments -> file list. A folder gives its images/PDFs (sorted, not recursive);
+    wildcards are expanded here because Windows shells pass '*.jpg' through literally."""
+    import glob
+    out: list[str] = []
+    for it in items:
+        p = Path(it)
+        if p.is_dir():
+            out += sorted(str(x) for x in p.iterdir() if x.is_file() and x.suffix.lower() in READ_EXTS)
+        elif any(ch in str(it) for ch in "*?[") and not p.exists():
+            out += sorted(glob.glob(str(it))) or [str(it)]   # no match: keep it so the error names it
+        else:
+            out.append(str(it))
+    return out
 @dataclass
 class ScanResult:
     source: str
@@ -529,7 +628,8 @@ def verify_png(png: Path, expected: str) -> bool:
     """Decode the PNG back with zbar and compare."""
     from PIL import Image
     from pyzbar.pyzbar import decode
-    res = decode(Image.open(png))
+    with Image.open(png) as im:          # closed at once - an open handle locks the file on Windows
+        res = decode(im)
     return len(res) == 1 and res[0].type == "CODE128" and res[0].data.decode() == expected
 
 
@@ -802,12 +902,18 @@ T = {'en': {'title': 'vcode2bar – virtual barcode ↔ barcode',
                       "valid Finnish reference, 'Convert to RF' makes an RF reference. 'Show barcode' opens "
                       'the result on the Barcode tab for saving or printing.\n'
                       '\n'
+                      '7. Many invoices at once: File → Import CSV… reads a spreadsheet with one payment per '
+                      'row (columns iban, amount, reference, due, and optionally name – or a code column) '
+                      'and adds every valid row to the List tab. Rows with errors are listed with their '
+                      'line numbers. Exported lists can be imported again.\n'
+                      '\n'
                       "The barcode follows the Finnish banks' specification (Finanssiala, "
                       'Pankkiviivakoodi-opas v5.3): Code 128 set C, no digits printed under the bars. '
                       'Everything runs locally – no data is sent anywhere.',
         'shortcut_rows': [('Ctrl+N', 'New from form'),
                           ('Ctrl+O', 'Open image/PDF'),
                           ('Ctrl+Shift+V', 'Paste image'),
+                          ('Ctrl+I', 'Import CSV'),
                           ('Ctrl+S', 'Save PNG'),
                           ('Ctrl+Shift+S', 'Save SVG'),
                           ('Ctrl+P', 'Print'),
@@ -857,7 +963,13 @@ T = {'en': {'title': 'vcode2bar – virtual barcode ↔ barcode',
         'render_err': '✗ Could not render the barcode: {e}',
         'verify_err': 'Read-back check error: {e}',
         'new_form': 'New from form…',
-        'unexpected': 'Unexpected error'},
+        'unexpected': 'Unexpected error',
+        'import_csv': 'Import CSV…',
+        'csv_files': 'CSV files',
+        'imported': 'Imported {n} new code(s) from {f}',
+        'import_skipped': '{n} row(s) skipped:',
+        'line': 'line',
+        'cli_overdue': 'NOTE: the due date has passed ({d} days ago).'},
  'fi': {'title': 'vcode2bar – virtuaaliviivakoodi ↔ viivakoodi',
         'paste_hint': 'Liitä virtuaaliviivakoodi (tai koko laskun teksti):',
         'paste': 'Liitä',
@@ -964,12 +1076,18 @@ T = {'en': {'title': 'vcode2bar – virtual barcode ↔ barcode',
                       "viitteen, 'Muunna RF-viitteeksi' tekee RF-viitteen. 'Näytä viivakoodi' avaa tuloksen "
                       'Viivakoodi-välilehdelle tallennettavaksi tai tulostettavaksi.\n'
                       '\n'
+                      '7. Monta laskua kerralla: Tiedosto → Tuo CSV… lukee taulukon, jossa on yksi maksu '
+                      'riviä kohden (sarakkeet tili, summa, viite, eräpäivä ja valinnaisesti nimi – tai '
+                      'koodi-sarake), ja lisää jokaisen kelvollisen rivin Lista-välilehdelle. Virheelliset '
+                      'rivit näytetään rivinumeroineen. Viedyt listat voi tuoda takaisin.\n'
+                      '\n'
                       'Viivakoodi noudattaa pankkien määritystä (Finanssiala, Pankkiviivakoodi-opas v5.3): '
                       'Code 128 C-merkistö, ei numeroita viivojen alla. Kaikki toimii paikallisesti – '
                       'tietoja ei lähetetä minnekään.',
         'shortcut_rows': [('Ctrl+N', 'Uusi lomakkeelta'),
                           ('Ctrl+O', 'Avaa kuva/PDF'),
                           ('Ctrl+Shift+V', 'Liitä kuva'),
+                          ('Ctrl+I', 'Tuo CSV'),
                           ('Ctrl+S', 'Tallenna PNG'),
                           ('Ctrl+Shift+S', 'Tallenna SVG'),
                           ('Ctrl+P', 'Tulosta'),
@@ -1019,7 +1137,13 @@ T = {'en': {'title': 'vcode2bar – virtual barcode ↔ barcode',
         'render_err': '✗ Viivakoodin piirtäminen epäonnistui: {e}',
         'verify_err': 'Takaisinlukuvirhe: {e}',
         'new_form': 'Uusi lomakkeelta…',
-        'unexpected': 'Odottamaton virhe'},
+        'unexpected': 'Odottamaton virhe',
+        'import_csv': 'Tuo CSV…',
+        'csv_files': 'CSV-tiedostot',
+        'imported': 'Tuotiin {n} uutta koodia tiedostosta {f}',
+        'import_skipped': '{n} riviä ohitettiin:',
+        'line': 'rivi',
+        'cli_overdue': 'HUOM: eräpäivä on jo mennyt ({d} pv sitten).'},
  'sv': {'title': 'vcode2bar – virtuell streckkod ↔ streckkod',
         'paste_hint': 'Klistra in den virtuella streckkoden (eller hela fakturatexten):',
         'paste': 'Klistra in',
@@ -1126,12 +1250,18 @@ T = {'en': {'title': 'vcode2bar – virtual barcode ↔ barcode',
                       "giltig finsk referens, 'Konvertera till RF' skapar en RF-referens. 'Visa streckkod' "
                       'öppnar resultatet på fliken Streckkod för att sparas eller skrivas ut.\n'
                       '\n'
+                      '7. Många fakturor på en gång: Arkiv → Importera CSV… läser en tabell med en betalning '
+                      'per rad (kolumnerna konto, belopp, referens, förfallodag och valfritt namn – eller en '
+                      'kod-kolumn) och lägger till varje giltig rad på fliken Lista. Rader med fel visas med '
+                      'radnummer. Exporterade listor kan importeras igen.\n'
+                      '\n'
                       'Streckkoden följer de finländska bankernas specifikation (Finanssiala, '
                       'Pankkiviivakoodi-opas v5.3): Code 128 teckenuppsättning C, inga siffror under '
                       'strecken. Allt körs lokalt – inga uppgifter skickas någonstans.',
         'shortcut_rows': [('Ctrl+N', 'Ny från formulär'),
                           ('Ctrl+O', 'Öppna bild/PDF'),
                           ('Ctrl+Shift+V', 'Klistra in bild'),
+                          ('Ctrl+I', 'Importera CSV'),
                           ('Ctrl+S', 'Spara PNG'),
                           ('Ctrl+Shift+S', 'Spara SVG'),
                           ('Ctrl+P', 'Skriv ut'),
@@ -1181,7 +1311,13 @@ T = {'en': {'title': 'vcode2bar – virtual barcode ↔ barcode',
         'render_err': '✗ Kunde inte rita streckkoden: {e}',
         'verify_err': 'Fel vid kontrolläsning: {e}',
         'new_form': 'Ny från formulär…',
-        'unexpected': 'Oväntat fel'},
+        'unexpected': 'Oväntat fel',
+        'import_csv': 'Importera CSV…',
+        'csv_files': 'CSV-filer',
+        'imported': 'Importerade {n} nya koder från {f}',
+        'import_skipped': '{n} rad(er) hoppades över:',
+        'line': 'rad',
+        'cli_overdue': 'OBS: förfallodagen har passerat (för {d} dagar sedan).'},
  'nb': {'title': 'vcode2bar – virtuell strekkode ↔ strekkode',
         'paste_hint': 'Lim inn den virtuelle strekkoden (eller hele fakturateksten):',
         'paste': 'Lim inn',
@@ -1286,12 +1422,18 @@ T = {'en': {'title': 'vcode2bar – virtual barcode ↔ barcode',
                       "gyldig finsk referanse, 'Konverter til RF' lager en RF-referanse. 'Vis strekkode' "
                       'åpner resultatet i fanen Strekkode for lagring eller utskrift.\n'
                       '\n'
+                      '7. Mange fakturaer samtidig: Fil → Importer CSV… leser en tabell med én betaling per '
+                      'rad (kolonnene konto, beløp, referanse, forfallsdato og eventuelt navn – eller en '
+                      'kode-kolonne) og legger hver gyldige rad til i fanen Liste. Rader med feil vises med '
+                      'linjenummer. Eksporterte lister kan importeres igjen.\n'
+                      '\n'
                       'Strekkoden følger de finske bankenes spesifikasjon (Finanssiala, '
                       'Pankkiviivakoodi-opas v5.3): Code 128 tegnsett C, ingen sifre under strekene. Alt '
                       'kjører lokalt – ingen opplysninger sendes noe sted.',
         'shortcut_rows': [('Ctrl+N', 'Ny fra skjema'),
                           ('Ctrl+O', 'Åpne bilde/PDF'),
                           ('Ctrl+Shift+V', 'Lim inn bilde'),
+                          ('Ctrl+I', 'Importer CSV'),
                           ('Ctrl+S', 'Lagre PNG'),
                           ('Ctrl+Shift+S', 'Lagre SVG'),
                           ('Ctrl+P', 'Skriv ut'),
@@ -1341,7 +1483,13 @@ T = {'en': {'title': 'vcode2bar – virtual barcode ↔ barcode',
         'render_err': '✗ Kunne ikke tegne strekkoden: {e}',
         'verify_err': 'Feil ved kontrollesing: {e}',
         'new_form': 'Ny fra skjema…',
-        'unexpected': 'Uventet feil'}}
+        'unexpected': 'Uventet feil',
+        'import_csv': 'Importer CSV…',
+        'csv_files': 'CSV-filer',
+        'imported': 'Importerte {n} nye koder fra {f}',
+        'import_skipped': '{n} rad(er) ble hoppet over:',
+        'line': 'linje',
+        'cli_overdue': 'MERK: forfallsdatoen er passert (for {d} dager siden).'}}
 
 
 FONT_CANDIDATES = [
@@ -1587,16 +1735,67 @@ class _Actions:
         t = T[self.lang]
         paths = filedialog.askopenfilenames(
             parent=self.root, initialdir=self.last_dir, title=t["load"],
-            filetypes=[(t["img_files"], "*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff *.webp *.pdf"),
-                       ("*", "*")])
+            filetypes=[(t["img_files"], " ".join("*" + e for e in READ_EXTS)), ("*", "*")])
         if paths:
             self.last_dir = Path(paths[0]).parent
             self.load_files(paths)
 
+    @contextlib.contextmanager
+    def _busy(self):
+        """Hourglass cursor while a slow read (big PDF, many photos) blocks the window."""
+        try:
+            self.root.config(cursor="watch"); self.root.update_idletasks()
+        except tk.TclError:
+            pass
+        try:
+            yield
+        finally:
+            try:
+                self.root.config(cursor="")
+            except tk.TclError:
+                pass
+
     def load_files(self, paths) -> list:
-        results = [read_file(p) for p in paths]
+        with self._busy():
+            results = [read_file(p) for p in paths]
         self._handle_results(results)
         return results
+
+    # ----- batch CSV import -----
+    def import_csv_dialog(self):
+        t = T[self.lang]
+        path = filedialog.askopenfilename(
+            parent=self.root, initialdir=self.last_dir, title=t["import_csv"],
+            filetypes=[(t["csv_files"], "*.csv *.txt"), ("*", "*")])
+        if path:
+            self.last_dir = Path(path).parent
+            return self.import_csv(path)
+        return None
+
+    def import_csv(self, path) -> list:
+        """Add every valid row of a batch CSV (see read_batch_csv) to the List tab;
+        rows that fail validation are listed in a warning with their line numbers."""
+        t = T[self.lang]
+        name = Path(path).name
+        try:
+            with self._busy():
+                rows = read_batch_csv(path)
+        except (OSError, VirtualBarcodeError) as e:
+            messagebox.showwarning(t["read_title"], f"{name}: {e}", parent=self.root)
+            return []
+        added = sum(self._add(r.vb, r.source, quiet=True) for r in rows if r.vb)
+        bad = [r for r in rows if r.error]
+        msg = t["imported"].format(n=added, f=name)
+        self.w_msg.config(text=msg)
+        if bad:
+            lines = [msg, "", t["import_skipped"].format(n=len(bad))]
+            lines += [f"  {t['line']} {r.line} ({r.field}): {r.error}" for r in bad[:12]]
+            if len(bad) > 12:
+                lines.append(f"  … +{len(bad) - 12}")
+            messagebox.showwarning(t["read_title"], "\n".join(lines), parent=self.root)
+        if added:
+            self.nb.select(self.list_tab)
+        return rows
 
     def paste_image(self):
         t = T[self.lang]
@@ -1741,6 +1940,8 @@ class App(_Actions):
         self.root, self.lang = root, lang
         self.vb: VirtualBarcode | None = None
         self.img: Image.Image | None = None
+        self.verified = False                  # last read-back check result
+        self.render_error: str | None = None
         self._photo = None
         self._after = None
         start = self.cfg.get("last_dir") or ((wsl_default_dir() if IS_WSL else None) or Path.home())
@@ -1834,7 +2035,7 @@ class App(_Actions):
         self._build_list_tab()
         self._build_create_tab()
         mod = "Command" if sys.platform == "darwin" else "Control"
-        for key, fn in [("o", self.load_dialog), ("V", self.paste_image),
+        for key, fn in [("o", self.load_dialog), ("V", self.paste_image), ("i", self.import_csv_dialog),
                         ("s", lambda: self.save("png")), ("S", lambda: self.save("svg")),
                         ("p", self.print_pdf), ("l", self.add_current), ("e", self.export_list_csv),
                         ("q", self.close), ("n", self.new_form),
@@ -1909,6 +2110,7 @@ class App(_Actions):
         m.add_separator()
         add(m, t["load"], self.load_dialog, "Ctrl+O")
         add(m, t["paste_img"], self.paste_image, "Ctrl+Shift+V")
+        add(m, t["import_csv"], self.import_csv_dialog, "Ctrl+I")
         m.add_separator()
         add(m, t["save_png"], lambda: self.save("png"), "Ctrl+S", "img")
         add(m, t["save_svg"], lambda: self.save("svg"), "Ctrl+Shift+S", "img")
@@ -1979,8 +2181,17 @@ class App(_Actions):
             row=1, column=0, columnspan=2, pady=8)
         w.rowconfigure(0, weight=1); w.columnconfigure(0, weight=1)
         w.bind("<Escape>", lambda e: w.destroy())
+        # hand the keyboard back to the main window, otherwise Esc/shortcuts go nowhere until a click
+        w.bind("<Destroy>", lambda e: self._refocus() if e.widget is w else None)
         self.last_help = (w, text)
         return w
+
+    def _refocus(self):
+        try:
+            if self.root.winfo_exists():
+                self.root.focus_force(); self.txt.focus_set()
+        except tk.TclError:
+            pass
 
     def show_guide(self):
         t = T[self.lang]
@@ -2632,6 +2843,7 @@ def _t_gui(seed):
     n += gui_menu_tests(app, root)
     n += gui_create_tests(app, root, rng)
     n += gui_robustness_tests(app, root)
+    n += gui_batch_tests(app, root)
     n += gui_wsl_tests(app, root)
     app.close()
     return n
@@ -3011,6 +3223,60 @@ def gui_robustness_tests(app, root):
     return n
 
 
+def gui_batch_tests(app, root):
+    """File → Import CSV: valid rows go to the List tab, bad rows are reported with line numbers."""
+    n = 0
+    shown = []
+    orig = (messagebox.showwarning, filedialog.askopenfilename)
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        messagebox.showwarning = lambda *a, **k: shown.append(a)
+        app.lang_var.set("en"); app.list_clear(); pump(root)
+        p = tmp / "lasku.csv"
+        p.write_bytes(("Nimi;Tili;Summa;Viite;Eräpäivä\n"
+                       "Vuokra;FI60 1432 3000 2086 03;50,00;40905;08.09.2026\n"
+                       "Sähkö;FI7944052020036082;4883,15;RF09 8685 1625 9619 897;12.06.2010\n"
+                       "Rikki;FI6014323000208604;10;40905;\n").encode("utf-8-sig"))
+        filedialog.askopenfilename = lambda **k: str(p)
+        # 1 Ctrl+I from the text box: dialog -> import; Tk's own Ctrl+I (insert tab) must not fire
+        app.set_input(USER); app.txt.focus_force(); pump(root)
+        app.txt.event_generate("<Control-i>"); pump(root)
+        assert [(vb.raw, s) for vb, s in app.records] == [(USER, "Vuokra"), (RF, "Sähkö")], app.records; n += 1
+        assert app.get_input() == USER; n += 1
+        assert app.nb.select() == str(app.list_tab) and app.nb.tab(app.list_tab, "text") == "List (2)"; n += 1
+        assert "Imported 2 new code(s) from lasku.csv" in app.w_msg.cget("text"); n += 1
+        assert shown and "line 4 (iban)" in shown[-1][1] and "1 row(s) skipped" in shown[-1][1]; n += 1
+        # 2 importing the same file again adds no duplicates
+        shown.clear(); app.import_csv(str(p)); pump(root)
+        assert len(app.records) == 2 and "Imported 0 " in app.w_msg.cget("text"); n += 1
+        # 3 an exported list imports back unchanged, in both CSV formats
+        before = [(vb.raw, s) for vb, s in app.records]
+        for fmt in ("excel", "std"):
+            app.csv_fmt.set(fmt)
+            out = app.export_list_csv(str(tmp / f"out_{fmt}.csv"))
+            app.list_clear(); shown.clear(); app.import_csv(str(out)); pump(root)
+            assert [(vb.raw, s) for vb, s in app.records] == before and not shown, fmt; n += 1
+        # 4 not a batch CSV -> one warning, list unchanged
+        (tmp / "x.csv").write_text("foo,bar\n1,2\n")
+        app.import_csv(str(tmp / "x.csv")); pump(root)
+        assert shown and "needs a 'code' column" in shown[-1][1] and len(app.records) == 2; n += 1
+        # 5 menu entry and shortcut help in every language
+        for lang in LANGUAGES:
+            app.lang_var.set(lang); pump(root)
+            fm = app.menus["file"]
+            assert fm.entrycget(4, "label") == T[lang]["import_csv"] and "I" in fm.entrycget(4, "accelerator"); n += 1
+            assert any(k == "Ctrl+I" for k, _ in T[lang]["shortcut_rows"]) and "CSV" in T[lang]["guide_text"]; n += 1
+        app.lang_var.set("en"); pump(root)
+        # 6 cancelled dialog does nothing
+        filedialog.askopenfilename = lambda **k: ""
+        assert app.import_csv_dialog() is None and len(app.records) == 2; n += 1
+        app.csv_fmt.set("excel")
+    finally:
+        messagebox.showwarning, filedialog.askopenfilename = orig
+        shutil.rmtree(tmp, ignore_errors=True)
+    return n
+
+
 def gui_wsl_tests(app, root):
     """WSL integration logic with stubbed Windows tools (cannot run real Windows here)."""
     n = 0
@@ -3096,6 +3362,104 @@ def gui_wsl_tests(app, root):
     return n
 
 
+def _t_batch(seed):
+    """Batch CSV (--batch / Import CSV), folder + wildcard --read, console output languages."""
+    rng = random.Random(seed); n = 0
+    g = globals()
+    saved_cfg = (g["CONFIG_PATH"], g["LEGACY_CONFIG_PATH"])
+    with tempfile.TemporaryDirectory() as t:
+        d = Path(t); cwd = os.getcwd()
+        g["CONFIG_PATH"], g["LEGACY_CONFIG_PATH"] = d / "cfg" / "settings.json", d / "cfg" / "legacy.json"
+        os.chdir(d)
+        try:
+            # 1 English headers, ',' + quoted decimal comma, ISO and Finnish dates, extra column ignored,
+            #   blank line skipped; every bad row is reported with its line number and field
+            (d / "en.csv").write_text(
+                "invoice,iban,amount,reference,due,notes\n"
+                "A-1,FI6014323000208603,50.00,40905,2026-09-08,rent\n"
+                "\n"
+                'A-2,FI79 4405 2020 0360 82,"4 883,15",RF09 8685 1625 9619 897,12.06.2010,\n'
+                "A-3,FI6014323000208603,12.345,40905,,bad amount\n"
+                "A-4,FI6014323000208603,1,40906,,bad reference\n"
+                "A-5,FI6014323000208603,1,40905,31.02.2026,bad date\n"
+                "A-6,,,,,no account\n", encoding="utf-8")
+            rows = read_batch_csv(d / "en.csv")
+            assert [r.source for r in rows] == ["A-1", "A-2", "A-3", "A-4", "A-5", "A-6"]; n += 1
+            assert rows[0].vb.raw == USER and rows[1].vb.raw == RF and not rows[0].error; n += 1
+            got = [(r.line, r.field, r.vb) for r in rows[2:]]
+            assert got == [(5, "amount", None), (6, "reference", None), (7, "due", None), (8, "iban", None)], got; n += 1
+            # 2 Finnish Excel: ';', BOM, decimal comma, Finnish headers, no name column -> "file:line"
+            (d / "fi.csv").write_bytes("Tili;Summa;Viite;Eräpäivä\n"
+                                       "FI60 1432 3000 2086 03;50,00;4090 5;8.9.2026\n".encode("utf-8-sig"))
+            rows = read_batch_csv(d / "fi.csv")
+            assert [(r.vb.raw, r.source) for r in rows] == [(USER, "fi.csv:2")]; n += 1
+            # 3 Windows-1252 files (older Excel) with Swedish / Norwegian headers, ';' and tab separated
+            for hdr, sep in (("Konto;Belopp;Referens;Förfallodag", ";"), ("Konto\tBeløp\tReferanse\tForfallsdato", "\t")):
+                (d / "x.csv").write_bytes((hdr + "\n" + sep.join(["FI6014323000208603", "50,00", "40905",
+                                                                  "08.09.2026"]) + "\n").encode("cp1252"))
+                assert [r.vb.raw for r in read_batch_csv(d / "x.csv")] == [USER], hdr; n += 1
+            # 4 vcode2bar's own CSV exports import back unchanged (standard and Excel)
+            vbs = [parse(random_case(rng)[0]) for _ in range(40)] + [parse(USER), parse(RF)]
+            recs = [to_record(vb, f"src{i}") for i, vb in enumerate(vbs)]
+            for excel in (False, True):
+                write_csv(recs, d / "exp.csv", excel_fi=excel)
+                assert [(r.vb.raw, r.source) for r in read_batch_csv(d / "exp.csv")] == \
+                       [(vb.raw, f"src{i}") for i, vb in enumerate(vbs)], excel; n += 1
+            # 5 random payments build the same codes as the independent generator
+            cases = [random_case(rng) for _ in range(60)]
+            (d / "rnd.csv").write_text("iban,amount,reference,due\n" + "".join(
+                f"{iban},{amt},{ref},{due.isoformat() if due else ''}\n" for _c, iban, amt, ref, due in cases))
+            assert [r.vb.raw for r in read_batch_csv(d / "rnd.csv")] == [c[0] for c in cases]; n += 1
+            # 6 files without a usable header
+            for name, content in (("empty.csv", ""), ("other.csv", "foo,bar\n1,2\n"),
+                                  ("half.csv", "iban,amount\nFI6014323000208603,5\n")):
+                (d / name).write_text(content)
+                try:
+                    read_batch_csv(d / name); raise AssertionError(f"accepted {name}")
+                except VirtualBarcodeError:
+                    n += 1
+            # 7 CLI --batch
+            rc, out, err = _cli(["--batch", "en.csv", "--json"])
+            assert rc == 2 and [r["source"] for r in json.loads(out)] == ["A-1", "A-2"]; n += 1
+            assert "en.csv line 5 (amount)" in err and "en.csv line 8 (iban)" in err and "2/6 row(s) OK" in err; n += 1
+            rc, out, _ = _cli(["--batch", "fi.csv", "--code-only"]); assert (rc, out.split()) == (0, [USER]); n += 1
+            rc, out, _ = _cli(["--batch", "rnd.csv", "--code-only"]); assert out.split() == [c[0] for c in cases]; n += 1
+            rc, _, _ = _cli(["--batch", "exp.csv", "--csv", "again.csv"])
+            again = list(csv.DictReader(io.StringIO((d / "again.csv").read_text(encoding="utf-8"))))
+            assert rc == 0 and [r["code"] for r in again] == [vb.raw for vb in vbs]; n += 1
+            rc, _, _ = _cli(["--batch", "fi.csv", "-o", "inv", "--format", "all", "--verify", "--lang", "fi"])
+            assert rc == 0 and all((d / f"inv.{e}").exists() for e in ("png", "svg", "pdf")); n += 1
+            rc, _, _ = _cli(["--batch", "en.csv", "-o", "many", "--format", "png"])
+            assert (d / "many_1.png").exists() and (d / "many_2.png").exists() and not (d / "many_3.png").exists(); n += 1
+            rc, _, err = _cli(["--batch", "missing.csv"]); assert rc == 2 and "missing.csv" in err; n += 1
+            rc, _, err = _cli(["--batch", "other.csv"]); assert rc == 2 and "needs a 'code' column" in err; n += 1
+            # 8 --read with a folder and with wildcards (Windows shells pass '*' through literally)
+            (d / "scans").mkdir()
+            for i, vb in enumerate(vbs[:3]):
+                im = render_image(vb).convert("L")
+                im.resize((im.width // 2, im.height // 2), Image.LANCZOS).save(d / "scans" / f"s{i}.png")
+            (d / "scans" / "notes.txt").write_text("not an image")
+            rc, out, _ = _cli(["--read", "scans", "--json"])
+            assert rc == 0 and [r["code"] for r in json.loads(out)] == [vb.raw for vb in vbs[:3]]; n += 1
+            rc, out, _ = _cli(["--read", str(Path("scans") / "s[01].png"), "--json"])
+            assert rc == 0 and [r["source"] for r in json.loads(out)] == ["s0.png", "s1.png"]; n += 1
+            rc, _, err = _cli(["--read", "nothing*.png"]); assert rc == 5 and "nothing*.png" in err; n += 1
+            # 9 console language: --lang, else the language saved by the GUI, else English
+            rc, out, _ = _cli(["--decode", USER, "--lang", "en"])
+            assert rc == 0 and "Due date:" in out and "08.09.2026" in out and "50,00 €" in out; n += 1
+            for lang in LANGUAGES:
+                rc, out, _ = _cli(["--decode", RF, "--lang", lang])
+                assert out.startswith(T[lang]["version"] + ":") and T[lang]["cli_overdue"].split("(")[0] in out, lang; n += 1
+            save_config({"lang": "sv"}); rc, out, _ = _cli(["--decode", USER])
+            assert T["sv"]["due"] + ":" in out; n += 1
+            save_config({}); rc, out, _ = _cli(["--decode", USER]); assert "Due date:" in out; n += 1
+            assert "open (payer decides)" in parse(USER[:17] + "00000000" + USER[25:]).describe(); n += 1
+        finally:
+            os.chdir(cwd)
+            g["CONFIG_PATH"], g["LEGACY_CONFIG_PATH"] = saved_cfg
+    return n
+
+
 def _t_platform(seed):
     """Cross-platform behaviour that can be checked on any OS."""
     n = 0
@@ -3135,7 +3499,7 @@ def _t_platform(seed):
         so, se = sys.stdout, sys.stderr
         sys.stdout = sys.stderr = stream
         try:
-            rc = main(["--decode", USER])
+            rc = main(["--decode", USER, "--lang", "fi"])
             print("✓ ↔ €")
             stream.flush()
         finally:
@@ -3157,6 +3521,12 @@ def _t_platform(seed):
         finally:
             tk.Tk = orig_tk
         assert rc == 4 and "command line works without a display" in err.getvalue(); n += 1
+    # every language has every string (a missing key would only surface as a KeyError in the GUI)
+    for lang in LANGUAGES:
+        assert set(T[lang]) == set(T["en"]), (lang, set(T["en"]) ^ set(T[lang]))
+        assert [k for k, _ in T[lang]["shortcut_rows"]] == [k for k, _ in T["en"]["shortcut_rows"]], lang
+        assert len(T[lang]["format_rows"]) == len(T["en"]["format_rows"]), lang
+        n += 1
     # source stays compatible with Python 3.9 grammar (README minimum)
     import ast
     ast.parse(Path(__file__).read_text(encoding="utf-8"), feature_version=(3, 9)); n += 1
@@ -3171,7 +3541,7 @@ def selftest(runs: int = 1) -> int:
         print("Self-test needs all components; missing: " + ", ".join(missing), file=sys.stderr)
         return 1
     suites = [("core", _t_core, 7919), ("create", _t_create, 3571), ("read/csv", _t_read, 6131),
-              ("platform", _t_platform, 1)]
+              ("batch", _t_batch, 2749), ("platform", _t_platform, 1)]
     gui_ok = False
     try:
         r = tk.Tk(); r.destroy(); gui_ok = True
@@ -3180,12 +3550,21 @@ def selftest(runs: int = 1) -> int:
     if gui_ok:
         suites.append(("gui", _t_gui, 104729))
     total = 0
-    for name, fn, mult in suites:
-        for i in range(1, runs + 1):
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                n = fn(i * mult)
-            total += n
-            print(f"{name:9} run {i:2d}/{runs}: PASS ({n} checks)", flush=True)
+    # the tests never read or overwrite the user's real settings file
+    g = globals()
+    saved_cfg = (g["CONFIG_PATH"], g["LEGACY_CONFIG_PATH"])
+    cfg_dir = Path(tempfile.mkdtemp(prefix="vcode2bar_selftest_"))
+    g["CONFIG_PATH"], g["LEGACY_CONFIG_PATH"] = cfg_dir / "settings.json", cfg_dir / "legacy.json"
+    try:
+        for name, fn, mult in suites:
+            for i in range(1, runs + 1):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    n = fn(i * mult)
+                total += n
+                print(f"{name:9} run {i:2d}/{runs}: PASS ({n} checks)", flush=True)
+    finally:
+        g["CONFIG_PATH"], g["LEGACY_CONFIG_PATH"] = saved_cfg
+        shutil.rmtree(cfg_dir, ignore_errors=True)
     print(f"ALL PASS - {total} checks")
     return 0
 
@@ -3204,21 +3583,34 @@ CLI_EPILOG = """examples:
   vcode2bar.py --ref-fi 4090                             Finnish reference with check digit
   vcode2bar.py --ref-rf 40905                            convert to RF creditor reference
   vcode2bar.py --read photo.jpg invoice.pdf --csv out.csv
+  vcode2bar.py --read scans/ "mail/*.pdf"                every image/PDF in a folder, wildcards
+  vcode2bar.py --batch invoices.csv --csv codes.csv      one code per CSV row (iban,amount,reference,due)
+  vcode2bar.py --batch invoices.csv -o inv --format pdf  ...and a print-ready PDF per row
   cat invoice.txt | vcode2bar.py --decode -              find codes in text from stdin
   vcode2bar.py --deps | --selftest [RUNS] | --version
+
+Console text follows --lang, else the language last chosen in the GUI, else English.
+Exit codes: 0 ok, 2 invalid input, 3 read-back check failed, 4 GUI unavailable,
+            5 nothing found in a file.  Full reference: docs/CLI.md
 """
 
 
-def _emit(records, as_json):
+def _cli_lang(requested: str | None) -> str:
+    lang = requested or load_config().get("lang") or "en"
+    return lang if lang in T else "en"
+
+
+def _emit(records, as_json, lang="en"):
     if as_json:
         print(json.dumps([to_record(vb, src) for vb, src in records], ensure_ascii=False, indent=2))
         return
+    t = T[lang]
     for vb, src in records:
         if len(records) > 1 or src not in ("argument", "created"):
             print(f"--- {src}")
-        print(vb.describe())
+        print(vb.describe(lang))
         if vb.due_date and vb.due_date < date.today():
-            print("HUOM: eräpäivä on jo mennyt.")
+            print(t["cli_overdue"].format(d=(date.today() - vb.due_date).days))
 
 
 def _safe_console():
@@ -3242,7 +3634,10 @@ def main(argv=None) -> int:
     g.add_argument("--decode", "--info-only", dest="decode", action="store_true",
                    help="decode/validate only, write no images")
     g.add_argument("--create", action="store_true", help="build a virtual barcode from --iban/--amount/--ref/--due")
-    g.add_argument("--read", nargs="+", metavar="FILE", help="read barcodes from image/PDF files")
+    g.add_argument("--read", nargs="+", metavar="FILE",
+                   help="read barcodes from image/PDF files, folders or wildcards")
+    g.add_argument("--batch", metavar="CSV",
+                   help="one code per CSV row: columns iban, amount, reference, due [, source] - or code")
     g.add_argument("--ref-fi", metavar="BASE", help="print a Finnish reference: BASE + check digit")
     g.add_argument("--ref-rf", metavar="REF", help="print the RF creditor reference for REF")
     c = p.add_argument_group("create")
@@ -3260,7 +3655,8 @@ def main(argv=None) -> int:
     o.add_argument("--csv", metavar="FILE", help="write decoded fields to CSV")
     o.add_argument("--excel", action="store_true", help="CSV for Nordic Excel: ';' + decimal comma + BOM")
     o.add_argument("--json", action="store_true", help="machine-readable JSON output")
-    o.add_argument("--lang", choices=sorted(T), help="GUI language / PDF text language (default en)")
+    o.add_argument("--lang", choices=sorted(T),
+                   help="language of the GUI, console text and PDF page (default: last GUI choice, else en)")
     m = p.add_argument_group("other")
     m.add_argument("--deps", action="store_true", help="show which optional components are installed")
     m.add_argument("--selftest", nargs="?", const=1, type=int, metavar="RUNS",
@@ -3281,9 +3677,11 @@ def main(argv=None) -> int:
             print(rf_reference(normalize_reference(a.ref_rf))); return 0
     except VirtualBarcodeError as e:
         print(f"ERROR: {e}", file=sys.stderr); return 2
-    if a.gui or not (a.code or a.read or a.create):
+    if a.gui or not (a.code or a.read or a.create or a.batch):
         return run_gui(a.code[0] if a.code else None, lang=a.lang)
 
+    lang = _cli_lang(a.lang)
+    t = T[lang]
     records, rc = [], 0
     if a.create:
         missing = [f"--{n}" for n in ("iban", "ref") if not getattr(a, n)]
@@ -3293,8 +3691,6 @@ def main(argv=None) -> int:
             records.append((parse(build_code(a.iban, a.amount, a.ref, a.due)), "created"))
         except FieldError as e:
             print(f"ERROR ({e.field}): {e}", file=sys.stderr); return 2
-        if a.code_only:
-            print(records[0][0].raw)
     for c_arg in a.code:
         if c_arg == "-":
             found = list(iter_codes(sys.stdin.read()))
@@ -3306,7 +3702,7 @@ def main(argv=None) -> int:
             records.append((parse(c_arg), "argument"))
         except VirtualBarcodeError as e:
             print(f"ERROR: {e}", file=sys.stderr); rc = 2
-    for fpath in a.read or []:
+    for fpath in expand_inputs(a.read or []):
         r = read_file(fpath)
         print(r.summary(), file=sys.stderr)
         for rej in r.rejected:
@@ -3314,9 +3710,25 @@ def main(argv=None) -> int:
         if r.error and not r.codes:
             rc = rc or 5
         records += [(vb, r.source) for vb in r.codes]
+    if a.batch:
+        try:
+            rows = read_batch_csv(a.batch)
+        except (OSError, VirtualBarcodeError) as e:
+            print(f"ERROR: {a.batch}: {e}", file=sys.stderr); return 2
+        for r in rows:
+            if r.error:
+                print(f"ERROR: {Path(a.batch).name} line {r.line} ({r.field}): {r.error}", file=sys.stderr)
+                rc = rc or 2
+            else:
+                records.append((r.vb, r.source))
+        print(f"{Path(a.batch).name}: {len(rows) - sum(bool(r.error) for r in rows)}/{len(rows)} row(s) OK",
+              file=sys.stderr)
 
-    if not a.code_only:
-        _emit(records, a.json)
+    if a.code_only:
+        for vb, _src in records:
+            print(vb.raw)
+    else:
+        _emit(records, a.json, lang)
     if a.csv:
         write_csv([to_record(vb, src) for vb, src in records], a.csv, excel_fi=a.excel)
         print(f"CSV: {a.csv} ({len(records)} rows)", file=sys.stderr if a.json or a.code_only else sys.stdout)
@@ -3337,23 +3749,32 @@ def main(argv=None) -> int:
         st = stem if len(records) == 1 else f"{stem}_{i + 1}"
         paths = render(vb, st, tuple(f for f in formats if f != "pdf"), with_text=a.text)
         if "pdf" in formats:
-            pdf = Path(f"{st}.pdf"); make_pdf_page(vb, a.lang or "en").save(pdf, "PDF", resolution=600)
+            pdf = Path(f"{st}.pdf"); make_pdf_page(vb, lang).save(pdf, "PDF", resolution=600)
             paths.append(pdf)
         for pth in paths:
-            print(f"Tallennettu: {pth}", file=info)
+            print(t["saved"].format(p=pth), file=info)
         if a.verify:
             png = next(x for x in paths if x.suffix == ".png")
             ok = verify_png(png, vb.raw)
-            print("Tarkistus: OK - kuva lukee takaisin samaksi koodiksi" if ok
-                  else "Tarkistus: EPÄONNISTUI", file=info)
+            print(t["verify_ok"] if ok else t["verify_fail"], file=info)
             if not ok:
                 rc = 3
     return rc
 
 
-if __name__ == "__main__":
+def cli() -> None:
+    """Console-script entry point (`pip install .` creates a `vcode2bar` command)."""
     try:
         sys.exit(main())
     except BrokenPipeError:            # e.g. `vcode2bar.py --decode CODE --json | head`
         sys.stderr.close()
         sys.exit(0)
+
+
+def gui_main() -> None:
+    """GUI entry point (`vcode2bar-gui`; on Windows it starts without a console window)."""
+    sys.exit(run_gui())
+
+
+if __name__ == "__main__":
+    cli()

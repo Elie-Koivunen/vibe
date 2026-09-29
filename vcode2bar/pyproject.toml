@@ -1,0 +1,50 @@
+# Optional packaging. vcode2bar stays a single file that runs as `python vcode2bar.py`;
+# `pip install .` (or `pipx install .`) additionally gives you `vcode2bar` and `vcode2bar-gui` commands.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vcode2bar"
+dynamic = ["version"]
+description = "Finnish virtual barcode (virtuaaliviivakoodi) <-> bank barcode: create, validate, render, print and read back. GUI + CLI."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Elie Koivunen" }]
+keywords = ["virtuaaliviivakoodi", "pankkiviivakoodi", "virtual barcode", "bank barcode", "code128",
+            "finland", "invoice", "iban", "rf reference", "viitenumero"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Environment :: X11 Applications :: Tk",
+    "Environment :: Console",
+    "Topic :: Office/Business :: Financial :: Accounting",
+    "Natural Language :: English",
+    "Natural Language :: Finnish",
+    "Natural Language :: Swedish",
+    "Natural Language :: Norwegian",
+]
+dependencies = ["python-barcode>=0.15", "pillow>=10.1"]
+
+[project.optional-dependencies]
+# reading barcodes from photos/scans + the read-back check, and reading invoice PDFs
+read = ["pyzbar>=0.1.9", "pypdfium2>=4.0"]
+
+[project.scripts]
+vcode2bar = "vcode2bar:cli"
+
+[project.gui-scripts]
+vcode2bar-gui = "vcode2bar:gui_main"
+
+[project.urls]
+Homepage = "https://github.com/Elie-Koivunen/vibe/tree/main/vcode2bar"
+Documentation = "https://github.com/Elie-Koivunen/vibe/blob/main/vcode2bar/README.md"
+Changelog = "https://github.com/Elie-Koivunen/vibe/blob/main/vcode2bar/CHANGELOG.md"
+
+[tool.setuptools]
+py-modules = ["vcode2bar"]
+
+[tool.setuptools.dynamic]
+version = { attr = "vcode2bar.__version__" }

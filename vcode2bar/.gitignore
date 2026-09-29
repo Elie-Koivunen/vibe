@@ -4,11 +4,13 @@ __pycache__/
 venv/
 dist/
 build/
+*.egg-info/
 *.spec
 # generated output
 viivakoodi*.png
 viivakoodi*.svg
 viivakoodi*.pdf
 *.csv
+!docs/examples/*.csv
 .DS_Store
 Thumbs.db
