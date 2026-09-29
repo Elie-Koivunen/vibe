@@ -24,6 +24,7 @@ import subprocess
 import sys
 from functools import lru_cache
 from pathlib import Path, PureWindowsPath
+from typing import Any
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
@@ -57,7 +58,7 @@ def is_windows_executable(path: str | None) -> bool:
     return bool(path) and str(path).lower().endswith(".exe")
 
 
-def no_console_window_kwargs() -> dict:
+def no_console_window_kwargs() -> dict[str, Any]:
     """subprocess kwargs that stop a console app (ffmpeg.exe, tasklist.exe) from
     flashing a window when spawned from windowless pythonw.exe."""
     flag = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -66,15 +67,48 @@ def no_console_window_kwargs() -> dict:
     return {}
 
 
+def is_frozen() -> bool:
+    """True inside a packaged (PyInstaller) build."""
+    return bool(getattr(sys, "frozen", False))
+
+
+def restore_child_library_path() -> None:
+    """A packaged Linux build runs with LD_LIBRARY_PATH pointing at its bundled libraries;
+    the programs it starts (the system's vlc and ffmpeg) must not load those instead of
+    their own. PyInstaller keeps the user's original value in LD_LIBRARY_PATH_ORIG."""
+    if not is_frozen() or IS_WINDOWS:
+        return
+    original = os.environ.pop("LD_LIBRARY_PATH_ORIG", None)
+    if original:
+        os.environ["LD_LIBRARY_PATH"] = original
+    else:
+        os.environ.pop("LD_LIBRARY_PATH", None)
+
+
+def bundled_resource_dir() -> Path:
+    """Folder holding files shipped with a packaged build (libVLC in ``vlc/``, ffmpeg in
+    ``ffmpeg/``): next to the executable. In a source checkout: ``<repo>/build-resources``
+    (normally absent)."""
+    if is_frozen():
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2] / "build-resources"
+
+
 # -- per-user directories --
+
+DATA_DIR_ENV = "BM4VLC_DATA_DIR"
 
 
 def user_data_dir() -> Path:
     """Where the database, waveform cache and logs live.
 
     Windows: %LOCALAPPDATA%\\VLCBookmarkStudio. Linux/WSL: $XDG_DATA_HOME/VLCBookmarkStudio
-    (default ~/.local/share/VLCBookmarkStudio).
+    (default ~/.local/share/VLCBookmarkStudio). ``--data-dir`` (the BM4VLC_DATA_DIR
+    environment variable) overrides both.
     """
+    override = os.environ.get(DATA_DIR_ENV)
+    if override:
+        return Path(override).expanduser()
     if IS_WINDOWS:
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     else:
@@ -292,6 +326,8 @@ def vlc_candidates() -> list[str]:
         if on_path:
             candidates.append(on_path)
         candidates += [str(root / "VideoLAN" / "VLC" / "vlc.exe") for root in _windows_program_files()]
+        # A packaged build carries a portable VLC; used when none is installed.
+        candidates.append(str(bundled_resource_dir() / "vlc" / "vlc.exe"))
         return candidates
 
     on_path = shutil.which("vlc")
@@ -324,7 +360,9 @@ def find_vlc(saved_path: str | None = None) -> str | None:
 
 
 def ffmpeg_candidates() -> list[str]:
-    candidates: list[str] = []
+    exe = "ffmpeg.exe" if IS_WINDOWS else "ffmpeg"
+    # A packaged build may ship its own ffmpeg; it wins over whatever is installed.
+    candidates: list[str] = [str(bundled_resource_dir() / "ffmpeg" / exe)]
     on_path = shutil.which("ffmpeg")
     if on_path:
         candidates.append(on_path)

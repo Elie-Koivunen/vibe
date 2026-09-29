@@ -2,11 +2,18 @@
 from __future__ import annotations
 
 import re
+from typing import Callable
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, SignalInstance
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QAbstractSpinBox, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QWidget,
+    QAbstractSpinBox,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSpinBox,
+    QWidget,
 )
 
 BUTTON_FONT_POINT_SIZE = 16
@@ -45,12 +52,9 @@ def format_timecode(time_us: int) -> str:
 
 
 class _UnitSpinBox(QSpinBox):
-    """One zero-padded HH/MM/SS/mmm segment of a TimecodeEdit, with its own visible
-    spin arrows -- direct follow-up request: "i would assume that each time unit has
-    its own control arrows, just as in audacity". A single shared pair of arrows
-    (the previous design, which stepped whichever section the text cursor happened
-    to be in) wasn't what "arrow buttons" meant to begin with. Stepping is fully
-    delegated to the owning TimecodeEdit (see `on_stepped`) rather than handled
+    """One zero-padded HH/MM/SS/mmm segment of a TimecodeEdit, with its own spin
+    arrows (as in Audacity). Stepping is delegated to the owning TimecodeEdit (see
+    `on_stepped`) rather than handled
     locally: independently wrapping/carrying each box in isolation has a nasty edge
     case at the very start of the timecode -- stepping "seconds" down from
     00:00:00 would wrap+carry all the way up to 00:59:59 instead of just refusing to
@@ -62,9 +66,9 @@ class _UnitSpinBox(QSpinBox):
         super().__init__(parent)
         self._digits = digits
         self.setRange(0, maximum)
-        self.setAlignment(Qt.AlignCenter)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setFrame(False)
-        self.on_stepped: object = None  # set by TimecodeEdit: called with `steps` (usually +-1)
+        self.on_stepped: Callable[[int], None] | None = None  # set by TimecodeEdit: called with `steps` (usually +-1)
 
     def textFromValue(self, value: int) -> str:
         return str(value).zfill(self._digits)
@@ -91,8 +95,8 @@ class _UnitSpinBox(QSpinBox):
         # when the overall timecode is still well above zero (minutes > 0).
         # TimecodeEdit's own clamp is the only limit that should apply.
         if not self.isEnabled() or self.isReadOnly():
-            return QAbstractSpinBox.StepNone
-        return QAbstractSpinBox.StepUpEnabled | QAbstractSpinBox.StepDownEnabled
+            return QAbstractSpinBox.StepEnabledFlag.StepNone
+        return QAbstractSpinBox.StepEnabledFlag.StepUpEnabled | QAbstractSpinBox.StepEnabledFlag.StepDownEnabled
 
 
 class TimecodeEdit(QWidget):
@@ -144,8 +148,7 @@ class TimecodeEdit(QWidget):
             box.editingFinished.connect(self._commit)
 
     def _step_total(self, delta_us: int) -> None:
-        # Direct user request (of the earlier, single-shared-arrow version, still
-        # true here): an arrow press commits immediately, no separate Enter needed.
+        # An arrow press commits immediately; no Enter needed.
         new_us = max(0, min(self._MAX_US, self._value_us() + delta_us))
         self.setText(format_timecode(new_us))
         self._commit()
@@ -210,21 +213,16 @@ class TransportBar(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        # A 2-row grid, not a single QHBoxLayout: direct user request to "stagger"
-        # the bookmark start/end fields on their own row, with the start field
-        # column-aligned directly under the live position field above it. A
-        # QGridLayout makes that alignment automatic (matching column -> matching
-        # width/position) instead of needing fragile manually-tuned spacers.
+        # A grid keeps fields in the same column aligned without hand-tuned spacers.
         layout = QGridLayout(self)
-        # Direct user request: "beautify the layout" -- the default zero-margin,
-        # zero-spacing grid packed every button and field edge-to-edge.
+        # Breathing room between buttons (the default grid packs them edge to edge).
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(6)
         button_font = QFont()
         button_font.setPointSize(BUTTON_FONT_POINT_SIZE)
 
-        def add_button(text: str, signal: Signal, *, tooltip: str, col: int) -> QPushButton:
+        def add_button(text: str, signal: SignalInstance, *, tooltip: str, col: int) -> QPushButton:
             button = QPushButton(text, self)
             button.setFont(button_font)
             button.setMinimumSize(BUTTON_MIN_SIZE, BUTTON_MIN_SIZE)
@@ -233,12 +231,8 @@ class TransportBar(QWidget):
             layout.addWidget(button, 0, col)
             return button
 
-        # Larger, more standard media-control glyphs per direct user feedback
-        # ("use better icons in the control button, larger ones"). Play/Pause/Stop
-        # (plus the seeks flanking them) are centered as their own cluster -- direct
-        # follow-up request: "moved to the middle to reflect that they control the
-        # playback of the playlist", distinct from track/bookmark navigation on the
-        # outer edges.
+        # Large media glyphs. Play/Pause/Stop and the seeks around them form a centred
+        # cluster; track and bookmark navigation sit on the outer edges.
         self.previous_bookmark_button = add_button(
             "⏮", self.previous_bookmark_clicked, tooltip="Previous bookmark", col=0
         )
@@ -258,11 +252,7 @@ class TransportBar(QWidget):
         self.next_track_button = add_button("⏩", self.next_track_clicked, tooltip="Next track", col=8)
         self.next_bookmark_button = add_button("⏭", self.next_bookmark_clicked, tooltip="Next bookmark", col=9)
 
-        # Direct follow-up request: "the song start end doesnt need to be editable,
-        # only the bookmark fields" -- reverted to a plain read-only display (an
-        # earlier version made this editable-for-seeking, which the user later
-        # decided wasn't needed once the bookmark fields below covered the actual
-        # "editable timecode" need).
+        # Read-only: timecodes are edited on bookmarks (Inspector, bookmark list).
         self._position_label = QLabel("00:00:00.000", self)
         self._position_label.setFont(button_font)
         layout.addWidget(self._position_label, 0, 10)
@@ -271,20 +261,8 @@ class TransportBar(QWidget):
         self._duration_label.setFont(button_font)
         layout.addWidget(self._duration_label, 0, 11)
 
-        # The mirrored Bookmark Start/End fields that used to live here (row 1) were
-        # removed per direct follow-up request -- "this is now duplicate, you can
-        # remove" (the Inspector's own Start/End fields, and now also the bookmark
-        # list's Start/End columns, already show the same thing).
-
-        # Direct fix for "the player buttons do not map to vlc player, hence not
-        # functioning": set_transport_enabled() (spec #137) existed but was never once
-        # called anywhere in app/application.py -- buttons stayed clickable-looking
-        # even while genuinely disconnected from VLC, so a click just silently did
-        # nothing (the failure was logged at debug level only). The connection
-        # indicator itself now lives in PlaylistPanel, right above the Launch VLC
-        # button (direct follow-up request: "move the connection status to above the
-        # launch vlc button") -- MainWindow.set_connected() drives both it and this
-        # button-enable state together.
+        # Disabled until a player is connected, so a click can't silently do nothing.
+        # MainWindow.set_connected() drives this and PlaylistPanel's indicator together.
         self.set_transport_enabled(False)
 
     def set_time(self, position_us: int, duration_us: int | None) -> None:

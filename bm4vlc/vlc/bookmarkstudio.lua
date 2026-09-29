@@ -159,8 +159,10 @@ end
 -- Validation helpers (spec #158-#159: whitelist only, validate every parameter)
 -- ---------------------------------------------------------------------------
 
+-- `goto` is a reserved word from Lua 5.2 on (the Lua of Linux VLC builds): written as a
+-- string key here, and the playlist call below uses gotoitem, so the script loads there.
 local ALLOWED_COMMANDS = {
-    play = true, pause = true, stop = true, next = true, previous = true, goto = true,
+    play = true, pause = true, stop = true, next = true, previous = true, ["goto"] = true,
     -- volume: needed by fades and mute-on-connect (EnhancedLuaPlaybackAdapter.set_volume);
     -- without it every set_volume() call was rejected with INVALID_REQUEST.
     volume = true,
@@ -293,7 +295,8 @@ local function handle_control(query)
         if id == nil then
             return error_json("INVALID_ITEM", "id must be a non-negative integer")
         end
-        vlc.playlist.goto(id)
+        local goto_item = vlc.playlist.gotoitem or vlc.playlist["goto"]
+        goto_item(id)
     elseif command == "volume" then
         local level = parse_int(query["val"])
         if level == nil or level < 0 or level > MAX_VOLUME then

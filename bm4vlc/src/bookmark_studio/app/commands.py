@@ -7,6 +7,7 @@ touched the same bookmark between push() and an undo/redo call.
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 from uuid import UUID
 
 from PySide6.QtGui import QUndoCommand
@@ -133,8 +134,10 @@ class ResizeBookmarkCommand(QUndoCommand):
         bookmark = self._repository.get(self._bookmark_id)
         if bookmark is None:
             return
-        field = "start_us" if self._handle == "start" else "end_us"
-        self._repository.update(replace(bookmark, **{field: value_us}))
+        if self._handle == "start":
+            self._repository.update(replace(bookmark, start_us=value_us))
+        else:
+            self._repository.update(replace(bookmark, end_us=value_us))
 
 
 class RenameBookmarkCommand(QUndoCommand):
@@ -242,7 +245,7 @@ class EditBookmarkFieldsCommand(QUndoCommand):
     def undo(self) -> None:
         self._apply(self._old)
 
-    def _apply(self, values: dict[str, object]) -> None:
+    def _apply(self, values: dict[str, Any]) -> None:
         bookmark = self._repository.get(self._bookmark_id)
         if bookmark is None:
             return

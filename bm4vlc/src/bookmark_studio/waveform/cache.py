@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -24,7 +25,7 @@ def cache_key(
 
 def save_pyramid(path: Path, pyramid: WaveformPyramid) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    arrays = {f"level_{i}_peaks": level.peaks for i, level in enumerate(pyramid.levels)}
+    arrays: dict[str, Any] = {f"level_{i}_peaks": level.peaks for i, level in enumerate(pyramid.levels)}
     block_sizes = np.array([level.block_size for level in pyramid.levels], dtype=np.int64)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     # np.savez_compressed silently appends ".npz" to any path that doesn't already end

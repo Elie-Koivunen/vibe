@@ -4,6 +4,7 @@ from __future__ import annotations
 import subprocess
 import threading
 from collections import deque
+from typing import IO, Iterator
 
 from bookmark_studio import platform_support
 
@@ -11,8 +12,7 @@ FFMPEG_ANALYSIS_SAMPLE_RATE = 8000
 _READ_CHUNK_BYTES = 1 << 20
 _STDERR_TAIL_LINES = 40
 
-# Direct user request: "weird behavior, when i launch vlc with a playlist, it started
-# opening many cmd windows" -- ffmpeg.exe is a console app; spawning one from a
+# ffmpeg.exe is a console app; spawning one from a
 # windowless pythonw.exe process without CREATE_NO_WINDOW makes Windows pop up a real,
 # visible console window per subprocess (see platform_support.no_console_window_kwargs).
 
@@ -46,7 +46,7 @@ def build_ffmpeg_args(ffmpeg_path: str, media_path: str) -> list[str]:
     ]
 
 
-def _drain(stream, tail: deque[bytes]) -> None:
+def _drain(stream: IO[bytes], tail: deque[bytes]) -> None:
     """Keeps reading ffmpeg's stderr so it can never fill its pipe buffer. Without this,
     a damaged file that makes ffmpeg log an error per frame blocked ffmpeg on a full
     stderr pipe while this process waited on stdout -- a permanent deadlock that
@@ -58,13 +58,15 @@ def _drain(stream, tail: deque[bytes]) -> None:
         pass
 
 
-def decode_media_to_pcm(
+def stream_media_pcm(
     ffmpeg_path: str,
     media_path: str,
     *,
     cancellation: CancellationToken | None = None,
-) -> bytes:
-    """Runs ffmpeg and returns raw f32le PCM bytes. Never uses shell=True (spec #58)."""
+) -> Iterator[bytes]:
+    """Runs ffmpeg and yields f32le PCM in chunks (each a whole number of samples), so a
+    caller can reduce it on the fly instead of holding the whole decode in memory. Never
+    uses shell=True (spec #58). Raises RuntimeError at the end if ffmpeg failed."""
     args = build_ffmpeg_args(ffmpeg_path, media_path)
     process = subprocess.Popen(
         args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -73,7 +75,7 @@ def decode_media_to_pcm(
     stderr_tail: deque[bytes] = deque(maxlen=_STDERR_TAIL_LINES)
     stderr_thread = threading.Thread(target=_drain, args=(process.stderr, stderr_tail), daemon=True)
     stderr_thread.start()
-    chunks: list[bytes] = []
+    remainder = b""
     try:
         assert process.stdout is not None
         while True:
@@ -84,9 +86,16 @@ def decode_media_to_pcm(
             chunk = process.stdout.read(_READ_CHUNK_BYTES)
             if not chunk:
                 break
-            chunks.append(chunk)
+            data = remainder + chunk
+            whole = len(data) - len(data) % 4
+            remainder = data[whole:]
+            if whole:
+                yield data[:whole]
         process.wait()
     finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
         if process.stdout is not None:
             process.stdout.close()
         stderr_thread.join(timeout=2)
@@ -97,4 +106,13 @@ def decode_media_to_pcm(
         stderr = b"".join(stderr_tail).decode("utf-8", errors="replace")
         raise RuntimeError(f"ffmpeg exited {process.returncode} for {media_path}: {stderr.strip()}")
 
-    return b"".join(chunks)
+
+def decode_media_to_pcm(
+    ffmpeg_path: str,
+    media_path: str,
+    *,
+    cancellation: CancellationToken | None = None,
+) -> bytes:
+    """Runs ffmpeg and returns all raw f32le PCM bytes (small files and tests; the
+    waveform service streams instead -- see stream_media_pcm)."""
+    return b"".join(stream_media_pcm(ffmpeg_path, media_path, cancellation=cancellation))

@@ -1,6 +1,6 @@
 [project]
 name = "bookmark-studio"
-version = "0.2.0"
+version = "0.3.0"
 description = "VLC Bookmark Studio — playlist-aware visual bookmarking and looping for VLC Media Player"
 readme = "README.md"
 # Tested on 3.10-3.13 (Linux/WSL) and 3.12 (Windows); see .github/workflows/bm4vlc-tests.yml.
@@ -11,6 +11,8 @@ dependencies = [
     "PySide6-Essentials>=6.5",
     "numpy>=1.23",
     "requests>=2.28",
+    # The in-app player. A small ctypes binding: harmless when libVLC isn't installed.
+    "python-vlc>=3.0.12118",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +22,9 @@ dev = [
     "coverage",
     "ruff",
     "mypy",
+]
+packaging = [
+    "pyinstaller>=6.10",
 ]
 
 [project.scripts]
@@ -43,17 +48,39 @@ packages = ["src/bookmark_studio"]
 "vlc/bookmarkstudio.lua" = "bookmark_studio/vlc/bookmarkstudio.lua"
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "migrations", "vlc", "tests", "README.md", "CHANGELOG.md", "PROJECT_SPEC.md",
+include = ["src", "migrations", "vlc", "tests", "packaging", "README.md", "CHANGELOG.md", "PROJECT_SPEC.md",
            "launch_bm4vlc.bat", "launch_bm4vlc.sh"]
 exclude = ["archive"]
 
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+extend-exclude = ["archive"]
+
+[tool.ruff.lint]
+# Pyflakes (unused/undefined names), syntax errors, import order. Checked in CI.
+select = ["F", "E9", "I"]
 
 [tool.mypy]
-python_version = "3.10"
+# numpy's type stubs use Python 3.12 syntax; running on 3.10+ is covered by the test matrix.
+python_version = "3.12"
 strict = true
+files = ["src/bookmark_studio"]
+
+[[tool.mypy.overrides]]
+# Qt widget code: event-handler overrides and the PySide6 stubs make complete annotations
+# more noise than help. Function bodies are still checked.
+module = ["bookmark_studio.ui.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+disallow_any_generics = false
+warn_return_any = false
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["vlc"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

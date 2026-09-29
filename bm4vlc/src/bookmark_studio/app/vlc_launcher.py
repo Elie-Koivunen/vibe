@@ -21,49 +21,56 @@ Windows vlc.exe through interop) -- see platform_support.py for the details.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from bookmark_studio import platform_support
 
 if TYPE_CHECKING:
     from bookmark_studio.settings.settings_service import SettingsService
 
-_COMMON_ARGS = [
-    # Lessons carried over from the sibling buzz2vlc project's live-VLC testing
-    # (same author, same VLC quirks -- see that project's PROJECT_SPEC.md):
-    "--start-paused",       # avoids an autoplay blip while still expanding the
-                             # playlist into individual tracks (buzz2vlc bug #2)
-    "--ignore-config",      # stop VLC's saved window geometry fighting our own UI
-]
-# --ignore-config alone reintroduces VLC's first-run privacy dialog on every launch
-# (buzz2vlc bug #13); this flag is required alongside it. It belongs to VLC's Qt
-# interface plugin, and VLC refuses to start on an option no installed plugin knows --
-# so it's only passed when that plugin exists (a minimal Linux VLC may not have it).
-_QT_ARGS = ["--no-qt-privacy-ask"]
-_LINUX_QT_PLUGIN_GLOBS = (
-    "/usr/lib/*/vlc/plugins/gui/libqt_plugin.so",
-    "/usr/lib/vlc/plugins/gui/libqt_plugin.so",
-    "/usr/lib64/vlc/plugins/gui/libqt_plugin.so",
-    "/usr/local/lib/vlc/plugins/gui/libqt_plugin.so",
-)
+# --start-paused avoids an autoplay blip while VLC still expands the playlist into
+# individual tracks (a lesson from the sibling buzz2vlc project).
+_COMMON_ARGS = ["--start-paused"]
 
 
-def _vlc_has_qt_interface(vlc_path: str | None) -> bool:
-    if platform_support.IS_WINDOWS or platform_support.is_windows_executable(vlc_path):
-        return True  # the Windows build always ships the Qt interface
-    if vlc_path and ("/snap/" in vlc_path or "flatpak" in vlc_path):
-        return True  # bundled builds include it
-    import glob
-
-    return any(glob.glob(pattern) for pattern in _LINUX_QT_PLUGIN_GLOBS)
+def private_vlc_config_path(http_port: int) -> Path:
+    return platform_support.user_data_dir() / "vlc" / f"vlcrc-{http_port}"
 
 
-def _common_args(vlc_path: str | None) -> list[str]:
-    return _COMMON_ARGS + (_QT_ARGS if _vlc_has_qt_interface(vlc_path) else [])
+def write_private_vlc_config(http_port: int, http_password: str) -> Path:
+    """The VLC config file a managed VLC is started with (``--config=<file>``) instead of
+    the user's own vlcrc.
+
+    It carries the HTTP password, so the password never appears on VLC's command line
+    (where any local process could read it), and turns off VLC's first-run privacy dialog.
+    Options in a config file that no installed plugin knows are ignored with a warning,
+    unlike the same options on the command line, which stop VLC from starting (e.g. the Qt
+    option on a Linux VLC without the Qt interface). Owner-only on Linux; regenerated for
+    every launch.
+    """
+    path = private_vlc_config_path(http_port)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = (
+        "# Written by VLC Bookmark Studio for the VLC it launches on this port;\n"
+        "# regenerated on every launch.\n"
+        "[qt]\n"
+        "qt-privacy-ask=0\n"
+        "[lua]\n"
+        f"http-password={http_password}\n"
+    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(content)
+    if not platform_support.IS_WINDOWS:
+        os.chmod(path, 0o600)
+    return path
+
 
 # Discovery probes run in parallel with short timeouts so opening the launch dialog
 # never stalls the UI for long, however many stale ports are remembered.
@@ -120,7 +127,7 @@ def find_free_http_port(preferred: int, *, max_attempts: int = 200, connect_host
     raise RuntimeError(f"no free port found starting from {preferred}")
 
 
-def terminate_managed_vlc(process: subprocess.Popen, vlc_path: str | None, http_port: int | None) -> None:
+def terminate_managed_vlc(process: subprocess.Popen[bytes], vlc_path: str | None, http_port: int | None) -> None:
     """Closes a VLC this app launched. Under WSL with the Windows vlc.exe, ending the
     Linux-side process handle doesn't reach vlc.exe (it only stops WSL's interop proxy),
     so the Windows process is found by its unique --http-port and ended there."""
@@ -252,23 +259,26 @@ def build_managed_vlc_args(
     http_host: str = "127.0.0.1",
     extra_args: list[str] | None = None,
 ) -> list[str]:
+    """VLC's command line. The password goes into the private config file (see
+    write_private_vlc_config), never onto the command line."""
+    config = write_private_vlc_config(http_port, http_password)
     return [
         vlc_path,
+        f"--config={platform_support.path_for_program(str(config), vlc_path)}",
         "--extraintf=http",
         f"--http-host={http_host}",
         f"--http-port={http_port}",
-        f"--http-password={http_password}",
-        *_common_args(vlc_path),
+        *_COMMON_ARGS,
         *(extra_args or []),
         *[platform_support.path_for_program(path, vlc_path) for path in media_paths],
     ]
 
 
-def _popen_vlc(args: list[str]) -> subprocess.Popen:
+def _popen_vlc(args: list[str]) -> subprocess.Popen[bytes]:
     # VLC writes a lot to stdout/stderr on Linux; don't let it spill into the terminal
     # this app was started from (or block on a full pipe). A new session keeps a
     # Ctrl+C aimed at this app from also killing the user's VLC.
-    kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    kwargs: dict[str, Any] = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if not platform_support.IS_WINDOWS:
         kwargs["start_new_session"] = True
     return subprocess.Popen(args, **kwargs)
@@ -282,7 +292,7 @@ def launch_managed_vlc(
     http_password: str,
     http_host: str | None = None,
     extra_args: list[str] | None = None,
-) -> subprocess.Popen:
+) -> subprocess.Popen[bytes]:
     """Spawns VLC with its built-in HTTP interface active (spec #28). Never omits
     --http-host: VLC's own default (all interfaces, port 8080) would violate spec #20.
     `http_host` defaults to platform_support.vlc_http_hosts() (loopback everywhere
@@ -333,20 +343,23 @@ def launch_managed_vlc_with_lua_bridge(
     lua_intf: str = "bookmarkstudio",
     http_host: str | None = None,
     extra_args: list[str] | None = None,
-) -> subprocess.Popen:
+) -> subprocess.Popen[bytes]:
     """Opt-in alternative to launch_managed_vlc(): the custom Lua bridge's microsecond
     seek precision, at the cost of the connection-leak reliability problem described
-    in this module's docstring. write_bridge_config() and install_bridge_script() must
-    both have been called first.
+    in this module's docstring. install_bridge_script() must have been called first. The
+    token reaches the bridge through the private config file (its --http-password
+    fallback), or through write_bridge_config().
     """
     bind_host = http_host or platform_support.vlc_http_hosts(vlc_path)[0]
+    config = write_private_vlc_config(http_port, token)
     args = [
         vlc_path,
+        f"--config={platform_support.path_for_program(str(config), vlc_path)}",
         "--extraintf=luaintf",
         f"--lua-intf={lua_intf}",
         f"--http-host={bind_host}",
         f"--http-port={http_port}",
-        *_common_args(vlc_path),
+        *_COMMON_ARGS,
         *(extra_args or []),
         *[platform_support.path_for_program(path, vlc_path) for path in media_paths],
     ]

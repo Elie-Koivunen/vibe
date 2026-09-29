@@ -1,6 +1,7 @@
 """Windows / Linux / WSL differences (bookmark_studio.platform_support)."""
 from __future__ import annotations
 
+import os
 import socket
 import sys
 from pathlib import Path
@@ -185,14 +186,21 @@ def test_no_console_flag_only_on_windows(monkeypatch) -> None:
 
 @posix_only
 def test_user_data_dir_honours_xdg(monkeypatch, tmp_path: Path, as_plain_linux) -> None:
+    monkeypatch.delenv(ps.DATA_DIR_ENV, raising=False)
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     assert ps.user_data_dir() == tmp_path / "VLCBookmarkStudio"
 
 
 @windows_only
 def test_user_data_dir_uses_localappdata(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv(ps.DATA_DIR_ENV, raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     assert ps.user_data_dir() == tmp_path / "VLCBookmarkStudio"
+
+
+def test_data_dir_option_overrides_the_platform_location(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv(ps.DATA_DIR_ENV, str(tmp_path / "portable"))
+    assert ps.user_data_dir() == tmp_path / "portable"
 
 
 @posix_only
@@ -215,17 +223,20 @@ def test_missing_saved_path_falls_back_to_discovery(tmp_path: Path) -> None:
     assert result is None or Path(result).is_file()
 
 
-def test_qt_only_vlc_option_is_passed_only_when_the_qt_plugin_exists(monkeypatch, as_plain_linux) -> None:
-    """VLC refuses to start on an option no installed plugin knows; --no-qt-privacy-ask
-    belongs to the Qt interface, which a minimal Linux VLC may not have."""
-    import glob
+def test_vlc_password_is_in_a_private_config_file_not_on_the_command_line(tmp_path) -> None:
+    """The HTTP password used to be passed as --http-password=..., readable by any local
+    process. It now lives in a per-launch config file (owner-only on Linux), which also
+    carries the Qt-only privacy option -- in a config file an unknown option is ignored,
+    while on the command line it stops a VLC without the Qt interface from starting."""
+    from bookmark_studio.app.vlc_launcher import build_managed_vlc_args
 
-    from bookmark_studio.app import vlc_launcher
-
-    monkeypatch.setattr(glob, "glob", lambda _pattern: [])
-    assert "--no-qt-privacy-ask" not in vlc_launcher._common_args("/usr/bin/vlc")
-    assert "--no-qt-privacy-ask" in vlc_launcher._common_args("/snap/bin/vlc")
-    assert "--no-qt-privacy-ask" in vlc_launcher._common_args("/mnt/c/Program Files/VideoLAN/VLC/vlc.exe")
-    monkeypatch.setattr(glob, "glob", lambda pattern: [pattern])
-    assert "--no-qt-privacy-ask" in vlc_launcher._common_args("/usr/bin/vlc")
-    assert "--start-paused" in vlc_launcher._common_args("/usr/bin/vlc")
+    args = build_managed_vlc_args("/usr/bin/vlc", ["a.mp3"], http_port=47123, http_password="s3cret")
+    assert not any("s3cret" in arg for arg in args)
+    assert not any(arg.startswith("--no-qt") or arg == "--ignore-config" for arg in args)
+    config_arg = next(arg for arg in args if arg.startswith("--config="))
+    config = Path(config_arg.split("=", 1)[1])
+    text = config.read_text(encoding="utf-8")
+    assert "http-password=s3cret" in text and "qt-privacy-ask=0" in text
+    assert str(config).startswith(os.environ["BM4VLC_DATA_DIR"])
+    if not ON_WINDOWS:
+        assert config.stat().st_mode & 0o777 == 0o600

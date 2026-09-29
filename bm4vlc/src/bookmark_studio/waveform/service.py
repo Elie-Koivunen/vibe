@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 from uuid import UUID
 
 from bookmark_studio.waveform.cache import ALGORITHM_VERSION, cache_key, save_pyramid
-from bookmark_studio.waveform.ffmpeg_decoder import CancellationToken, decode_media_to_pcm
-from bookmark_studio.waveform.peaks import decode_pcm_f32le
-from bookmark_studio.waveform.pyramid import WaveformPyramid, build_pyramid
+from bookmark_studio.waveform.ffmpeg_decoder import CancellationToken, stream_media_pcm
+from bookmark_studio.waveform.peaks import PeakAccumulator, decode_pcm_f32le
+from bookmark_studio.waveform.pyramid import BASE_BLOCK_SIZE, WaveformPyramid, build_pyramid_from_peaks
+
+PROGRESS_INTERVAL_S = 1.0
 
 __all__ = ["ALGORITHM_VERSION", "GeneratedWaveform", "WaveformKey", "WaveformService"]
 
@@ -74,7 +78,10 @@ class WaveformService:
         sample_rate: int = 8000,
         channel_mode: str = "mono",
         cancellation: CancellationToken | None = None,
+        on_progress: Callable[[WaveformPyramid], None] | None = None,
     ) -> GeneratedWaveform:
+        """Decodes (or waits for a concurrent decode of) one file. `on_progress` receives
+        partial pyramids about once a second while a long file decodes (owner only)."""
         with self._lock:
             pending = self._inflight.get(key)
             is_owner = pending is None
@@ -90,9 +97,16 @@ class WaveformService:
             return pending.result
 
         try:
-            raw = decode_media_to_pcm(self._ffmpeg_path, media_path, cancellation=cancellation)
-            samples = decode_pcm_f32le(raw)
-            pyramid = build_pyramid(samples, sample_rate=sample_rate)
+            # Streamed: peaks are reduced as the audio arrives, so memory no longer grows
+            # with the length of the file, and a long file can be shown while it decodes.
+            accumulator = PeakAccumulator(BASE_BLOCK_SIZE)
+            last_progress = time.monotonic()
+            for chunk in stream_media_pcm(self._ffmpeg_path, media_path, cancellation=cancellation):
+                accumulator.feed(decode_pcm_f32le(chunk))
+                if on_progress is not None and time.monotonic() - last_progress >= PROGRESS_INTERVAL_S:
+                    last_progress = time.monotonic()
+                    on_progress(build_pyramid_from_peaks(accumulator.peaks(), sample_rate))
+            pyramid = build_pyramid_from_peaks(accumulator.peaks(final=True), sample_rate)
 
             cache_id = self.compute_cache_key(key.fast_fingerprint, sample_rate, channel_mode)
             cache_path = self._cache_dir / f"{cache_id}.npz"

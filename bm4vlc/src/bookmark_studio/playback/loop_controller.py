@@ -17,15 +17,13 @@ if TYPE_CHECKING:
 
 __all__ = ["LoopState", "LoopSpec", "LoopController"]
 
-# Direct user report: "it still drifts outside of the bookmark area". Detecting the
-# loop boundary only from on_tick() (once per ~400ms status poll) let playback run up
-# to a whole poll interval past end_us. _boundary_timer instead SCHEDULES the
+# Detecting the loop boundary only from on_tick() (once per ~400ms status poll) would
+# let playback run up to a whole poll interval past end_us. _boundary_timer SCHEDULES the
 # seek-back for the moment the boundary is expected, computed from the spec (and the
 # playback rate) as soon as the seek that started the segment has completed. on_tick()
 # stays as a backstop for a big jump past the boundary between polls (spec #166).
 _MIN_BOUNDARY_TIMER_MS = 15
-# Direct user request: "add options to fade in and fade out when playing back".
-# Step interval for the volume ramp -- ~40ms is smooth without flooding VLC's HTTP
+# Fade in/out: step interval for the volume ramp -- ~40ms is smooth without flooding VLC's HTTP
 # interface (volume jobs are coalesced, so a slow VLC only ever gets the latest level).
 _FADE_STEP_MS = 40
 _MAX_VOLUME = 512  # VLC's scale: 256 = 100%, 512 = 200%
@@ -74,9 +72,8 @@ class LoopController(QObject):
         self._boundary_timer.setSingleShot(True)
         self._boundary_timer.timeout.connect(self._on_boundary_timer_fired)
 
-        # The gap between iterations used to be announced via gap_started and left for
-        # "the caller" to resume -- but nothing ever connected to it, so any bookmark
-        # with a Gap paused VLC at the end of its first pass and never resumed.
+        # Resumes playback after the gap between iterations (the controller owns this;
+        # nobody else would resume a paused gap).
         self._gap_timer = QTimer(self)
         self._gap_timer.setSingleShot(True)
         self._gap_timer.timeout.connect(self.resume_after_gap)
@@ -97,9 +94,8 @@ class LoopController(QObject):
         self._target_volume = 256
         # True while VLC's volume is somewhere this controller put it (mid-fade, or
         # ducked by a fade-out) rather than the user's own level. While set, status-
-        # poll volumes are ignored, and stop()/completion restore the target first --
-        # previously a finished fade-out left VLC near-silent and the next poll then
-        # adopted that as the user's "real" volume.
+        # poll volumes are ignored, and stop()/completion restore the target first, so
+        # a finished fade-out is never mistaken for the user's own (near-silent) level.
         self._volume_owned = False
         self._volume_fence_ns = 0
 

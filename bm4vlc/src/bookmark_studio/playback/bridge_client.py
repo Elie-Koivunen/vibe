@@ -23,9 +23,8 @@ side of a connection after responding (confirmed via `netstat`: every request-pe
 design left the socket in CLOSE_WAIT on VLC's side, a server-side leak). At this app's
 normal status-polling cadence (every ~150ms) that leaked several hundred sockets within
 minutes of real use, after which VLC stopped accepting new connections at all --
-the exact "it just doesn't work" failure mode a live user session hit. Reusing one
-connection for the client's whole lifetime, confirmed live, leaves zero leaked sockets
-no matter how many requests are made. A `threading.Lock` serializes access since
+Reusing one connection for the client's whole lifetime leaks no sockets however
+many requests are made. A `threading.Lock` serializes access since
 multiple requests can be dispatched from different QThreadPool workers concurrently
 (app/application.py) and this transport has no way to distinguish interleaved
 request/response bytes from two requests in flight at once.
@@ -53,7 +52,7 @@ MAX_PROTOCOL_VERSION = 1
 # leaks a socket on VLC's side; the original spec-sized timeouts made this common
 # enough that a live session degraded to fully broken within about 15 seconds of normal
 # ~150ms status polling. These wider budgets trade a slower worst-case UI update for a
-# dramatically lower reconnect (and thus leak) rate -- confirmed live.
+# much lower reconnect (and thus leak) rate.
 HEALTH_TIMEOUT_S = 3.0
 STATUS_TIMEOUT_S = 3.0
 COMMAND_TIMEOUT_S = 3.0
@@ -173,6 +172,8 @@ class BridgeClient:
         if isinstance(data, dict) and data.get("ok") is False:
             error = data.get("error", {})
             raise BridgeError(error.get("code", "UNKNOWN"), error.get("message", ""))
+        if not isinstance(data, dict):
+            raise BridgeConnectionError(f"unexpected response from bridge: {body[:200]!r}")
         return data
 
     def _build_request(self, target: str) -> bytes:

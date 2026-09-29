@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
 
 from bookmark_studio.domain.media import Media
@@ -133,8 +134,15 @@ class MediaRepository:
             )
         )
 
+    def list_all(self) -> list[Media]:
+        rows = self._conn.execute(
+            "SELECT id, canonical_uri, filename, title, artist, album, duration_us, "
+            "file_size, mtime_ns, fast_fingerprint, full_sha256 FROM media ORDER BY created_at"
+        ).fetchall()
+        return [self._row_to_media(row) for row in rows]
+
     @staticmethod
-    def _row_to_media(row: sqlite3.Row | tuple) -> Media:
+    def _row_to_media(row: sqlite3.Row | tuple[Any, ...]) -> Media:
         (
             media_id,
             canonical_uri,

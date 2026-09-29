@@ -9,29 +9,49 @@ Runs on **Windows**, **Linux**, and **WSL (Ubuntu on Windows)**.
 
 ## Status
 
-Version 0.2.0. The core is implemented and tested: domain model, SQLite
+Version 0.3.0. The core is implemented and tested: domain model, SQLite
 persistence + migrations, media fingerprint/resolution, playlist
 recognition across sessions (similarity scoring over stored playlist
-order), the FFmpeg waveform pipeline, three playback adapters (Mock / VLC's
-built-in HTTP / the custom Lua bridge), the software loop controller (gaps,
-fades, completion actions), undo/redo, project export/import (format v2,
-merging), and a PySide6 UI wired end-to-end through a live polling
-`Application`. All playback commands run on one ordered queue off the UI
-thread.
+order), the FFmpeg waveform pipeline (streamed, shown while it decodes), four
+playback adapters (Mock / VLC's built-in HTTP / the custom Lua bridge / the
+in-app libVLC player), the software loop controller (gaps, fades, completion
+actions, stopping when playback is changed in VLC's own window), undo/redo,
+project export/import (format v2, merging), folder sync between machines, and a
+PySide6 UI wired end-to-end through a live polling `Application`. All playback
+commands run on one ordered queue off the UI thread.
 
-Tests: 300+ unit/integration tests (offscreen Qt, mock VLC) plus opt-in live
-tests against a real VLC (`tests/vlc/`). Verified on Windows 11 (Python 3.12,
-VLC 3.0.23) and WSL Ubuntu 24.04 (Python 3.10–3.13, driving the Windows VLC).
+Tests: 360+ unit/integration tests (offscreen Qt, mock VLC) plus opt-in live
+tests against a real VLC and libVLC (`tests/vlc/`). Verified on Windows 11
+(Python 3.12; VLC 3.0.23 32-bit over HTTP and 64-bit in-app) and WSL Ubuntu
+24.04 (Python 3.10–3.13; Ubuntu's VLC 3.0.20, and the Windows VLC through
+interop). `ruff` and `mypy --strict` pass on the whole package.
 
 **Not built yet** (see PROJECT_SPEC.md #175-176): Segment Queue, Loop
 Trainer, clip export, Audacity label import/export, beat detection, video
 thumbnails, lane assignment in the UI.
 
-## Setup
+## Packaged builds (no Python needed)
+
+Each release on GitHub (tag `bm4vlc-v<version>`) has:
+
+- **Windows:** `bm4vlc-<version>-windows-x64.zip`. Unzip anywhere and run
+  `bm4vlc.exe`. It contains its own 64-bit VLC (in-app player *and* a VLC window)
+  and ffmpeg, so nothing else has to be installed. `bm4vlc-portable.cmd` keeps
+  the database, settings and logs in a `data` folder next to it (e.g. on a USB
+  stick); `bm4vlc-cli.exe` is the same program with a console, for `--help` and
+  `--self-test`.
+- **Linux:** `bm4vlc-<version>-x86_64.AppImage` (one file: `chmod +x`, run) or
+  the `.tar.gz` folder. They use the system's VLC and ffmpeg
+  (`sudo apt install vlc ffmpeg`).
+
+`bm4vlc --self-test` (Windows: `bm4vlc-cli.exe --self-test`) checks Qt, the
+database, sync, ffmpeg, VLC and libVLC and prints what it found.
+
+## Setup (from source)
 
 You need Python 3.10+, VLC 3.x and (for waveforms) ffmpeg. The app finds VLC
 and ffmpeg in their usual places; a path can also be saved in the settings
-(`vlc/path`, `ffmpeg/path`).
+(`vlc/path`, `ffmpeg/path`) or given on the command line (`--vlc`, `--ffmpeg`).
 
 ### Windows
 
@@ -46,6 +66,12 @@ and ffmpeg in their usual places; a path can also be saved in the settings
    ```
 
 3. Double-click `launch_bm4vlc.bat`.
+
+The in-app player needs a **64-bit** VLC (Python is 64-bit, and a 64-bit
+process can't load the 32-bit `libvlc.dll` from `C:\Program Files (x86)`). The
+64-bit VLC installs next to a 32-bit one; or point `--libvlc-dir` at an unpacked
+`vlc-3.x.y-win64.zip`. With only a 32-bit VLC, the app says so and keeps using a
+separate VLC window.
 
 PySide6 installs deep folder trees. If pip fails with *"The filename or
 extension is too long"* (Windows' 260-character path limit), put the venv on
@@ -79,8 +105,57 @@ The app runs as a Linux program inside WSL and shows its window through WSLg.
 
 Data lives in `%LOCALAPPDATA%\VLCBookmarkStudio` on Windows and
 `~/.local/share/VLCBookmarkStudio` on Linux/WSL (database, waveform cache,
-logs). The two are separate: a WSL session and a Windows session don't share
-bookmarks (use Save Bookmarks / Import Project to move them).
+logs), or wherever `--data-dir` says. A WSL session and a Windows session have
+separate databases; keep them in step with a sync folder (below).
+
+## Playing: a VLC window or inside the app
+
+**Launch VLC / Open Media...** (Ctrl+O) offers:
+
+- **Play inside this app**: libVLC plays in the app's own process. No VLC
+  window, no network port or password, millisecond-exact times and lengths,
+  a smoother playhead. Needs libVLC (see Windows above; Linux: `apt install vlc`).
+- **Launch a new VLC window**: a VLC driven over its HTTP interface, as before.
+  The HTTP password is kept in a private VLC config file (owner-only), not on
+  VLC's command line where other local processes could read it.
+- **Attach** to a VLC this app started earlier.
+
+If you pause, stop or change the song in VLC's own window while a bookmark is
+looping, the loop stops instead of resuming playback.
+
+## Command line
+
+```text
+bookmark-studio [MEDIA ... | --playlist FILE.m3u] [options]
+
+  --adapter {auto,http,libvlc}  VLC window over HTTP, or the in-app player
+                                (auto: the last choice)
+  --attach [HOST:]PORT          attach to a running VLC's HTTP interface
+  --port PORT                   first HTTP port to try for a launched VLC
+  --vlc PATH | --ffmpeg PATH    use these executables (this run only)
+  --libvlc-dir DIR              VLC folder whose libVLC the in-app player uses
+  --data-dir DIR                database, waveforms, logs and settings in DIR
+  --sync-dir DIR                sync bookmarks through DIR (remembered); --no-sync
+  --no-dialog                   don't show the open-media dialog at startup
+  --log-level LEVEL             DEBUG, INFO, WARNING, ERROR
+  --self-test [--require vlc,libvlc,ffmpeg] [--self-test-report FILE]
+  --version
+```
+
+## Sync between Windows, WSL and other PCs
+
+Start each installation once with the same folder, e.g. from Windows
+`--sync-dir C:\Users\me\Bookmarks` and from WSL
+`--sync-dir /mnt/c/Users/me/Bookmarks` (a Dropbox/OneDrive/Syncthing folder or a
+network share works too). The folder is remembered.
+
+Each installation writes its whole database to its own file
+(`bm4vlc-sync-<machine>.vlcbmk`) and merges the others' at startup, every
+minute, on **File > Sync Now** and on exit. For each bookmark the most recent
+change wins, and deletions reach the other side. A song is recognised by its
+content, so `C:\Music\a.mp3` and `/mnt/c/Music/a.mp3` are the same song, and a
+playlist by its song order. Lanes and playlist orders are only added, never
+overwritten, by another machine.
 
 ## Tests
 
@@ -91,14 +166,34 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest
 $env:QT_QPA_PLATFORM="offscreen"; .venv\Scripts\python -m pytest
 ```
 
-Live tests start a real, silent, window-less VLC (`-I dummy --aout=adummy`):
+Live tests start a real, silent, window-less VLC (`-I dummy --aout=adummy`) and
+a silent in-app player (set `BM4VLC_LIBVLC_DIR` to a VLC folder if libVLC isn't
+found by itself):
 
 ```bash
 BM4VLC_LIVE_VLC=1 QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests/vlc
 ```
 
+Lint and types: `ruff check src tests packaging` and `mypy` (configured in
+`pyproject.toml`).
+
 CI (`.github/workflows/bm4vlc-tests.yml` at the repository root) runs the suite
-on Windows and Ubuntu 22.04/24.04 with Python 3.10, 3.12 and 3.13.
+on Windows and Ubuntu 22.04/24.04 with Python 3.10, 3.12 and 3.13, the live
+tests against a real VLC on Windows and Ubuntu, and ruff + mypy.
+`bm4vlc-release.yml` builds the packages on every `bm4vlc-v*` tag, runs their
+self-test and publishes them as a GitHub Release.
+
+### Building the packages yourself
+
+```bash
+pip install -e ".[packaging]"
+# Windows: bundle an unpacked 64-bit VLC and an ffmpeg.exe
+python packaging/build.py --vlc-dir C:\path\to\vlc-3.0.23 --ffmpeg C:\path\to\ffmpeg.exe
+# Linux: tar.gz, plus an AppImage (needs appimagetool)
+python packaging/build.py --appimage
+```
+
+Output goes to `dist/`; each build runs its own `--self-test` first.
 
 ## The Lua bridge vs. VLC's built-in HTTP interface
 
@@ -160,6 +255,9 @@ claims about VLC's Lua API:
    VLC answers 404 on random routes.
 8. `vlc.playlist.pause()` toggles; the bridge's `pause` only pauses a playing
    item.
+9. `goto` is a reserved word from Lua 5.2 on, which Linux VLC builds use: the
+   script failed to load there (found in 0.3.0 by the first live test against
+   Ubuntu's VLC). It now uses `vlc.playlist.gotoitem`.
 
 Also verified live for 0.2.0 (see `tests/vlc/test_live_vlc.py`): precise
 seeking right after switching songs, a gap + fade-out loop running to its
@@ -173,12 +271,12 @@ PySide6 UI  +  Domain Logic  +  SQLite
                     |
    ordered command queue (off the UI thread)
                     |
-             Playback Adapter
-              /            \
-  VLC built-in HTTP    Enhanced Lua Bridge
-  (default, spec #28)  (opt-in, spec #196)
-              \            /
-               VLC Media Player
+                   Playback Adapter
+         /                 |                  \
+ VLC built-in HTTP   Enhanced Lua Bridge   In-app libVLC
+ (spec #28)          (opt-in, spec #196)   (python-vlc)
+         \                 |                  /
+               VLC Media Player / libVLC
 ```
 
 VLC performs playback; Python performs the product logic. OS differences
@@ -193,6 +291,7 @@ src/bookmark_studio/   application package (see PROJECT_SPEC.md #116)
 vlc/bookmarkstudio.lua thin VLC Lua HTTP bridge (spec #18-#27)
 migrations/            SQLite schema migrations (spec #126), also packaged into the wheel
 tests/                 unit (offscreen Qt) and vlc (live, opt-in)
+packaging/             PyInstaller spec, build script, icon, third-party notices
 archive/               every previous version, unchanged
 ```
 

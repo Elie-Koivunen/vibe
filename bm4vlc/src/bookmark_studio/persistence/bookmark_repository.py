@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
 
 from bookmark_studio.domain.bookmark import Bookmark, default_bookmark_name
@@ -93,9 +94,13 @@ class BookmarkRepository:
         have never been manually reordered (all default sort_index=0) resolve into a
         real, stable order the first time this is called.
         """
+        now = _now()
         for index, bookmark_id in enumerate(ordered_bookmark_ids):
+            # updated_at moves only for rows whose position changed, so a sync carries
+            # the new order without touching everything else.
             self._conn.execute(
-                "UPDATE bookmarks SET sort_index = ? WHERE id = ?", (index, str(bookmark_id))
+                "UPDATE bookmarks SET sort_index = ?, updated_at = ? WHERE id = ? AND sort_index != ?",
+                (index, now, str(bookmark_id), index),
             )
         self._conn.commit()
 
@@ -110,12 +115,23 @@ class BookmarkRepository:
             self._bookmark_params(bookmark, now, now),
         )
         self._set_tags(bookmark.id, bookmark.tags)
+        # Restoring a deleted bookmark (undo) must win over its own deletion in a sync.
+        self._conn.execute("DELETE FROM bookmark_tombstones WHERE bookmark_id = ?", (str(bookmark.id),))
         self._conn.commit()
         return bookmark
 
+    def list_all(self) -> list[Bookmark]:
+        rows = self._conn.execute(self._select_sql() + " ORDER BY media_id, start_us").fetchall()
+        return self._rows_to_bookmarks(rows)
+
+    def updated_at_by_id(self) -> dict[str, str]:
+        return {row[0]: row[1] for row in self._conn.execute("SELECT id, updated_at FROM bookmarks")}
+
+    def tombstones(self) -> dict[str, str]:
+        """bookmark id -> ISO time of deletion, for folder sync."""
+        return {row[0]: row[1] for row in self._conn.execute("SELECT bookmark_id, deleted_at FROM bookmark_tombstones")}
+
     def update(self, bookmark: Bookmark) -> None:
-        # (Used to re-read the whole bookmark plus its created_at first and then never
-        # use either -- two wasted queries on every edit.)
         self._conn.execute(
             "UPDATE bookmarks SET playlist_id = ?, media_id = ?, scope = ?, lane_id = ?, "
             "bookmark_type = ?, name = ?, start_us = ?, end_us = ?, loop_enabled = ?, "
@@ -149,11 +165,9 @@ class BookmarkRepository:
     def rename_legacy_default_names(self) -> int:
         """One-time backfill: gives every bookmark still carrying the old flat "New
         bookmark" default (created before default_bookmark_name() existed) a fresh
-        bookmark-<date>-<random> name instead. Direct user report: "the first
-        bookmark doesn't have the naming convention" -- the fix for NEW bookmarks
-        doesn't retroactively touch ones already sitting in the database, so without
-        this the very first bookmark someone ever created stays stuck on the old
-        name forever. Idempotent and cheap: after the first run, no row will match.
+        bookmark-<date>-<random> name instead (new bookmarks get one already; this
+        covers the ones created earlier). Idempotent and cheap: after the first run,
+        no row will match.
         Returns the number of rows renamed.
         """
         rows = self._conn.execute(
@@ -169,6 +183,12 @@ class BookmarkRepository:
 
     def delete(self, bookmark_id: UUID) -> None:
         self._conn.execute("DELETE FROM bookmarks WHERE id = ?", (str(bookmark_id),))
+        # A tombstone lets folder sync carry the deletion to the other machines.
+        self._conn.execute(
+            "INSERT INTO bookmark_tombstones (bookmark_id, deleted_at) VALUES (?, ?) "
+            "ON CONFLICT(bookmark_id) DO UPDATE SET deleted_at = excluded.deleted_at",
+            (str(bookmark_id), _now()),
+        )
         self._conn.commit()
 
     def rename_playlist_references(self, playlist_id: UUID, new_name: str) -> None:
@@ -195,7 +215,7 @@ class BookmarkRepository:
         return tuple(row[0] for row in rows)
 
     @staticmethod
-    def _bookmark_params(bookmark: Bookmark, created_at: str, updated_at: str) -> tuple:
+    def _bookmark_params(bookmark: Bookmark, created_at: str, updated_at: str) -> tuple[Any, ...]:
         return (
             str(bookmark.id),
             str(bookmark.playlist_id) if bookmark.playlist_id else None,
@@ -227,7 +247,7 @@ class BookmarkRepository:
             "completion_action, color_key, notes, sort_index, fade_in_ms, fade_out_ms FROM bookmarks"
         )
 
-    def _rows_to_bookmarks(self, rows: list) -> list[Bookmark]:
+    def _rows_to_bookmarks(self, rows: list[Any]) -> list[Bookmark]:
         """Builds many bookmarks with ONE tag query (chunked under SQLite's parameter
         limit) instead of one tag query per bookmark."""
         ids = [row[0] for row in rows]
@@ -243,7 +263,7 @@ class BookmarkRepository:
                 tags_by_id[bookmark_id].append(tag)
         return [self._row_to_bookmark(row, tags=tuple(tags_by_id[row[0]])) for row in rows]
 
-    def _row_to_bookmark(self, row: sqlite3.Row | tuple, *, tags: tuple[str, ...] | None = None) -> Bookmark:
+    def _row_to_bookmark(self, row: sqlite3.Row | tuple[Any, ...], *, tags: tuple[str, ...] | None = None) -> Bookmark:
         (
             bookmark_id,
             playlist_id,

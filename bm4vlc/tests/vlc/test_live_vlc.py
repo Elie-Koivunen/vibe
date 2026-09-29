@@ -223,6 +223,20 @@ def test_live_loop_with_gap_fade_and_completion(live, qtbot) -> None:
     queue.shutdown()
 
 
+def test_live_password_is_read_from_the_private_config_not_the_command_line(live) -> None:
+    """VLC's HTTP interface refuses every request while no password is set, so a working
+    connection proves the password arrived through the --config file; and it must not be
+    visible to other users in the process list."""
+    assert not any(PASSWORD in str(arg) for arg in live.process.args)
+    adapter = live.adapter()
+    assert adapter.get_status() is not None
+    intruder = StandardHttpPlaybackAdapter(live.host, live.port, "wrong-password")
+    with pytest.raises(Exception):
+        intruder.connect()
+        intruder.get_status()
+    intruder.disconnect()
+
+
 def test_live_port_probe_skips_vlcs_port(live) -> None:
     live.adapter()
     bind_host, connect_host = ps.vlc_http_hosts(live.vlc)
@@ -250,7 +264,7 @@ def test_live_application_plays_a_bookmark_in_another_song(live, qtbot, tmp_path
     qtbot.addWidget(app.window)
     try:
         app.start()
-        qtbot.waitUntil(lambda: len(app._resolved) == 2 and app._synchronizer.active_playlist_id is not None,
+        qtbot.waitUntil(lambda: len(app.playlists.resolved) == 2 and app.playlists.synchronizer.active_playlist_id is not None,
                         timeout=15000)
         # Both songs decoded in the background: exact lengths known for both.
         qtbot.waitUntil(lambda: len(app._exact_duration_by_media) == 2, timeout=30000)
@@ -258,8 +272,8 @@ def test_live_application_plays_a_bookmark_in_another_song(live, qtbot, tmp_path
         assert abs(exact[0] - SONG_SECONDS[0] * 1_000_000) < 20_000
         assert abs(exact[1] - SONG_SECONDS[1] * 1_000_000) < 20_000
 
-        (first_item, first_media), (second_item, second_media) = app._resolved
-        playlist_id = app._synchronizer.active_playlist_id
+        (first_item, first_media), (second_item, second_media) = app.playlists.resolved
+        playlist_id = app.playlists.synchronizer.active_playlist_id
         point = Bookmark(
             id=uuid4(), playlist_id=playlist_id, media_id=second_media.id, scope=BookmarkScope.PLAYLIST_MEDIA,
             lane_id=None, bookmark_type=BookmarkType.POINT, name="verse", start_us=15_500_000, end_us=None,
@@ -300,25 +314,27 @@ def test_live_application_plays_a_bookmark_in_another_song(live, qtbot, tmp_path
         conn.close()
 
 
-@pytest.mark.skipif(ps.is_wsl(), reason="Lua bridge live test runs against a native VLC only")
 def test_live_lua_bridge(tmp_path, qtbot) -> None:
     """The opt-in Lua bridge, loaded from a private data dir (VLC_DATA_PATH) under a test
     name, so nothing is installed into the user's own VLC profile."""
     from bookmark_studio.playback.bridge_client import BridgeClient
+
+    if ps.is_wsl() and ps.is_windows_executable(_vlc()):
+        pytest.skip("VLC_DATA_PATH does not reach a Windows vlc.exe started from WSL")
 
     data_dir = tmp_path / "vlcdata"
     intf_dir = data_dir / "lua" / "intf"
     intf_dir.mkdir(parents=True)
     source = Path(__file__).resolve().parents[2] / "vlc" / "bookmarkstudio.lua"
     shutil.copyfile(source, intf_dir / "bm4vlc_livetest.lua")
-    live = LiveVlc(tmp_path, lua_intf="bm4vlc_livetest", env={"VLC_DATA_PATH": str(data_dir)},
-                   extra_args=[f"--http-password={LUA_TOKEN}"])
+    live = LiveVlc(tmp_path, lua_intf="bm4vlc_livetest", env={"VLC_DATA_PATH": str(data_dir)})
+    assert not any(LUA_TOKEN in str(arg) for arg in live.process.args)
     from bookmark_studio.playback.enhanced_adapter import EnhancedLuaPlaybackAdapter
 
     try:
         client = BridgeClient(live.host, live.port, LUA_TOKEN)  # one persistent connection, as in the app
         adapter = EnhancedLuaPlaybackAdapter(client)
-        _wait(lambda: adapter.connect() or True, timeout=15)  # auth via the --http-password fallback
+        _wait(lambda: adapter.connect() or True, timeout=15)  # token from the private config file
         items = _wait(lambda: (lambda i: i if len(i) == 2 else None)(adapter.get_playlist()), timeout=15)
         assert "volume" in client.status()  # status now reports volume (fades used to assume 100%)
         adapter.set_volume(128)  # the new command (was rejected before 0.2.0)

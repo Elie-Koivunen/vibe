@@ -14,8 +14,7 @@ class LoopSpec:
     repeat_count: int | None
     gap_ms: int
     completion_action: CompletionAction
-    # Direct user request: "add options to fade in and fade out when playing back".
-    # 0 disables (default) -- matches gap_ms's own "0 means off" convention.
+    # Fade in/out; 0 disables (default), like gap_ms.
     fade_in_ms: int = 0
     fade_out_ms: int = 0
 

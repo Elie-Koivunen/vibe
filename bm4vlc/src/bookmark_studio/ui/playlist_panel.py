@@ -4,18 +4,23 @@ from __future__ import annotations
 from PySide6.QtCore import QSignalBlocker, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
-    QCheckBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QCheckBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
 
 from bookmark_studio.playback.status import VlcPlaylistItem
+from bookmark_studio.ui.qt_helpers import top_level_rows
 
 COLUMNS = ["Title", "Artist", "Duration", "Bookmarks", "Status"]
 
-# Direct user request: "instead of having a playing column, reflect in traffic
-# color by highlighting the song that is being played e.g. in green" -- replaces
-# the old "▶" marker column with a full-row background tint instead. Direct
-# follow-up: "if playback is active, then the highlight is green, otherwise,
-# blue" -- distinguishes the current song actually playing from one that's just
+# The current song's row is tinted: green while it plays, blue while it is only
 # loaded (paused/stopped).
 _ACTIVELY_PLAYING_COLOR = QColor("#8fd98f")
 _CURRENT_NOT_PLAYING_COLOR = QColor("#a9c9f5")
@@ -36,16 +41,11 @@ class PlaylistPanel(QWidget):
         self._is_actively_playing = False
 
         layout = QVBoxLayout(self)
-        # Direct user request: "beautify the layout".
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        # Direct user request: "add button to launch vlc and a browse button to
-        # select desired playlist" / "option to select an open vlc instance, a drop
-        # box ... alternatively the user would launch a new instance with a browse
-        # button to find the playlist and launch" -- one button opens VlcLaunchDialog
-        # (app/application.py's prompt_vlc_launch_dialog), which contains both that
-        # dropdown of open instances and the browse-for-playlist flow.
+        # Opens VlcLaunchDialog: attach to a running VLC, launch one with a playlist,
+        # or play inside the app.
         self._launch_vlc_button = QPushButton("Launch VLC...", self)
         self._launch_vlc_button.setToolTip(
             "Attach to an already-open VLC instance, or launch a new one with a playlist"
@@ -53,13 +53,8 @@ class PlaylistPanel(QWidget):
         self._launch_vlc_button.clicked.connect(self.launch_vlc_requested.emit)
         layout.addWidget(self._launch_vlc_button)
 
-        # Direct follow-up requests: "move the connection status to above the launch
-        # vlc button and enlarge the text", then "move the button above and make the
-        # connected/disconnected text a bit smaller" -- previously a small label
-        # buried in the transport bar, far from the button that actually establishes
-        # the connection it's reporting on; now sits right under that button instead.
-        # Then "move the checkbox next to the connected status field" -- shares this
-        # row with the Follow checkbox instead of sitting on its own line below.
+        # Connection status and the Follow checkbox, right under the button that
+        # makes the connection.
         status_row = QHBoxLayout()
         self._connection_label = QLabel("● Offline", self)
         connection_font = QFont()
@@ -76,9 +71,7 @@ class PlaylistPanel(QWidget):
         status_row.addStretch(1)
         layout.addLayout(status_row)
 
-        # Direct follow-up request: "move the filter field closer to the playlist
-        # table" -- sits immediately above the tree it filters, instead of with a
-        # full row (the connection/follow controls) between them.
+        # Directly above the tree it filters.
         self._filter_edit = QLineEdit(self)
         self._filter_edit.setPlaceholderText("Filter...")
         self._filter_edit.textChanged.connect(self._apply_filter)
@@ -107,34 +100,24 @@ class PlaylistPanel(QWidget):
         self._rebuild()
 
     def set_current_playing(self, vlc_id: int | None, *, is_playing: bool = False) -> None:
-        """Updates just the playing-row highlight on existing rows -- direct fix for
-        "i still cant automatically play a song by double clicking the tittle": this
-        used to call _rebuild(), which does _tree.clear() + recreates every
-        QTreeWidgetItem from scratch. Called on every ~400ms status poll, that
-        destroyed and rebuilt the whole row list mid-gesture far more often than not
-        during a real double-click (whose two clicks need to land on the SAME item
-        object within Qt's double-click interval), silently breaking double-click
-        detection -- confirmed by the fact goto_item()'s VLC command itself was
-        already verified correct. It also wiped the current selection highlight and
-        scroll position on every tick, a real bug in its own right even ignoring
-        double-click. No rebuild is needed at all: only the highlighted row changes.
+        """Updates only the playing-row highlight on the existing rows. Rebuilding the
+        rows here (every status poll) would replace the items between the two clicks
+        of a double-click, which Qt then never reports, and would reset the selection
+        and scroll position.
 
-        `is_playing` (direct follow-up request: "if playback is active, then the
-        highlight is green, otherwise, blue") is VLC's actual playback state for
-        this song, distinct from it merely being the current/loaded item.
+        `is_playing` is the player's actual state (green) as opposed to the song
+        merely being loaded (blue).
         """
         if vlc_id == self._current_playing_id and is_playing == self._is_actively_playing:
             return
         self._current_playing_id = vlc_id
         self._is_actively_playing = is_playing
-        for i in range(self._tree.topLevelItemCount()):
-            row = self._tree.topLevelItem(i)
+        for row in top_level_rows(self._tree):
             _set_row_playing(row, row.data(0, 32) == vlc_id, is_playing)
 
     def select_item(self, vlc_id: int | None) -> None:
-        """Highlights the row for `vlc_id` -- direct user request: selecting a
-        bookmark should "automatically select the song from the playlist above" too,
-        not just switch the waveform. Setting the current item fires the normal
+        """Highlights the row for `vlc_id` (selecting a bookmark selects its song).
+        Setting the current item fires the normal
         itemSelectionChanged -> item_selected signal chain, so Application's existing
         _on_playlist_item_selected handles the actual waveform/follow-state switch;
         this method only needs to move the highlight.
@@ -142,8 +125,7 @@ class PlaylistPanel(QWidget):
         if vlc_id is None:
             self._tree.clearSelection()
             return
-        for i in range(self._tree.topLevelItemCount()):
-            row = self._tree.topLevelItem(i)
+        for row in top_level_rows(self._tree):
             if row.data(0, 32) == vlc_id:
                 self._tree.setCurrentItem(row)
                 return
@@ -188,20 +170,17 @@ class PlaylistPanel(QWidget):
                     "",
                 ]
             )
-            row.setData(0, 32, item.vlc_id)  # Qt.UserRole == 32
+            row.setData(0, 32, item.vlc_id)  # Qt.ItemDataRole.UserRole == 32
             _set_row_playing(row, item.vlc_id == self._current_playing_id, self._is_actively_playing)
             self._tree.addTopLevelItem(row)
-        # Direct user request: "have the columns resize automatically to the length
-        # of the strings" -- stays manually resizable after this, just re-fit to the
-        # current content on every rebuild instead of defaulting to truncated text.
+        # Fit the columns to their contents on each rebuild (still resizable by hand).
         for column in range(len(COLUMNS)):
             self._tree.resizeColumnToContents(column)
         self._apply_filter(self._filter_edit.text())
 
     def _apply_filter(self, text: str) -> None:
         needle = text.strip().lower()
-        for i in range(self._tree.topLevelItemCount()):
-            row = self._tree.topLevelItem(i)
+        for row in top_level_rows(self._tree):
             visible = not needle or needle in row.text(0).lower()  # column 0 == Title
             row.setHidden(not visible)
 

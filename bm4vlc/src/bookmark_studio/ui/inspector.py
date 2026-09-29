@@ -3,7 +3,13 @@ from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFormLayout, QLineEdit, QPlainTextEdit, QSpinBox, QWidget,
+    QCheckBox,
+    QComboBox,
+    QFormLayout,
+    QLineEdit,
+    QPlainTextEdit,
+    QSpinBox,
+    QWidget,
 )
 
 from bookmark_studio.domain.bookmark import Bookmark
@@ -28,8 +34,8 @@ OFFERED_COMPLETION_ACTIONS = [
 
 
 class _NotesEdit(QPlainTextEdit):
-    """QPlainTextEdit has no editingFinished; notes used to be committed on every
-    keystroke (textChanged). This commits once, when focus leaves the field."""
+    """QPlainTextEdit has no editingFinished. This one commits once, when focus
+    leaves the field, not on every keystroke (one undo step per edit)."""
 
     editingFinished = Signal()
 
@@ -61,9 +67,7 @@ class BookmarkInspector(QWidget):
         self._name_edit.editingFinished.connect(self._on_name_committed)
         form.addRow("Name", self._name_edit)
 
-        # Direct user request: "the bookmark fields can also have arrow keys to
-        # increment the numerals" -- TimecodeEdit adds spinbox-like Up/Down stepping
-        # on top of plain QLineEdit's normal typed-entry + editingFinished behavior.
+        # TimecodeEdit: typed entry plus per-unit arrows (Up/Down steps).
         self._start_edit = TimecodeEdit(self)
         self._start_edit.editingFinished.connect(self._on_start_committed)
         form.addRow("Start", self._start_edit)
@@ -94,8 +98,7 @@ class BookmarkInspector(QWidget):
         self._completion_combo.currentIndexChanged.connect(self._on_loop_settings_changed)
         form.addRow("After loop", self._completion_combo)
 
-        # Direct user request: "add options to fade in and fade out when playing
-        # back". 0 disables, same "0 means off" convention as Gap above.
+        # Fades: 0 disables, the same "0 means off" convention as Gap above.
         self._fade_in_spin = QSpinBox(self)
         self._fade_in_spin.setRange(0, 60_000)
         self._fade_in_spin.setSuffix(" ms")
@@ -168,10 +171,8 @@ class BookmarkInspector(QWidget):
             self._loading = False
 
     def show_selection(self, selection: Selection | None) -> None:
-        """Direct follow-up request: "fix so that the highlight start and end ...
-        appear in the fields ... dynamically updated when a user is marking for
-        bookmarking or adjusting the highlight" -- mirrors an in-progress
-        drag-selection (not yet a bookmark) in these same Start/End fields. Only
+        """Mirrors an in-progress drag-selection (not yet a bookmark) in the
+        Start/End fields, live while it is marked or adjusted. Only
         while nothing is actually loaded here: an in-progress drag elsewhere on
         the waveform must not silently clobber a bookmark someone is mid-edit on.
         Typing into the fields during a preview is a harmless no-op (see
@@ -184,9 +185,9 @@ class BookmarkInspector(QWidget):
         self._loading = True
         try:
             has_selection = selection is not None
-            self._start_edit.setText(format_timecode(selection.start_us) if has_selection else "")
+            self._start_edit.setText(format_timecode(selection.start_us) if selection is not None else "")
             self._start_edit.setEnabled(has_selection)
-            self._end_edit.setText(format_timecode(selection.end_us) if has_selection else "")
+            self._end_edit.setText(format_timecode(selection.end_us) if selection is not None else "")
             self._end_edit.setEnabled(has_selection)
         finally:
             self._loading = False

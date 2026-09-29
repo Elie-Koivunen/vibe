@@ -27,10 +27,7 @@ class WaveformScene(QGraphicsScene):
     # (2^31 us) -- same bug class fixed for TransportBar/BookmarkInspector's signals.
     seek_requested = Signal(object)
     selection_changed = Signal(object)  # Selection | None
-    # Direct follow-up request: "when i press play to listen to the selection, i
-    # want the ability to adjust the selection by dragging the sides. in addition,
-    # the start and end should reflect the movement ... of the playback" -- fires
-    # continuously WHILE an edge is being dragged (start_us, end_us), for a cheap
+    # Fires continuously WHILE a selection edge is being dragged (start_us, end_us), for a cheap
     # live readout; selection_changed above only fires once the drag/edit settles.
     selection_preview_changed = Signal(object, object)
     point_bookmark_requested = Signal(object)
@@ -54,10 +51,7 @@ class WaveformScene(QGraphicsScene):
         self._playhead_item = PlayheadItem(self._height)
         self._playhead_item.setY(RULER_HEIGHT)
         self.addItem(self._playhead_item)
-        # Direct user request: "make it usable where as a user can move it and the
-        # song would start from there when played" -- dragging the playhead reuses
-        # this scene's existing seek_requested signal (same one empty-space clicks
-        # already use), so it's wired into VLC seeking for free.
+        # Dragging the playhead seeks through the same signal as a click on empty space.
         self._playhead_item.seek_requested.connect(self.seek_requested.emit)
         self._selection_item: SelectionItem | None = None
         self._bookmark_items: dict[UUID, BookmarkRegionItem | BookmarkPointItem] = {}
@@ -128,14 +122,16 @@ class WaveformScene(QGraphicsScene):
             self._add_bookmark_item(bookmark)
 
     def _add_bookmark_item(self, bookmark: Bookmark) -> None:
+        item: BookmarkRegionItem | BookmarkPointItem
         if bookmark.end_us is not None:
-            item: BookmarkRegionItem | BookmarkPointItem = BookmarkRegionItem(bookmark, self._height)
-            item.move_finished.connect(
+            region = BookmarkRegionItem(bookmark, self._height)
+            region.move_finished.connect(
                 lambda start, end, bid=bookmark.id: self.bookmark_move_finished.emit(bid, start, end)
             )
-            item.resize_finished.connect(
+            region.resize_finished.connect(
                 lambda handle, value, bid=bookmark.id: self.bookmark_resize_finished.emit(bid, handle, value)
             )
+            item = region
         else:
             item = BookmarkPointItem(bookmark, self._height)
             item.move_finished.connect(
@@ -181,7 +177,8 @@ class WaveformScene(QGraphicsScene):
 
 
 def _empty_pyramid() -> WaveformPyramid:
-    from bookmark_studio.waveform.pyramid import PyramidLevel
     import numpy as np
+
+    from bookmark_studio.waveform.pyramid import PyramidLevel
 
     return WaveformPyramid(levels=(PyramidLevel(block_size=64, peaks=np.zeros((0, 2), dtype="<f4")),), sample_rate=8000)

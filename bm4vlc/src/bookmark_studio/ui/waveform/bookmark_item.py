@@ -3,7 +3,7 @@ directly (spec #113) -- emits intent signals; a controller decides what to persi
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, Signal
+from PySide6.QtCore import QLineF, QPointF, QRectF, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QTransform
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject
 
@@ -19,14 +19,11 @@ POINT_COLOR = QColor(60, 170, 90)
 
 def _view_scale_x(item: QGraphicsItem) -> float:
     """A fixed scene-unit handle width only corresponds to a constant number of real
-    screen pixels when the view's zoom happens to be 1:1. Once fit_entire_media()
-    zooms out to show a whole multi-minute track, 8 scene-ms became sub-pixel --
-    confirmed live: the resize handles were reported as effectively impossible to grab
-    ("make it so the highlighting box can be resized"). Handles (and hit-testing) now
-    size themselves in real screen pixels by dividing through the view's current
-    horizontal scale, the same fix applied to ruler/waveform text elsewhere in this
-    package. Falls back to 1.0 (no view attached yet, e.g. mid-construction) so this
-    never raises.
+    screen pixels when the view's zoom happens to be 1:1. Zoomed out to a whole
+    multi-minute track, 8 scene-ms are sub-pixel and the handles can't be grabbed.
+    Handles (and hit-testing) size themselves in screen pixels by dividing through the
+    view's horizontal scale, as the ruler/waveform text does. Falls back to 1.0 (no
+    view attached yet, e.g. mid-construction) so this never raises.
     """
     scene = item.scene()
     if scene is None:
@@ -57,7 +54,7 @@ class BookmarkRegionItem(QGraphicsObject):
         super().__init__()
         if bookmark.end_us is None:
             raise ValueError("BookmarkRegionItem requires a segment bookmark (end_us set)")
-        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
         self._height = height
         self._bookmark = bookmark
@@ -185,7 +182,7 @@ class BookmarkPointItem(QGraphicsObject):
 
     def __init__(self, bookmark: Bookmark, height: float) -> None:
         super().__init__()
-        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self._height = height
         self._bookmark = bookmark
         self._dragging = False
@@ -208,7 +205,7 @@ class BookmarkPointItem(QGraphicsObject):
     def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: N802
         half = self._MARKER_HALF_WIDTH
         painter.setPen(QPen(POINT_COLOR, 1.5))
-        painter.drawLine(0, 0, 0, self._height)
+        painter.drawLine(QLineF(0, 0, 0, self._height))
         painter.setBrush(QBrush(POINT_COLOR))
         painter.drawPolygon([QPointF(0, 0), QPointF(half, half), QPointF(0, half * 2), QPointF(-half, half)])
 

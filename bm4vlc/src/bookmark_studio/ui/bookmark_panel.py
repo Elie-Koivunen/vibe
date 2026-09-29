@@ -5,19 +5,24 @@ from uuid import UUID
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QPushButton, QStyledItemDelegate,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView,
+    QComboBox,
+    QHBoxLayout,
+    QHeaderView,
+    QPushButton,
+    QStyledItemDelegate,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
 
 from bookmark_studio.domain.bookmark import Bookmark
+from bookmark_studio.ui.qt_helpers import top_level_rows
 from bookmark_studio.ui.transport import format_timecode
 
-# Direct user request: a "Song" column identifying which track each bookmark belongs
-# to, since this list now spans every song in the playlist, not just the one on screen.
-# Gap/Fade In/Out columns: direct follow-up requests, "include fade in/out columns"
-# and "the selection drop box is still missing for loop/fade in/fade out/gap" --
-# surfaces the per-bookmark loop_gap_ms/fade_in_ms/fade_out_ms (set in the Inspector)
-# here too, all directly editable.
+# The list spans every song of the playlist, so "Song" says which track a bookmark
+# belongs to. Loop/Gap/Fade In/Fade Out are editable in place (dropdowns).
 COLUMNS = ["Song", "Name", "Start", "End", "Loop", "Gap", "Fade In", "Fade Out"]
 USER_ROLE = 32
 LOOP_COLUMN = COLUMNS.index("Loop")
@@ -25,8 +30,6 @@ GAP_COLUMN = COLUMNS.index("Gap")
 FADE_IN_COLUMN = COLUMNS.index("Fade In")
 FADE_OUT_COLUMN = COLUMNS.index("Fade Out")
 
-# Direct follow-up request: "the columns for loop, fade in/out etc, they should
-# also be directly editable, e.g. clicking would give a drop menu options" --
 # (label, loop_enabled, repeat_count) choices for the Loop column's dropdown.
 _LOOP_CHOICES: list[tuple[str, bool, int | None]] = [
     ("Off", False, None),
@@ -93,12 +96,12 @@ class _ComboColumnDelegate(QStyledItemDelegate):
         if not isinstance(editor, QComboBox):
             super().setEditorData(editor, index)
             return
-        current = index.data(Qt.DisplayRole) or ""
+        current = index.data(Qt.ItemDataRole.DisplayRole) or ""
         position = editor.findText(current)
         if position < 0 and current:
             # A value set elsewhere (e.g. a 750 ms gap from the Inspector) that isn't one
-            # of the presets. Offer it too, selected -- previously the combo fell back to
-            # the first entry ("Off"), and merely clicking away saved "Off" over it.
+            # of the presets. Offer it too, selected: falling back to the first entry
+            # ("Off") would save "Off" over it as soon as the editor closes.
             editor.insertItem(1, current)
             position = 1
         editor.setCurrentIndex(max(position, 0))
@@ -108,8 +111,8 @@ class _ComboColumnDelegate(QStyledItemDelegate):
         if not isinstance(editor, QComboBox):
             super().setModelData(editor, model, index)
             return
-        if editor.currentText() != (index.data(Qt.DisplayRole) or ""):
-            model.setData(index, editor.currentText(), Qt.EditRole)
+        if editor.currentText() != (index.data(Qt.ItemDataRole.DisplayRole) or ""):
+            model.setData(index, editor.currentText(), Qt.ItemDataRole.EditRole)
 
 
 class BookmarkPanel(QWidget):
@@ -119,8 +122,7 @@ class BookmarkPanel(QWidget):
     loop_bookmark_requested = Signal(object)  # UUID
     delete_bookmark_requested = Signal(list)  # list of UUIDs -- one or more
     reorder_requested = Signal(list)  # ordered list of every bookmark UUID in the list
-    # Direct follow-up request: "the columns for loop, fade in/out etc, they should
-    # also be directly editable, e.g. clicking would give a drop menu options".
+    # In-place edits of the Loop/Gap/Fade columns.
     loop_edited = Signal(object, bool, object)  # bookmark_id, loop_enabled, repeat_count|None
     gap_edited = Signal(object, int)  # bookmark_id, loop_gap_ms
     fade_in_edited = Signal(object, int)  # bookmark_id, fade_in_ms
@@ -136,12 +138,9 @@ class BookmarkPanel(QWidget):
         layout = QVBoxLayout(self)
 
         toolbar = QHBoxLayout()
-        # Direct user request: separate playback controls "that would play explicitly
-        # from the bookmark listing itself" -- distinct from the transport bar (which
-        # drives the live VLC playlist) and from "Play/Loop Selection" above the
-        # waveform (which needs a fresh drag-selection, not a saved bookmark row).
-        # Play/Loop only ever act on ONE bookmark (playing several at once isn't a
-        # thing), so they stay enabled only when the selection is exactly one row.
+        # Plays a saved bookmark row -- unlike the transport bar (the player's playlist)
+        # and Play/Loop Selection (a fresh drag-selection on the waveform). Play/Loop
+        # act on one bookmark, so they are enabled only for a single selected row.
         self._play_bookmark_button = QPushButton("Play Bookmark", self)
         self._play_bookmark_button.setToolTip("Seek VLC to the selected bookmark and play")
         self._play_bookmark_button.clicked.connect(self._on_play_bookmark_clicked)
@@ -152,18 +151,13 @@ class BookmarkPanel(QWidget):
         self._loop_bookmark_button.clicked.connect(self._on_loop_bookmark_clicked)
         toolbar.addWidget(self._loop_bookmark_button)
 
-        # Direct user request: "there is no button to select and delete a bookmark"
-        # (later: "i should be able to multiple select and delete or move") -- Delete
-        # already worked via the Delete key/Bookmark menu once a row was loaded into
-        # the Inspector, but with no visible button, and no multi-select support, it
-        # read as a missing feature.
+        # Deletes every selected row (the Delete key and Bookmark menu do the same).
         self._delete_bookmark_button = QPushButton("Delete Bookmark", self)
         self._delete_bookmark_button.setToolTip("Delete every selected bookmark")
         self._delete_bookmark_button.clicked.connect(self._on_delete_bookmark_clicked)
         toolbar.addWidget(self._delete_bookmark_button)
 
-        # Direct user request: "the row entries should also be possible to manually
-        # reorder them moving up/down".
+        # Manual order (drag and drop does the same, see below).
         self._move_up_button = QPushButton("Move Up", self)
         self._move_up_button.setToolTip("Move every selected bookmark up in this list")
         self._move_up_button.clicked.connect(lambda: self._move_selected(-1))
@@ -175,8 +169,7 @@ class BookmarkPanel(QWidget):
         toolbar.addWidget(self._move_down_button)
 
         toolbar.addStretch(1)
-        # Direct user feedback: "add a button to save bookmark catalogue" -- the
-        # equivalent File > Export Project menu item existed but wasn't discoverable.
+        # Same as File > Export Project, where it is easy to miss.
         self._export_button = QPushButton("Save Bookmarks...", self)
         self._export_button.setToolTip("Export this playlist's bookmarks to a .vlcbmk file")
         self._export_button.clicked.connect(self.export_requested.emit)
@@ -186,20 +179,14 @@ class BookmarkPanel(QWidget):
         self._tree = QTreeWidget(self)
         self._tree.setColumnCount(len(COLUMNS))
         self._tree.setHeaderLabels(COLUMNS)
-        # Direct user request: "i should be able to multiple select and delete or
-        # move" -- Ctrl/Shift-click or a rubber-band drag selects more than one row.
-        self._tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        # Direct user request: "nice to have all columns adjustable and reorderable".
-        # Interactive (drag-to-resize) is QHeaderView's default already; Movable adds
-        # drag-to-reorder.
+        # Ctrl/Shift-click or a rubber-band drag selects several rows.
+        self._tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        # Columns can be resized (Interactive) and dragged into another order (Movable).
         header = self._tree.header()
         header.setSectionsMovable(True)
-        header.setSectionResizeMode(QHeaderView.Interactive)
-        # Direct user request: "i should be able to just click and drag the entry up
-        # and down instead of relying on separate buttons" -- Move Up/Down (below)
-        # stay as a fallback, but this is the primary way to reorder now. Qt's
-        # InternalMove drags the whole current selection together, multi-select included.
-        self._tree.setDragDropMode(QTreeWidget.InternalMove)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        # Rows are reordered by dragging; InternalMove moves the whole selection together.
+        self._tree.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self._tree.setDragEnabled(True)
         self._tree.setAcceptDrops(True)
         self._tree.setDropIndicatorShown(True)
@@ -208,17 +195,10 @@ class BookmarkPanel(QWidget):
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
 
-        # Direct follow-up request: "the columns for loop, fade in/out etc, they
-        # should also be directly editable, e.g. clicking would give a drop menu
-        # options" -- then "the selection drop box is still missing for loop/fade
-        # in/fade out/gap": SelectedClicked (a click only opens the editor once the
-        # cell's row is already the current selection) turned out to read as "the
-        # dropdown doesn't open" for a plain single click on an unselected row.
-        # CurrentChanged fires as soon as the cell becomes current -- i.e. on the
-        # very first click -- so the dropdown now opens immediately. DoubleClicked is
-        # deliberately excluded: it would fire this AND itemDoubleClicked (which
-        # plays the bookmark regardless of column) at the same time.
-        self._tree.setEditTriggers(QAbstractItemView.CurrentChanged | QAbstractItemView.EditKeyPressed)
+        # CurrentChanged opens a column's dropdown on the first click (SelectedClicked
+        # would need the row selected first, which reads as "the dropdown doesn't
+        # open"). DoubleClicked is left out: a double click plays the bookmark.
+        self._tree.setEditTriggers(QAbstractItemView.EditTrigger.CurrentChanged | QAbstractItemView.EditTrigger.EditKeyPressed)
         loop_labels = [label for label, _enabled, _count in _LOOP_CHOICES]
         ms_labels = [_ms_label(ms) for ms in _MS_CHOICES]
         self._tree.setItemDelegate(
@@ -279,18 +259,14 @@ class BookmarkPanel(QWidget):
             self.delete_bookmark_requested.emit(bookmark_ids)
 
     def _on_item_double_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
-        # Direct user request: "double clicking on a bookmark should play that
-        # bookmark as well" -- same intent as Play Bookmark, just a faster gesture.
+        # Same as Play Bookmark.
         bookmark_id = item.data(0, USER_ROLE)
         if bookmark_id is not None:
             self.play_bookmark_requested.emit(bookmark_id)
 
     def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
-        """Fires when the Loop/Gap/Fade In/Fade Out combo delegate commits a choice
-        -- direct follow-up request: "the columns for loop, fade in/out etc, they
-        should also be directly editable". Only reacts to those four columns; every
-        other column is never made editable in the first place (see
-        _ComboColumnDelegate), so this never fires for them.
+        """Fires when the Loop/Gap/Fade In/Fade Out combo delegate commits a choice.
+        Only those four columns are editable (see _ComboColumnDelegate).
         """
         if column not in (LOOP_COLUMN, GAP_COLUMN, FADE_IN_COLUMN, FADE_OUT_COLUMN):
             return
@@ -318,8 +294,7 @@ class BookmarkPanel(QWidget):
 
     def _move_selected(self, delta: int) -> None:
         """Moves the whole selected block up or down by one position, keeping the
-        selected rows' relative order -- direct user request: "i should be able to
-        multiple select and ... move". Moving up swaps each selected index with its
+        selected rows' relative order. Moving up swaps each selected index with its
         upward neighbor top-to-bottom; moving down does the mirror image
         bottom-to-top, so earlier swaps never disturb indices not yet processed.
         """
@@ -331,7 +306,7 @@ class BookmarkPanel(QWidget):
             return
         if delta > 0 and indices[-1] == count - 1:
             return
-        ordered_ids = [self._tree.topLevelItem(i).data(0, USER_ROLE) for i in range(count)]
+        ordered_ids = [row.data(0, USER_ROLE) for row in top_level_rows(self._tree)]
         ordered_indices = indices if delta < 0 else list(reversed(indices))
         for index in ordered_indices:
             other = index + delta
@@ -343,7 +318,7 @@ class BookmarkPanel(QWidget):
         tree's rows (including a multi-row drag) -- just read the new order back out
         and ask the caller to persist it, same as a Move Up/Down click.
         """
-        ordered_ids = [self._tree.topLevelItem(i).data(0, USER_ROLE) for i in range(self._tree.topLevelItemCount())]
+        ordered_ids = [row.data(0, USER_ROLE) for row in top_level_rows(self._tree)]
         self.reorder_requested.emit(ordered_ids)
 
     def set_bookmarks(self, bookmarks: list[Bookmark], song_names: dict[UUID, str] | None = None) -> None:
@@ -352,10 +327,10 @@ class BookmarkPanel(QWidget):
         manual reorder (see _move_selected/reorder_requested) actually sticks instead
         of being immediately re-sorted away by this panel re-deriving its own order.
 
-        A refresh that changes nothing is a no-op. Every rebuild used to re-select the
-        previous rows, which re-emitted bookmark_selected: the Inspector reloaded
-        (wiping half-typed text), the view jumped back to that bookmark's song, and
-        column widths were reset -- on every ~2s playlist poll.
+        A refresh that changes nothing is a no-op: a rebuild re-selects the previous
+        rows, which re-emits bookmark_selected (the Inspector would reload and lose
+        half-typed text, and the view would jump back to that bookmark's song) -- on
+        every ~2 s playlist poll.
         """
         song_names = dict(song_names or {})
         shown_names = {b.media_id: song_names.get(b.media_id, "") for b in bookmarks}
@@ -389,11 +364,10 @@ class BookmarkPanel(QWidget):
                 row.setData(0, USER_ROLE, bookmark.id)
                 # Without ItemIsEditable, Qt never opens the Loop/Gap/Fade dropdown
                 # editors at all -- QTreeWidgetItem isn't editable by default.
-                row.setFlags(row.flags() | Qt.ItemIsEditable)
+                row.setFlags(row.flags() | Qt.ItemFlag.ItemIsEditable)
                 self._tree.addTopLevelItem(row)
-            # Direct user request: "have the columns resize automatically to the length
-            # of the strings" -- only when the rows actually changed, so a manual column
-            # width survives ordinary refreshes.
+            # Columns fit their contents only when the rows changed, so a width the user
+            # set survives ordinary refreshes.
             if refit_columns:
                 for column in range(len(COLUMNS)):
                     self._tree.resizeColumnToContents(column)
@@ -409,8 +383,7 @@ class BookmarkPanel(QWidget):
         self.select_bookmarks({bookmark_id})
 
     def select_bookmarks(self, bookmark_ids: set[UUID]) -> None:
-        for i in range(self._tree.topLevelItemCount()):
-            row = self._tree.topLevelItem(i)
+        for row in top_level_rows(self._tree):
             row.setSelected(row.data(0, USER_ROLE) in bookmark_ids)
 
     def _on_selection_changed(self) -> None:

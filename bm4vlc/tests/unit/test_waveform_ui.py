@@ -23,7 +23,7 @@ def _make_view(qtbot, duration_us: int = 10_000_000):
 
 
 def _to_view_pos(view: WaveformView, time_us: int, y: float = 40.0) -> QPoint:
-    scene_pos = view.mapToScene(0, 0)  # ensure transform is current
+    view.mapToScene(0, 0)  # ensure transform is current
     point = view.mapFromScene(time_us_to_scene_x(time_us), y)
     return point
 
@@ -224,9 +224,8 @@ def test_fit_entire_media_before_show_is_corrected_on_resize(qtbot) -> None:
 
 
 def test_manual_zoom_disables_sticky_fit_mode(qtbot) -> None:
-    from PySide6.QtCore import QPoint
+    from PySide6.QtCore import QPoint, QPointF
     from PySide6.QtGui import QWheelEvent
-    from PySide6.QtCore import QPointF
 
     scene, view = _make_view(qtbot)
     view.fit_entire_media()

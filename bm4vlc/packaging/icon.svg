@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- VLC Bookmark Studio: a waveform with a loop segment and a bookmark ribbon. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#23324a"/>
+      <stop offset="1" stop-color="#121a28"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="44" fill="url(#bg)"/>
+  <rect x="78" y="58" width="92" height="140" rx="6" fill="#f08a24" opacity="0.22"/>
+  <g fill="#7fb6ff">
+    <rect x="34" y="112" width="12" height="32" rx="6"/>
+    <rect x="56" y="96" width="12" height="64" rx="6"/>
+    <rect x="78" y="76" width="12" height="104" rx="6"/>
+    <rect x="100" y="90" width="12" height="76" rx="6"/>
+    <rect x="122" y="64" width="12" height="128" rx="6"/>
+    <rect x="144" y="84" width="12" height="88" rx="6"/>
+    <rect x="166" y="102" width="12" height="52" rx="6"/>
+    <rect x="188" y="92" width="12" height="72" rx="6"/>
+    <rect x="210" y="114" width="12" height="28" rx="6"/>
+  </g>
+  <path d="M150 20 h52 v76 l-26 -18 l-26 18 z" fill="#f08a24"/>
+</svg>

@@ -76,10 +76,10 @@ class MediaResolver:
         return self._repository.insert(media)
 
     def _revalidated(self, media: Media, uri: str) -> Media:
-        """A URI match alone used to be trusted forever: replacing the file at that path
-        (a re-encode, or a different song saved under the same name) kept showing the
-        OLD waveform, because the cache is keyed by the fingerprint recorded the first
-        time. When size or mtime changed, re-fingerprint and record the new content.
+        """A URI match alone can't be trusted forever: replacing the file at that path
+        (a re-encode, or a different song saved under the same name) would keep showing
+        the OLD waveform, because the cache is keyed by the fingerprint recorded the
+        first time. When size or mtime changed, re-fingerprint and record the new content.
         Bookmarks stay attached to the same media id -- there's no way to know whether
         they still make sense, and silently hiding them would be worse."""
         if media.file_size is None or media.mtime_ns is None:

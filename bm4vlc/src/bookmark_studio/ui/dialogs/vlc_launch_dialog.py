@@ -1,57 +1,69 @@
-"""VlcLaunchDialog: pick an already-open VLC instance to attach to, or browse for a
-playlist/media and launch a fresh one -- the "dropdown of open instances, alternatively
-launch a new one with a browse button" flow the user asked for explicitly.
-"""
+"""VlcLaunchDialog: choose the player -- attach to an open VLC window, launch a new VLC
+window with a playlist/media, or play them inside this app (libVLC)."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
 )
 
 LAUNCH_NEW_SENTINEL = -1
+IN_APP_SENTINEL = -2
 
 
 @dataclass
 class VlcLaunchChoice:
-    mode: str  # "attach" or "launch"
+    mode: str  # "attach", "launch" (a new VLC window) or "in_app" (libVLC inside this app)
     port: int | None = None
     media_paths: list[str] = field(default_factory=list)
     host: str = "127.0.0.1"  # attach: the address that instance answers on
-    source_uri: str | None = None  # launch: file:// URI of the .m3u it was started from
+    source_uri: str | None = None  # launch/in_app: file:// URI of the .m3u it was started from
 
 
 class VlcLaunchDialog(QDialog):
     def __init__(
         self, instances: list, media_filter: str, parent: QWidget | None = None,
-        *, unmanaged_vlc_running: bool = False,
+        *, unmanaged_vlc_running: bool = False, can_launch_vlc: bool = True,
+        can_play_in_app: bool = False, prefer_in_app: bool = False,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Launch or Attach to VLC")
-        self.setMinimumWidth(420)
+        self.setWindowTitle("Open Media")
+        self.setMinimumWidth(460)
         self._media_filter = media_filter
         self._media_paths: list[str] = []
         self._source_uri: str | None = None
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Select an already-open VLC instance, or launch a new one:", self))
+        layout.addWidget(QLabel("Choose how to play: an open VLC window, a new one, or inside this app.", self))
 
         self._combo = QComboBox(self)
         for instance in instances:
             self._combo.addItem(instance.label, (getattr(instance, "host", "127.0.0.1"), instance.port))
-        self._combo.addItem("Launch a new VLC instance...", LAUNCH_NEW_SENTINEL)
-        if not instances:
-            self._combo.setCurrentIndex(0)  # only "Launch a new instance..." exists
+        if can_launch_vlc:
+            self._combo.addItem("Launch a new VLC window...", LAUNCH_NEW_SENTINEL)
+        if can_play_in_app:
+            self._combo.addItem("Play inside this app (no VLC window)...", IN_APP_SENTINEL)
+        preferred = IN_APP_SENTINEL if prefer_in_app and can_play_in_app else None
+        if not instances or preferred is not None:
+            target = preferred if preferred is not None else (
+                LAUNCH_NEW_SENTINEL if can_launch_vlc else IN_APP_SENTINEL
+            )
+            index = self._combo.findData(target)
+            self._combo.setCurrentIndex(max(0, index))
         layout.addWidget(self._combo)
 
         if not instances and unmanaged_vlc_running:
-            # Direct fix for "it doesn't recognize preopen existing vlc instances":
-            # a VLC window IS open, but this app genuinely cannot attach to it -- VLC's
-            # remote-control HTTP interface can only be turned on at process launch
-            # (--extraintf=http) or via a persistent choice in VLC's own Preferences,
-            # never toggled onto a process from the outside after the fact. Explaining
-            # that beats a dropdown that just silently has nothing in it.
+            # A VLC window IS open, but it wasn't started with its web interface, and that
+            # can't be switched on from outside -- say so instead of an empty list.
             note = QLabel(
                 "A VLC window appears to be open, but it wasn't started with remote "
                 "control enabled, so this app can't attach to it or see its playlist. "
@@ -67,7 +79,7 @@ class VlcLaunchDialog(QDialog):
         self._browse_button = QPushButton("Browse for playlist/media...", self)
         self._browse_button.clicked.connect(self._on_browse)
         browse_row.addWidget(self._browse_button)
-        self._media_label = QLabel("No media selected (VLC will start with an empty playlist)", self)
+        self._media_label = QLabel("No media selected", self)
         self._media_label.setWordWrap(True)
         browse_row.addWidget(self._media_label, 1)
         layout.addLayout(browse_row)
@@ -75,7 +87,7 @@ class VlcLaunchDialog(QDialog):
         self._combo.currentIndexChanged.connect(self._update_browse_enabled)
         self._update_browse_enabled()
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -83,8 +95,11 @@ class VlcLaunchDialog(QDialog):
     def _is_launch_new_selected(self) -> bool:
         return self._combo.currentData() == LAUNCH_NEW_SENTINEL
 
+    def _is_in_app_selected(self) -> bool:
+        return self._combo.currentData() == IN_APP_SENTINEL
+
     def _update_browse_enabled(self) -> None:
-        self._browse_button.setEnabled(self._is_launch_new_selected())
+        self._browse_button.setEnabled(self._is_launch_new_selected() or self._is_in_app_selected())
 
     def _on_browse(self) -> None:
         from bookmark_studio.app.vlc_launcher import resolve_startup_media, startup_playlist_source_uri
@@ -99,6 +114,8 @@ class VlcLaunchDialog(QDialog):
         self._media_label.setText(f"{len(self._media_paths)} media item(s) selected")
 
     def choice(self) -> VlcLaunchChoice:
+        if self._is_in_app_selected():
+            return VlcLaunchChoice(mode="in_app", media_paths=self._media_paths, source_uri=self._source_uri)
         if self._is_launch_new_selected():
             return VlcLaunchChoice(mode="launch", media_paths=self._media_paths, source_uri=self._source_uri)
         host, port = self._combo.currentData()

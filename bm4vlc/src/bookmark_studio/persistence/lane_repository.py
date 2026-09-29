@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
 
 from bookmark_studio.domain.lane import Lane
@@ -53,8 +54,15 @@ class LaneRepository:
         self._conn.execute("DELETE FROM lanes WHERE id = ?", (str(lane_id),))
         self._conn.commit()
 
+    def list_all(self) -> list[Lane]:
+        rows = self._conn.execute(
+            "SELECT id, playlist_id, name, order_index, visible, locked, color_key "
+            "FROM lanes ORDER BY playlist_id, order_index"
+        ).fetchall()
+        return [self._row_to_lane(row) for row in rows]
+
     @staticmethod
-    def _row_to_lane(row: sqlite3.Row | tuple) -> Lane:
+    def _row_to_lane(row: sqlite3.Row | tuple[Any, ...]) -> Lane:
         lane_id, playlist_id, name, order_index, visible, locked, color_key = row
         return Lane(
             id=UUID(lane_id),

@@ -1,7 +1,7 @@
 """TimeRulerItem: Audacity-style timestamp ruler above the waveform (spec #4, #7)."""
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF
+from PySide6.QtCore import QLineF, QPointF, QRectF
 from PySide6.QtGui import QColor, QPainter, QPen, QTransform
 from PySide6.QtWidgets import QGraphicsItem
 
@@ -53,15 +53,15 @@ class TimeRulerItem(QGraphicsItem):
         end_us = scene_x_to_time_us(exposed.right())
 
         painter.setPen(QPen(TICK_COLOR, 1))
-        painter.drawLine(exposed.left(), self._height - 1, exposed.right(), self._height - 1)
+        painter.drawLine(QLineF(exposed.left(), self._height - 1, exposed.right(), self._height - 1))
 
         # Tick marks are drawn in the item's normal (scene) coordinate space -- short
         # vertical lines scale visually fine with zoom. Labels do not: a font's point
         # size is interpreted in the *painter's* logical coordinate space, so once the
         # view is zoomed out (fit_entire_media() on anything longer than a few
         # seconds), the same drawText() call that looks fine at 1:1 zoom renders text
-        # a tiny fraction of a pixel tall -- confirmed live, completely invisible on a
-        # 30s track. Qt's standard fix: map each anchor point through the current
+        # a tiny fraction of a pixel tall (invisible on a 30 s track). Qt's standard
+        # fix: map each anchor point through the current
         # world transform to get its real device-pixel position, reset the painter to
         # identity, and draw the label there -- so labels always render at a normal,
         # constant screen size regardless of zoom (like QGraphicsItem's
@@ -71,7 +71,7 @@ class TimeRulerItem(QGraphicsItem):
         while tick_us <= end_us + interval_us:
             x = time_us_to_scene_x(tick_us)
             painter.setPen(QPen(TICK_COLOR, 1))
-            painter.drawLine(x, self._height - 8, x, self._height - 1)
+            painter.drawLine(QLineF(x, self._height - 8, x, self._height - 1))
 
             label = format_timecode(tick_us) if interval_us < 1_000_000 else format_timecode(tick_us)[:8]
             device_anchor = world_transform.map(QPointF(x + 2, self._height - 10))

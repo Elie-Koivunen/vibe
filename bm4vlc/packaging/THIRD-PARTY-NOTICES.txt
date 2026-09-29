@@ -1,0 +1,37 @@
+VLC Bookmark Studio - third-party software in the packaged builds
+===================================================================
+
+VLC Bookmark Studio itself is free software under the GNU General Public License v3
+(LICENSE.txt). The packaged builds also contain the following programs and libraries,
+each under its own license. Their source code is available from the addresses below.
+
+VLC media player and libVLC (Windows build: folder vlc/)
+    VideoLAN, https://www.videolan.org/vlc/
+    License: GNU GPL v2 or later (VLC), GNU LGPL v2.1 or later (libVLC and most modules)
+    Source: https://download.videolan.org/pub/videolan/vlc/
+
+FFmpeg (Windows build: folder ffmpeg/)
+    https://ffmpeg.org/  (binary build by https://www.gyan.dev/ffmpeg/builds/)
+    License: GNU GPL v3 (this build enables GPL components)
+    Source: https://ffmpeg.org/download.html
+
+Qt 6 and PySide6 (Qt for Python)
+    The Qt Company, https://www.qt.io/  https://doc.qt.io/qtforpython/
+    License: GNU LGPL v3
+    Source: https://download.qt.io/official_releases/
+
+python-vlc
+    https://github.com/oaubert/python-vlc
+    License: GNU LGPL v2.1 or later
+
+NumPy
+    https://numpy.org/
+    License: BSD 3-Clause
+
+Python
+    https://www.python.org/
+    License: Python Software Foundation License
+
+PyInstaller bootloader
+    https://pyinstaller.org/
+    License: GNU GPL v2 with a special exception permitting use in packaged applications

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import Any
 from xml.etree import ElementTree
 
 import requests
@@ -61,7 +62,7 @@ class StandardHttpPlaybackAdapter:
                 self._sessions.append(session)
         return session
 
-    def _get(self, path: str, *, timeout: float, params: dict | None = None) -> requests.Response:
+    def _get(self, path: str, *, timeout: float, params: dict[str, Any] | None = None) -> requests.Response:
         response = self._session().get(
             f"{self._base_url}{path}", params=params, auth=self._auth, timeout=timeout * self._timeout_scale
         )
@@ -105,8 +106,11 @@ class StandardHttpPlaybackAdapter:
 
     # -- reads --
 
-    def _status_json(self) -> dict:
-        return self._get("/requests/status.json", timeout=STATUS_TIMEOUT_S).json()
+    def _status_json(self) -> dict[str, Any]:
+        data = self._get("/requests/status.json", timeout=STATUS_TIMEOUT_S).json()
+        if not isinstance(data, dict):
+            raise ValueError(f"unexpected status.json from VLC: {str(data)[:200]}")
+        return data
 
     def get_status(self) -> PlaybackStatus:
         with self._lock:
@@ -204,15 +208,10 @@ class StandardHttpPlaybackAdapter:
             time.sleep(_GOTO_POLL_INTERVAL_S)
 
     def seek_absolute_us(self, time_us: int) -> None:
-        """Direct user report: "the bookmark playback is not respecting the loop, it
-        drifts away". Root-caused live against a real VLC instance (see this
-        module's percent-seek verification, not a spec assumption): the built-in
-        interface's `seek` command silently mis-parses a plain fractional-seconds
-        value -- `val=12.345` actually landed at 345 SECONDS, not 12.345s -- so the
-        previous whole-second-only seek wasn't just imprecise, it was the *safe*
-        choice given that bug. Confirmed live, its documented percent syntax
-        (`val=<float>%`) is both correctly parsed AND sub-second precise. Falls back
-        to whole seconds only when no duration is known for the current item at all.
+        """Seeks by percentage: the HTTP interface's `seek` mis-parses fractional
+        seconds (`val=12.345` lands at 345 s), while `val=<float>%` is parsed
+        correctly and is sub-second precise. Whole seconds only when the item's
+        duration is unknown.
         """
         time_us = max(0, time_us)
         with self._lock:
@@ -235,14 +234,14 @@ class StandardHttpPlaybackAdapter:
         # VLC's built-in interface takes 0-512 (256 = 100%), not a percentage.
         self._command("volume", {"val": max(0, min(512, int(level)))})
 
-    def _command(self, command: str, params: dict | None = None) -> None:
+    def _command(self, command: str, params: dict[str, Any] | None = None) -> None:
         self._get("/requests/status.json", timeout=COMMAND_TIMEOUT_S, params={"command": command, **(params or {})})
 
 
 def _valid_id(raw: object) -> int | None:
     """VLC reports currentplid -1 when nothing is current."""
     try:
-        value = int(raw)  # type: ignore[arg-type]
+        value = int(raw)  # type: ignore[call-overload]
     except (TypeError, ValueError):
         return None
     return value if value >= 0 else None
@@ -263,9 +262,8 @@ def _seconds_to_us(raw: object) -> int | None:
 
 
 def _precise_time_us(raw_time_s: object, position: float, duration_us: int | None) -> int:
-    """VLC's status.json "time" field is a whole number of seconds -- confirmed live,
-    it never carries a fractional part, unlike "position" (a float fraction of the
-    track, confirmed live to genuinely track sub-second progress). Deriving time from
+    """VLC's status.json "time" field is a whole number of seconds, while "position"
+    (a fraction of the track) moves sub-second. Deriving time from
     position*duration instead gives PlaybackClock (and, downstream, LoopController's
     boundary check) far better precision than truncating to the nearest second. Falls
     back to the plain integer field when duration or position isn't usable.
@@ -273,12 +271,12 @@ def _precise_time_us(raw_time_s: object, position: float, duration_us: int | Non
     if duration_us and 0.0 <= position <= 1.0:
         return int(position * duration_us)
     try:
-        return int(float(raw_time_s or 0) * 1_000_000)
+        return int(float(raw_time_s or 0) * 1_000_000)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return 0
 
 
-def _extract_media_uri(status_json: dict) -> str | None:
+def _extract_media_uri(status_json: dict[str, Any]) -> str | None:
     # VLC sends `"information": []` (a list, not an object) when nothing is loaded.
     info = status_json.get("information")
     category = info.get("category") if isinstance(info, dict) else None

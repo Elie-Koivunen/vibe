@@ -1,10 +1,7 @@
 """SelectionItem: temporary paint-to-select highlight with live start/end/duration (spec #37).
 
-Direct follow-up request: "when i press play to listen to the selection, i want
-the ability to adjust the selection by dragging the sides" -- left/right edge
-handles, same drag-to-resize idiom as BookmarkRegionItem (bookmark_item.py),
-just without a "move whole body" mode (dragging the middle does nothing, same
-as before this feature existed).
+Its left/right edges can be dragged, as on BookmarkRegionItem (bookmark_item.py),
+but the body can't be moved (dragging the middle does nothing).
 """
 from __future__ import annotations
 
@@ -16,8 +13,7 @@ from bookmark_studio.domain.bookmark import MIN_SEGMENT_DURATION_US
 from bookmark_studio.domain.selection import Selection
 from bookmark_studio.ui.waveform.waveform_item import time_us_to_scene_x
 
-# Direct user request: "when highlighting to bookmark, its still in blue, change
-# to greenish tint" -- a drag-selection destined to become a bookmark.
+# Green tint: a drag-selection about to become a bookmark.
 SELECTION_FILL = QColor(90, 200, 120, 80)
 SELECTION_BORDER = QColor(90, 200, 120, 200)
 HANDLE_WIDTH_PX = 8.0  # target on-screen handle width, in real device pixels -- same as bookmark_item.py
@@ -45,7 +41,7 @@ class SelectionItem(QGraphicsObject):
 
     def __init__(self, height: float, selection: Selection) -> None:
         super().__init__()
-        self.setAcceptedMouseButtons(Qt.LeftButton)
+        self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
         self._height = height
         self._selection = selection
         self._drag_mode: str | None = None

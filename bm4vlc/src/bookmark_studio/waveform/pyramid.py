@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from bookmark_studio.waveform.peaks import compute_peaks
+from bookmark_studio.waveform.peaks import compute_peaks, reduce_peaks
 
 BASE_BLOCK_SIZE = 64
 LEVEL_FACTOR = 4
@@ -68,12 +68,26 @@ def build_pyramid(
     max_overview_points: int = MAX_OVERVIEW_POINTS,
 ) -> WaveformPyramid:
     """Builds levels of doubling-ish coarseness (spec #61) until the overview is compact."""
-    levels: list[PyramidLevel] = []
-    block_size = base_block_size
-    while True:
-        peaks = compute_peaks(samples, block_size)
-        levels.append(PyramidLevel(block_size=block_size, peaks=peaks))
-        if peaks.shape[0] <= max_overview_points or peaks.shape[0] <= 1:
-            break
+    return build_pyramid_from_peaks(
+        compute_peaks(samples, base_block_size), sample_rate,
+        base_block_size=base_block_size, factor=factor, max_overview_points=max_overview_points,
+    )
+
+
+def build_pyramid_from_peaks(
+    base_peaks: np.ndarray,
+    sample_rate: int,
+    *,
+    base_block_size: int = BASE_BLOCK_SIZE,
+    factor: int = LEVEL_FACTOR,
+    max_overview_points: int = MAX_OVERVIEW_POINTS,
+) -> WaveformPyramid:
+    """The same pyramid as build_pyramid(), from the finest level's peaks alone (each
+    coarser level is reduced from the one below) -- what streaming decoding produces."""
+    levels = [PyramidLevel(block_size=base_block_size, peaks=base_peaks)]
+    peaks, block_size = base_peaks, base_block_size
+    while peaks.shape[0] > max_overview_points and peaks.shape[0] > 1:
+        peaks = reduce_peaks(peaks, factor)
         block_size *= factor
+        levels.append(PyramidLevel(block_size=block_size, peaks=peaks))
     return WaveformPyramid(levels=tuple(levels), sample_rate=sample_rate)

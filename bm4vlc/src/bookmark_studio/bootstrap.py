@@ -1,15 +1,22 @@
-"""Startup sequence per spec #178: settings, DB, UI, VLC discovery."""
+"""Command line and startup sequence (spec #178): settings, DB, UI, VLC discovery.
+
+Run ``bookmark-studio --help`` for the options."""
 from __future__ import annotations
 
+import argparse
+import logging
+import os
 import sqlite3
 import sys
 from pathlib import Path
 
+from PySide6.QtCore import QSettings
 from PySide6.QtGui import QUndoStack
 from PySide6.QtWidgets import QApplication
 
 from bookmark_studio import __version__, platform_support
 from bookmark_studio.app.application import Application
+from bookmark_studio.app.vlc_launcher import resolve_startup_media, startup_playlist_source_uri
 from bookmark_studio.logging.setup import configure_logging, get_logger
 from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
 from bookmark_studio.persistence.database import connect
@@ -18,6 +25,7 @@ from bookmark_studio.playback.adapter import PlaybackAdapter
 from bookmark_studio.playback.http_fallback import StandardHttpPlaybackAdapter
 from bookmark_studio.playback.mock_adapter import MockPlaybackAdapter
 from bookmark_studio.settings.settings_service import SettingsService
+from bookmark_studio.ui.dialogs.vlc_launch_dialog import VlcLaunchChoice
 from bookmark_studio.ui.main_window import MainWindow
 
 _PLAYLIST_PATTERNS = ["*.m3u", "*.m3u8"]
@@ -107,30 +115,141 @@ def select_playback_adapter(settings: SettingsService) -> tuple[PlaybackAdapter,
     return MockPlaybackAdapter([]), vlc_path
 
 
+def _host_port(value: str) -> tuple[str | None, int]:
+    host, sep, port = value.rpartition(":")
+    try:
+        number = int(port)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected [HOST:]PORT, got {value!r}") from None
+    if not 1 <= number <= 65535:
+        raise argparse.ArgumentTypeError(f"port out of range: {number}")
+    return (host or None) if sep else None, number
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="bookmark-studio",
+        description="VLC Bookmark Studio: visual bookmarks and loops for VLC playlists.",
+        epilog=(
+            "Examples: bookmark-studio song.mp3 | bookmark-studio --playlist mix.m3u --adapter libvlc | "
+            "bookmark-studio --attach 43119 | bookmark-studio --sync-dir /mnt/c/Users/me/Bookmarks"
+        ),
+    )
+    parser.add_argument("media", nargs="*", metavar="MEDIA",
+                        help="media files, or one .m3u/.m3u8 playlist, to open right away")
+    parser.add_argument("--playlist", metavar="FILE", help="open this .m3u/.m3u8 playlist")
+    parser.add_argument("--adapter", choices=("auto", "http", "libvlc"), default="auto",
+                        help="http: a separate VLC window driven over HTTP; libvlc: play inside the app; "
+                             "auto (default): the last choice, else a VLC window if VLC is installed")
+    parser.add_argument("--attach", metavar="[HOST:]PORT", type=_host_port,
+                        help="attach to a VLC already running with the HTTP interface on this port")
+    parser.add_argument("--port", type=int, metavar="PORT",
+                        help="first HTTP port to try for a VLC this app launches (default: saved setting)")
+    parser.add_argument("--vlc", metavar="PATH", help="VLC executable to use (this run only)")
+    parser.add_argument("--libvlc-dir", metavar="DIR",
+                        help="folder of a VLC whose libVLC the in-app player uses (must match Python's bitness)")
+    parser.add_argument("--ffmpeg", metavar="PATH", help="ffmpeg executable for waveforms (this run only)")
+    parser.add_argument("--data-dir", metavar="DIR",
+                        help="keep the database, waveform cache, logs and settings in DIR (portable mode)")
+    parser.add_argument("--sync-dir", metavar="DIR",
+                        help="share bookmarks with other installations (Windows/WSL/other PCs) through this "
+                             "folder; remembered for later runs")
+    parser.add_argument("--no-sync", action="store_true", help="don't sync this run (keeps the saved folder)")
+    parser.add_argument("--no-dialog", action="store_true",
+                        help="don't show the open-media dialog at startup")
+    parser.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")
+    parser.add_argument("--self-test", action="store_true",
+                        help="check Qt, the database, sync, ffmpeg, VLC and libVLC, print a report and exit")
+    parser.add_argument("--require", default="", metavar="LIST",
+                        help="with --self-test: comma-separated tools that must be present (ffmpeg,vlc,libvlc)")
+    parser.add_argument("--self-test-report", metavar="FILE", help="with --self-test: also write a JSON report")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    return parser
+
+
+def _startup_choice(args: argparse.Namespace, settings: SettingsService, vlc_path: str | None,
+                    libvlc_dir: str | None) -> VlcLaunchChoice | None:
+    """What the command line asks to open, if anything."""
+    from bookmark_studio.playback.libvlc_loader import libvlc_available
+
+    if args.attach is not None:
+        host, port = args.attach
+        if host is None:
+            host = platform_support.vlc_http_hosts(vlc_path)[1] if vlc_path else "127.0.0.1"
+        return VlcLaunchChoice(mode="attach", port=port, host=host)
+    selected = ([args.playlist] if args.playlist else []) + list(args.media)
+    if not selected:
+        return None
+    media_paths = resolve_startup_media(selected)
+    source_uri = startup_playlist_source_uri(selected)
+    mode = {"http": "launch", "libvlc": "in_app"}.get(args.adapter)
+    if mode is None:  # auto
+        in_app_ok = libvlc_available(libvlc_dir)
+        if in_app_ok and (settings.playback_backend() == "libvlc" or vlc_path is None):
+            mode = "in_app"
+        else:
+            mode = "launch" if vlc_path is not None else "in_app"
+    return VlcLaunchChoice(mode=mode, media_paths=media_paths, source_uri=source_uri)
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Follows spec #178's sequence: settings -> DB -> UI -> VLC discovery -> connect
-    or fall back to offline mode (spec #104) -- never crash just because VLC isn't
-    running or ffmpeg isn't installed.
+    """Settings -> DB -> UI -> VLC discovery -> the player the command line or the
+    open-media dialog picks. Never crashes just because VLC or ffmpeg is missing: the
+    app starts without a player (offline mode) instead."""
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name) is None:  # the windowed Windows build has no console
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))  # noqa: SIM115 - process lifetime
+    platform_support.restore_child_library_path()
+    argv = list(sys.argv if argv is None else argv)
+    args = build_arg_parser().parse_args(argv[1:])
 
-    Starts the UI with a placeholder Mock adapter, then immediately runs the same
-    launch/attach picker the "Launch VLC..." button uses later.
-    """
-    configure_logging()
+    if args.data_dir:
+        # Before anything computes a path: the database, logs, waveforms, VLC config.
+        os.environ[platform_support.DATA_DIR_ENV] = str(Path(args.data_dir).expanduser().resolve())
+
+    if args.self_test:
+        from bookmark_studio.selftest import run_self_test
+
+        return run_self_test(
+            vlc=args.vlc, ffmpeg=args.ffmpeg, libvlc_dir=args.libvlc_dir,
+            require=tuple(filter(None, (t.strip() for t in args.require.split(",")))),
+            report_path=args.self_test_report,
+        )
+
+    configure_logging(level=getattr(logging, args.log_level))
     log = get_logger("APP")
-    log.info("VLC Bookmark Studio %s on %s (WSL: %s)", __version__, sys.platform, platform_support.is_wsl())
+    log.info("VLC Bookmark Studio %s on %s (WSL: %s, packaged: %s)", __version__, sys.platform,
+             platform_support.is_wsl(), platform_support.is_frozen())
 
-    qt_app = QApplication(argv if argv is not None else sys.argv)
+    qt_app = QApplication([argv[0]])  # our options are not Qt's
     qt_app.setApplicationName("VLC Bookmark Studio")
     qt_app.setApplicationVersion(__version__)
-    settings = SettingsService()
+    if args.data_dir:  # portable: settings next to the data instead of the registry / ~/.config
+        settings = SettingsService(QSettings(str(platform_support.user_data_dir() / "settings.ini"),
+                                             QSettings.Format.IniFormat))
+    else:
+        settings = SettingsService()
 
     conn = open_database()
-    vlc_path = find_vlc_path(settings)
+    vlc_path = platform_support.find_vlc(args.vlc) if args.vlc else find_vlc_path(settings)
+    if args.vlc and vlc_path != args.vlc:
+        log.warning("--vlc %s does not exist; using %s", args.vlc, vlc_path)
     log.info("VLC path: %s", vlc_path)
-    ffmpeg_path = find_ffmpeg_path(settings)
+    ffmpeg_path = platform_support.find_ffmpeg(args.ffmpeg) if args.ffmpeg else find_ffmpeg_path(settings)
     if ffmpeg_path is None:
         log.warning("ffmpeg not found; waveforms will be unavailable until it is installed")
     log.info("ffmpeg path: %s", ffmpeg_path)
+    libvlc_dir = args.libvlc_dir or settings.libvlc_dir()
+
+    if args.sync_dir:
+        settings.set_sync_dir(str(Path(args.sync_dir).expanduser().resolve()))
+    sync_service = None
+    sync_dir = None if args.no_sync else settings.sync_dir()
+    if sync_dir:
+        from bookmark_studio.project.sync_service import SyncService
+
+        sync_service = SyncService(conn, sync_dir)
+        log.info("Syncing through %s as %s", sync_dir, sync_service.machine_id)
 
     application = Application(
         conn=conn,
@@ -139,15 +258,17 @@ def main(argv: list[str] | None = None) -> int:
         waveform_cache_dir=platform_support.user_data_dir() / "waveforms",
         settings=settings,
         vlc_path=vlc_path,
+        libvlc_dir=libvlc_dir,
+        sync_service=sync_service,
+        http_port=args.port,
     )
-    # Application.stop() existed but was never called: a VLC this app launched kept
-    # running after the app closed, and worker threads were abandoned mid-request.
     qt_app.aboutToQuit.connect(application.stop)
     application.start()
-    if vlc_path is not None:
+    choice = _startup_choice(args, settings, vlc_path, libvlc_dir)
+    if choice is not None:
+        application.apply_launch_choice(choice)
+    elif not args.no_dialog:
         application.prompt_vlc_launch_dialog()
-    else:
-        log.info("VLC not found; starting in offline mode")
 
     try:
         return qt_app.exec()

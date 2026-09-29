@@ -15,8 +15,8 @@ from bookmark_studio.waveform.cache import ALGORITHM_VERSION, load_pyramid
 from bookmark_studio.waveform.ffmpeg_decoder import CancellationToken
 from bookmark_studio.waveform.service import GeneratedWaveform, WaveformKey, WaveformService
 
-# Decoding is CPU- and disk-heavy; preloading a whole playlist used to start one ffmpeg
-# per CPU core at once. Two at a time keeps the machine responsive, and the track the
+# Decoding is CPU- and disk-heavy: rather than one ffmpeg per CPU core when a whole
+# playlist is preloaded, two at a time keeps the machine responsive, and the track the
 # user is actually looking at jumps the queue (see request()).
 MAX_CONCURRENT_DECODES = 2
 _PRIORITY_CURRENT = 10
@@ -26,6 +26,7 @@ _PRIORITY_PREFETCH = 0
 class _WaveformSignals(QObject):
     finished = Signal(object, object)  # (WaveformKey, GeneratedWaveform)
     failed = Signal(object, str)  # (WaveformKey, error message)
+    progress = Signal(object, object)  # (WaveformKey, partial WaveformPyramid)
 
 
 class _WaveformJob(QRunnable):
@@ -47,7 +48,8 @@ class _WaveformJob(QRunnable):
     def run(self) -> None:  # runs on a QThreadPool worker thread
         try:
             generated = self._service.generate(
-                self._key, self._media_path, cancellation=self._cancellation
+                self._key, self._media_path, cancellation=self._cancellation,
+                on_progress=lambda pyramid: self._signals.progress.emit(self._key, pyramid),
             )
         except Exception as exc:  # noqa: BLE001 - surfaced to the main thread via signal
             self._signals.failed.emit(self._key, str(exc))
@@ -64,6 +66,7 @@ class WaveformOrchestrator(QObject):
 
     waveform_ready = Signal(object, object)  # (media_id: UUID, pyramid: WaveformPyramid)
     waveform_failed = Signal(object, str)  # (media_id: UUID, message)
+    waveform_progress = Signal(object, object)  # (media_id: UUID, partial pyramid) -- long files
     duration_known = Signal(object, object)  # (media_id: UUID, duration_us: int)
 
     def __init__(
@@ -131,9 +134,9 @@ class WaveformOrchestrator(QObject):
         sample_rate: int = 8000,
         channel_mode: str = "mono",
     ) -> None:
-        """Makes sure a waveform will be cached, without loading it: preloading a whole
-        playlist used to read every cached .npz from disk on the UI thread just to throw
-        it away. Emits duration_known when the cache already records the length."""
+        """Makes sure a waveform will be cached, without loading it (preloading a whole
+        playlist must not read every cached .npz on the UI thread). Emits duration_known
+        when the cache already records the length."""
         key = WaveformKey(media_id=media_id, fast_fingerprint=fast_fingerprint)
         cache_id = WaveformService.compute_cache_key(fast_fingerprint, sample_rate, channel_mode)
         cached = self._repository.lookup(cache_id)
@@ -164,6 +167,7 @@ class WaveformOrchestrator(QObject):
         signals = _WaveformSignals()
         signals.finished.connect(self._on_finished)
         signals.failed.connect(self._on_failed)
+        signals.progress.connect(self._on_progress)
         job = _WaveformJob(self._service, key, media_path, cancellation, signals)
         self._cancellations[key] = cancellation
         self._jobs[key] = job
@@ -193,6 +197,9 @@ class WaveformOrchestrator(QObject):
         self.waveform_ready.emit(key.media_id, generated.pyramid)
         if duration_us:
             self.duration_known.emit(key.media_id, duration_us)
+
+    def _on_progress(self, key: WaveformKey, pyramid: object) -> None:
+        self.waveform_progress.emit(key.media_id, pyramid)
 
     def _on_failed(self, key: WaveformKey, message: str) -> None:
         self._forget(key)

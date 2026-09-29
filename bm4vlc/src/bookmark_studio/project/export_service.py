@@ -35,6 +35,11 @@ class ProjectData:
     # recognition needs to map an imported playlist onto a live VLC playlist.
     playlist_items: list[tuple[UUID, list[UUID]]] = field(default_factory=list)
     playlist_signatures: list[tuple[UUID, str]] = field(default_factory=list)
+    # Folder sync only (sync.json): when each bookmark last changed, deleted bookmarks,
+    # and which installation wrote the file.
+    bookmark_updated_at: dict[UUID, str] = field(default_factory=dict)
+    tombstones: dict[UUID, str] = field(default_factory=dict)
+    machine_id: str | None = None
 
 
 def export_project(path: Path, data: ProjectData) -> None:
@@ -72,4 +77,16 @@ def export_project(path: Path, data: ProjectData) -> None:
             json.dumps([{"playlist_id": str(pid), "signature": sig} for pid, sig in data.playlist_signatures],
                        indent=2),
         )
+        if data.machine_id is not None:
+            archive.writestr(
+                "sync.json",
+                json.dumps(
+                    {
+                        "machine_id": data.machine_id,
+                        "bookmark_updated_at": {str(k): v for k, v in data.bookmark_updated_at.items()},
+                        "tombstones": {str(k): v for k, v in data.tombstones.items()},
+                    },
+                    indent=2,
+                ),
+            )
     tmp_path.replace(path)

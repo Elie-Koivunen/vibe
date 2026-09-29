@@ -4,6 +4,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID, uuid4
 
 from bookmark_studio.domain.playlist import Playlist
@@ -145,8 +146,15 @@ class PlaylistRepository:
         ).fetchall()
         return [self._row_to_record(row) for row in rows]
 
+    def list_all(self) -> list[PlaylistRecord]:
+        rows = self._conn.execute(
+            "SELECT id, name, source_uri, is_ad_hoc, created_at, updated_at, last_seen_at "
+            "FROM playlists ORDER BY created_at"
+        ).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
     @staticmethod
-    def _row_to_record(row: sqlite3.Row | tuple) -> PlaylistRecord:
+    def _row_to_record(row: sqlite3.Row | tuple[Any, ...]) -> PlaylistRecord:
         playlist_id, name, source_uri, is_ad_hoc, created_at, updated_at, last_seen_at = row
         return PlaylistRecord(
             playlist=Playlist(

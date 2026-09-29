@@ -1,10 +1,9 @@
 """PlayheadItem: interpolated 60Hz playback position marker (spec #31, #111),
-draggable to seek -- direct user request: "make it usable where as a user can move
-it and the song would start from there when played".
+draggable to seek.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QLineF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject
 
@@ -44,8 +43,8 @@ class PlayheadItem(QGraphicsObject):
         self._time_us = 0
         self._dragging = False
         self.setZValue(100)
-        self.setAcceptedMouseButtons(Qt.LeftButton)
-        self.setCursor(Qt.SizeHorCursor)
+        self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
+        self.setCursor(Qt.CursorShape.SizeHorCursor)
 
     def set_time_us(self, time_us: int) -> None:
         if self._dragging:
@@ -69,20 +68,13 @@ class PlayheadItem(QGraphicsObject):
         return QRectF(-half, 0, half * 2, self._height)
 
     def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: N802
-        # A non-cosmetic pen's width is in the item's own SCENE units, same device-
-        # pixel-vs-scene-coordinate bug fixed elsewhere in this package (ruler ticks,
-        # waveform pyramid selection, bookmark resize handles). fit_entire_media() on
-        # anything longer than a few seconds scales the view down so far that 1.5
-        # scene-ms of width rounds to a fraction of a real screen pixel -- the moving
-        # position marker was reported live as simply never visible. setCosmetic(True)
-        # is Qt's built-in fix for exactly this: the pen's width is then always in
-        # real device pixels, regardless of the view's current zoom.
-        # Direct user request: "make the red progress bar on the waveform a bit
-        # thicker" -- was 2px.
+        # A non-cosmetic pen's width is in scene units: zoomed out to a whole track,
+        # the marker would be a fraction of a pixel wide and invisible. A cosmetic pen
+        # is always 3 device pixels wide, whatever the zoom.
         pen = QPen(PLAYHEAD_COLOR, 3)
         pen.setCosmetic(True)
         painter.setPen(pen)
-        painter.drawLine(0, 0, 0, self._height)
+        painter.drawLine(QLineF(0, 0, 0, self._height))
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         self._dragging = True

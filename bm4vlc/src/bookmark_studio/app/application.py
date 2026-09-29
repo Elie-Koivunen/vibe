@@ -1,7 +1,16 @@
-"""Application composition root: wires repositories, playback adapter, and UI (spec
-#114). Owns the live polling loop that connects a PlaybackAdapter to the rest of the
-app -- this is the piece spec #178-#180 describe as the startup/song-change/
-playlist-change sequences.
+"""Application: the composition root (spec #114).
+
+Wires three parts together and to the window's public API:
+
+* PlaybackSession (app/session.py) -- the connection to the player, its ordered command
+  queue and the status/playlist polls;
+* PlaylistContext (app/playlist_context.py) -- which media and which bookmark playlist
+  the player's playlist corresponds to;
+* the bookmark/loop logic in this class: what's on screen vs. what's playing, playing and
+  looping bookmarks and selections, and the waveform for the song on screen.
+
+The player is either a VLC window driven over HTTP (launched by this app or attached
+to) or the in-app libVLC player.
 """
 from __future__ import annotations
 
@@ -9,93 +18,62 @@ import sqlite3
 import subprocess
 import time
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QObject, QTimer
 from PySide6.QtGui import QUndoStack
 from PySide6.QtWidgets import QDialog, QMessageBox
 
 from bookmark_studio import platform_support
+from bookmark_studio.app.playlist_context import AskPlaylistMatch, PlaylistContext
+from bookmark_studio.app.session import PlaybackSession, unpack_sample
 from bookmark_studio.app.vlc_launcher import (
-    discover_vlc_instances, find_free_http_port, has_unmanaged_vlc_process, launch_managed_vlc,
+    discover_vlc_instances,
+    find_free_http_port,
+    has_unmanaged_vlc_process,
+    launch_managed_vlc,
     terminate_managed_vlc,
 )
 from bookmark_studio.app.waveform_orchestrator import WaveformOrchestrator
-from bookmark_studio.domain.enums import CompletionAction
+from bookmark_studio.domain.enums import CompletionAction, LoopState
 from bookmark_studio.domain.loop import LoopSpec
 from bookmark_studio.domain.selection import Selection
 from bookmark_studio.logging.setup import get_logger
-from bookmark_studio.media.resolver import MediaResolver, uri_to_local_path
+from bookmark_studio.media.resolver import uri_to_local_path
 from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
 from bookmark_studio.persistence.media_repository import MediaRepository
 from bookmark_studio.persistence.playlist_repository import PlaylistRepository
 from bookmark_studio.persistence.waveform_repository import WaveformCacheRepository
 from bookmark_studio.playback.adapter import PlaybackAdapter
-from bookmark_studio.playback.command_queue import CommandExecutor, ThreadedCommandQueue
+from bookmark_studio.playback.command_queue import CommandExecutor
 from bookmark_studio.playback.http_fallback import StandardHttpPlaybackAdapter
 from bookmark_studio.playback.loop_controller import LoopController
 from bookmark_studio.playback.playback_clock import PlaybackClock
-from bookmark_studio.playlist.recognition import PlaylistRecognitionService
-from bookmark_studio.playlist.synchronizer import PlaylistSynchronizer, SyncAction
+from bookmark_studio.playback.status import PlaybackStatus, VlcPlaylistItem
 from bookmark_studio.settings.settings_service import SettingsService
 from bookmark_studio.ui.dialogs.vlc_launch_dialog import VlcLaunchChoice, VlcLaunchDialog
 from bookmark_studio.ui.main_window import MainWindow
+from bookmark_studio.waveform.pyramid import WaveformPyramid
 from bookmark_studio.waveform.service import WaveformService
 
-# spec #32 suggests 100-200ms status / 500-1000ms playlist. Verified live these are too
-# aggressive for VLC's real Lua httpd: every request that doesn't get a response within
-# its timeout forces BridgeClient to reconnect, and each reconnect leaks a socket on
-# VLC's side (see bridge_client.py's module docstring -- VLC's httpd never closes its
-# end). Slower polling directly cuts total request volume and, with it, the absolute
-# leak rate.
-STATUS_POLL_MS = 400
-PLAYLIST_POLL_MS = 2000
-# A status poll issued less than this long after a seek/goto/play command finished may
-# still describe the old position (VLC applies seeks asynchronously), so it's skipped.
-# Without this, a poll sampled just before a loop's seek-back but delivered just after
-# it re-triggered the loop boundary: one real pass was counted twice.
-STALE_SAMPLE_MARGIN_NS = 150_000_000
+if TYPE_CHECKING:
+    from bookmark_studio.project.sync_service import SyncService
 
-AskPlaylistMatch = Callable[[str, float], bool]
-
-
-class _CallSignals(QObject):
-    finished = Signal(object)  # (issued_monotonic_ns, result)
-    failed = Signal(str)
-
-
-class _CallWorker(QRunnable):
-    """Runs one blocking PlaybackAdapter read (a status/playlist poll) on a QThreadPool
-    worker (spec #108: no network calls on a UI-blocking thread). Emits the monotonic
-    time the request was *issued* with the result, so stale samples can be recognised.
-    """
-
-    def __init__(self, fn: Callable[[], object], signals: _CallSignals) -> None:
-        super().__init__()
-        self._fn = fn
-        self._signals = signals
-
-    def run(self) -> None:
-        issued_ns = time.monotonic_ns()
-        try:
-            result = self._fn()
-        except Exception as exc:  # noqa: BLE001 - reported to the main thread via signal
-            self._signals.failed.emit(str(exc))
-            return
-        self._signals.finished.emit((issued_ns, result))
-
-
-def _unpack_sample(payload: object) -> tuple[int, object]:
-    """Poll results arrive as (issued_ns, value); direct callers (tests) may pass the
-    bare value, which is treated as fresh."""
-    if isinstance(payload, tuple) and len(payload) == 2 and isinstance(payload[0], int):
-        return payload[0], payload[1]
-    return time.monotonic_ns(), payload
+# A stop/pause made in VLC's own window (not through this app) is recognised when two
+# consecutive *fresh* status samples say so while a loop is playing, and not within this
+# long after one of the loop's own seek-backs (VLC reports transient states around them).
+# An earlier attempt at this misfired on ordinary loops; it compared every sample,
+# including ones sampled before a seek landed -- those are now discarded as stale.
+EXTERNAL_STOP_GRACE_S = 0.6
+EXTERNAL_STOP_VOTES = 2
+_SYNC_INTERVAL_MS = 60_000
 
 
 class Application(QObject):
-    """Ties one PlaybackAdapter to persistence and the UI for a live session."""
+    """Ties one player to persistence and the UI for a live session."""
+
+    window: MainWindow
 
     def __init__(
         self,
@@ -107,29 +85,26 @@ class Application(QObject):
         mute_on_connect: bool = False,
         settings: SettingsService | None = None,
         vlc_path: str | None = None,
-        vlc_process: subprocess.Popen | None = None,
+        vlc_process: subprocess.Popen[bytes] | None = None,
         command_executor: CommandExecutor | None = None,
         ask_playlist_match: AskPlaylistMatch | None = None,
+        libvlc_dir: str | None = None,
+        libvlc_args: list[str] | None = None,
+        sync_service: "SyncService | None" = None,
+        http_port: int | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._log = get_logger("APP")
         self._conn = conn
-        self._adapter = adapter
-        # Needed for the "Launch VLC..." picker (prompt_vlc_launch_dialog): which VLC
-        # binary to spawn, where to persist/discover known instance ports, and the
-        # subprocess handle of whichever instance THIS app most recently spawned (so
-        # stop() can clean it up -- never set for an attached-to, not-spawned-by-us
-        # instance). None outside of a real bootstrap.main() run simply disables that
-        # picker.
         self._settings = settings
         self._vlc_path = vlc_path
-        self._vlc_process = vlc_process
-        self._vlc_port: int | None = None  # HTTP port of the VLC this app launched (WSL cleanup)
-        # Only true when this Application spawned its own VLC process: forcing volume to
-        # 0 on an existing VLC the user already had open would be an unwelcome surprise.
-        # Sent once, on the first successful status poll.
-        self._mute_pending = mute_on_connect
+        self._vlc_process = vlc_process  # only a VLC this app launched; closed on exit
+        self._vlc_port: int | None = None
+        self._libvlc_dir = libvlc_dir
+        self._libvlc_args = libvlc_args
+        self._sync = sync_service
+        self._http_port = http_port  # --port: first port to try for a launched VLC
         self._stopped = False
 
         self._bookmark_repository = BookmarkRepository(conn)
@@ -137,133 +112,122 @@ class Application(QObject):
         self._playlist_repository = PlaylistRepository(conn)
         self._waveform_repository = WaveformCacheRepository(conn)
 
-        self._media_resolver = MediaResolver(self._media_repository)
-        recognition = PlaylistRecognitionService(
-            self._playlist_repository, self._playlist_repository.list_item_media_ids
+        self.session = PlaybackSession(adapter, command_executor=command_executor, parent=self)
+        self.session.mute_pending = mute_on_connect
+        self.session.status_sampled.connect(self._on_status_sample)
+        self.session.playlist_sampled.connect(self._on_playlist_result)
+        self.session.connection_changed.connect(lambda connected: self.window.set_connected(connected))
+        self.playlists = PlaylistContext(
+            self._media_repository, self._playlist_repository,
+            ask_playlist_match or self._ask_playlist_match_dialog,
         )
-        self._synchronizer = PlaylistSynchronizer(self._playlist_repository, recognition)
-        self._ask_playlist_match = ask_playlist_match or self._ask_playlist_match_dialog
-        self._source_uri: str | None = None  # .m3u this session's VLC was launched from
-        self._asking_playlist_match = False
-        self._declined_matches: set[tuple[UUID, tuple[UUID, ...]]] = set()
 
         self._waveform_service = WaveformService(ffmpeg_path=ffmpeg_path, cache_dir=waveform_cache_dir)
         self._waveform_orchestrator = WaveformOrchestrator(
             service=self._waveform_service, repository=self._waveform_repository
         )
         self._waveform_orchestrator.waveform_ready.connect(self._on_waveform_ready)
+        self._waveform_orchestrator.waveform_progress.connect(self._on_waveform_progress)
         self._waveform_orchestrator.waveform_failed.connect(self._on_waveform_failed)
         self._waveform_orchestrator.duration_known.connect(self._on_duration_known)
         self._exact_duration_by_media: dict[UUID, int] = {}
+        self._preload_requested: set[UUID] = set()
 
-        # Every command to VLC goes through one ordered queue, off the UI thread.
-        self._commands: CommandExecutor = command_executor or ThreadedCommandQueue(self)
         self._clock = PlaybackClock()
-        self._loop_controller = LoopController(adapter, self._clock, executor=self._commands)
+        self._loop_controller = LoopController(adapter, self._clock, executor=self.session.commands)
         self._loop_controller.bookmark_navigation_requested.connect(self._on_loop_navigation_requested)
         self._loop_controller.loop_completed.connect(self._on_loop_completed)
         self._loop_controller.loop_failed.connect(lambda msg: self._log.info("loop stopped: %s", msg))
+        self._loop_controller.loop_started.connect(lambda _spec: self._note_loop_segment_started())
+        self._loop_controller.iteration_changed.connect(lambda _remaining: self._note_loop_segment_started())
 
         self.window = MainWindow(self._bookmark_repository, undo_stack=QUndoStack(self))
 
         self._current_media_id: UUID | None = None
-        self._current_vlc_item_id: int | None = None  # the item DISPLAYED in the waveform/bookmark panel
-        # The item VLC is actually playing right now -- tracked separately from
-        # _current_vlc_item_id so a single-click "preview a different song" (see
-        # _on_playlist_item_selected) can show that song's waveform/bookmarks without
-        # that being overwritten on the next status poll just because playback moved on.
-        self._actually_playing_vlc_item_id: int | None = None
-        self._last_playback_state: str = "stopped"
-        self._playlist_items: list = []
-        # The last playlist snapshot, resolved: (VlcPlaylistItem, Media) pairs. Polls
-        # that return an identical playlist skip all resolution and database work.
-        self._resolved: list[tuple[object, object]] = []
-        self._last_snapshot_key: tuple | None = None
-        self._connected = False
-        # True only between _on_loop_selection_requested (the waveform's own Play
-        # button) and whatever ends that ad-hoc loop, so dragging the SAME selection's
-        # edges live-updates what's actually looping; see _on_waveform_selection_changed.
-        self._selection_loop_active = False
+        self._current_vlc_item_id: int | None = None  # the song on screen
+        self._actually_playing_vlc_item_id: int | None = None  # the song the player is on
+        self._last_playback_state = "stopped"
+        self._selection_loop_active = False  # the waveform's own "Play" is looping a selection
         self._active_loop_bookmark_id: UUID | None = None
-        # Every media_id already handed to the waveform prefetcher this session.
-        self._preload_requested: set[UUID] = set()
-        # media_id -> display name, for the bookmark panel's "Song" column.
-        self._song_names_cache: dict[UUID, str] = {}
+        self._loop_item_id: int | None = None
+        self._loop_segment_started = 0.0
+        self._loop_last_time_us: int | None = None
+        self._external_stop_votes = 0
 
-        self._thread_pool = QThreadPool(self)
-        self._status_inflight = False
-        self._playlist_inflight = False
-        self._status_signals = _CallSignals(self)
-        self._status_signals.finished.connect(self._on_status_result)
-        self._status_signals.failed.connect(self._on_status_failed)
-        self._playlist_signals = _CallSignals(self)
-        self._playlist_signals.finished.connect(self._on_playlist_result)
-        self._playlist_signals.failed.connect(self._on_playlist_failed)
+        self._sync_timer = QTimer(self)
+        self._sync_timer.timeout.connect(self.sync_now)
+        self._wire_window()
 
-        self._status_timer = QTimer(self)
-        self._status_timer.timeout.connect(self._poll_status)
-        self._playlist_timer = QTimer(self)
-        self._playlist_timer.timeout.connect(self._poll_playlist)
-
-        self._wire_transport()
+    # -- lifecycle --
 
     def start(self) -> None:
-        self._connect_adapter(self._adapter)
-        self._status_timer.start(STATUS_POLL_MS)
-        self._playlist_timer.start(PLAYLIST_POLL_MS)
-        self._poll_playlist()
+        self.session.start()
+        if self._sync is not None:
+            self.sync_now()
+            self._sync_timer.start(_SYNC_INTERVAL_MS)
         self.window.show()
+
+    def stop(self) -> None:
+        """Shuts the session down (connected to QApplication.aboutToQuit)."""
+        if self._stopped:
+            return
+        self._stopped = True
+        self._sync_timer.stop()
+        self._loop_controller.stop(restore_volume=True)  # undo a fade's volume change
+        self.session.stop(drain_timeout_s=1.5)
+        self._waveform_orchestrator.cancel_all()
+        self._waveform_orchestrator.wait_for_idle(3000)
+        if self._sync is not None:
+            try:
+                self._sync.export_now()
+            except Exception:  # noqa: BLE001 - never block quitting
+                self._log.exception("final sync export failed")
+        # Only a VLC this app launched is closed; one it attached to is left alone.
+        if self._vlc_process is not None:
+            try:
+                terminate_managed_vlc(self._vlc_process, self._vlc_path, self._vlc_port)
+            except Exception:  # noqa: BLE001 - never block quitting
+                self._log.exception("could not close the managed VLC")
+
+    # -- wiring --
+
+    def _wire_window(self) -> None:
+        w = self.window
+        w.play_pause_requested.connect(self._on_play_pause_clicked)
+        w.stop_requested.connect(self._on_stop_clicked)
+        w.seek_relative_requested.connect(self._seek_relative)
+        w.previous_track_requested.connect(lambda: self._submit_adapter_call("previous_track"))
+        w.next_track_requested.connect(lambda: self._submit_adapter_call("next_track"))
+        w.previous_bookmark_requested.connect(self._on_previous_bookmark)
+        w.next_bookmark_requested.connect(self._on_next_bookmark)
+        w.seek_requested.connect(self._seek_displayed)
+        w.waveform_selection_changed.connect(self._on_waveform_selection_changed)
+        w.playlist_item_double_clicked.connect(self._on_playlist_item_double_clicked)
+        w.playlist_item_selected.connect(self._on_playlist_item_selected)
+        w.follow_player_toggled.connect(self._on_follow_vlc_toggled)
+        w.loop_selection_requested.connect(self._on_loop_selection_requested)
+        w.launch_vlc_requested.connect(self.prompt_vlc_launch_dialog)
+        w.play_bookmark_requested.connect(self._on_play_bookmark_requested)
+        w.loop_bookmark_requested.connect(self._on_loop_bookmark_requested)
+        w.bookmark_reorder_requested.connect(self._on_bookmark_reorder_requested)
+        w.bookmarks_changed.connect(self._refresh_bookmark_views)
+        w.bookmark_song_display_requested.connect(self._on_bookmark_song_display_requested)
+        w.project_imported.connect(self._on_project_imported)
+        w.playlist_refresh_requested.connect(self._force_playlist_refresh)
+        w.sync_requested.connect(self._on_sync_requested)
 
     # -- commands --
 
+    @property
+    def _adapter(self) -> PlaybackAdapter:
+        return self.session.adapter
+
     def _submit(self, fn: Callable[[], object], *, fences: tuple[str, ...] = ("position",),
                 on_done: Callable[[object], None] | None = None) -> None:
-        """Queues one playback command (spec #108: never on the UI thread)."""
-        self._commands.submit(
-            fn, fences=fences, on_done=on_done,
-            on_error=lambda exc: self._log.debug("command failed: %s", exc),
-        )
+        self.session.submit(fn, fences=fences, on_done=on_done)
 
     def _fire_and_forget(self, fn: Callable[[], object]) -> None:
         self._submit(fn)
-
-    def _connect_adapter(self, adapter: PlaybackAdapter) -> None:
-        def _connect() -> None:
-            try:
-                adapter.connect()
-            except Exception as exc:  # noqa: BLE001 - spec #104: stay usable offline
-                self._log.info("VLC connect failed (will keep retrying via polling): %s", exc)
-
-        self._submit(_connect, fences=())
-
-    # -- transport wiring --
-
-    def _wire_transport(self) -> None:
-        transport = self.window._transport
-        transport.play_pause_clicked.connect(self._on_play_pause_clicked)
-        transport.stop_clicked.connect(self._on_stop_clicked)
-        transport.seek_back_clicked.connect(lambda: self._seek_relative(-5_000_000))
-        transport.seek_forward_clicked.connect(lambda: self._seek_relative(5_000_000))
-        transport.previous_track_clicked.connect(lambda: self._submit_adapter_call("previous_track"))
-        transport.next_track_clicked.connect(lambda: self._submit_adapter_call("next_track"))
-        transport.previous_bookmark_clicked.connect(self._on_previous_bookmark)
-        transport.next_bookmark_clicked.connect(self._on_next_bookmark)
-
-        self.window._waveform_scene.seek_requested.connect(self._seek_displayed)
-        self.window._waveform_scene.selection_changed.connect(self._on_waveform_selection_changed)
-        self.window._playlist_panel.item_double_clicked.connect(self._on_playlist_item_double_clicked)
-        self.window._playlist_panel.item_selected.connect(self._on_playlist_item_selected)
-        self.window._playlist_panel.follow_vlc_toggled.connect(self._on_follow_vlc_toggled)
-        self.window.loop_selection_requested.connect(self._on_loop_selection_requested)
-        self.window.launch_vlc_requested.connect(self.prompt_vlc_launch_dialog)
-        self.window.play_bookmark_requested.connect(self._on_play_bookmark_requested)
-        self.window.loop_bookmark_requested.connect(self._on_loop_bookmark_requested)
-        self.window.bookmark_reorder_requested.connect(self._on_bookmark_reorder_requested)
-        self.window.bookmarks_changed.connect(self._refresh_bookmark_views)
-        self.window.bookmark_song_display_requested.connect(self._on_bookmark_song_display_requested)
-        self.window.project_imported.connect(self._on_project_imported)
-        # Playlist > Refresh (F5) used to be connected to nothing.
-        self.window.playlist_refresh_requested.connect(lambda *_args: self._force_playlist_refresh())
 
     def _submit_adapter_call(self, method_name: str) -> None:
         adapter = self._adapter
@@ -273,36 +237,48 @@ class Application(QObject):
         adapter = self._adapter
         self._submit(lambda: adapter.seek_relative_us(delta_us))
 
-    # -- launch/attach picker --
-    #
-    # "add button to launch vlc and a browse button to select desired playlist ...
-    # option to select an open vlc instance, a drop box ... alternatively the user
-    # would launch a new instance with a browse button" -- direct user request. One
-    # dialog (VlcLaunchDialog) and one code path serves both bootstrap.main()'s
-    # first-run prompt and this button.
+    # -- choosing the player: attach / launch a VLC window / play inside the app --
 
     def prompt_vlc_launch_dialog(self) -> None:
-        if self._settings is None:
-            QMessageBox.information(self.window, "Launch VLC", "VLC integration is not available in this session.")
-            return
-        if self._vlc_path is None:
-            QMessageBox.warning(self.window, "Launch VLC", "VLC was not found on this machine.")
-            return
+        from bookmark_studio.playback.libvlc_loader import libvlc_available
 
-        instances = discover_vlc_instances(self._settings, vlc_path=self._vlc_path)
-        unmanaged_running = not instances and has_unmanaged_vlc_process()
+        in_app_ok = libvlc_available(self._libvlc_dir)
+        if self._settings is None or (self._vlc_path is None and not in_app_ok):
+            QMessageBox.information(
+                self.window, "Open media",
+                "Neither VLC nor libVLC was found on this machine."
+                if self._settings is not None else "VLC integration is not available in this session.",
+            )
+            return
+        instances = discover_vlc_instances(self._settings, vlc_path=self._vlc_path) if self._vlc_path else []
+        unmanaged_running = not instances and self._vlc_path is not None and has_unmanaged_vlc_process()
         dialog = VlcLaunchDialog(
             instances, self._launch_dialog_media_filter(), parent=self.window,
             unmanaged_vlc_running=unmanaged_running,
+            can_launch_vlc=self._vlc_path is not None, can_play_in_app=in_app_ok,
+            prefer_in_app=self._settings.playback_backend() == "libvlc",
         )
-        if dialog.exec() != QDialog.Accepted:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        self.apply_launch_choice(dialog.choice())
 
-        choice = dialog.choice()
-        if choice.mode == "attach":
-            self._attach_to_vlc(choice.port, host=choice.host)
-        else:
-            self._launch_new_vlc(choice)
+    def apply_launch_choice(self, choice: VlcLaunchChoice) -> bool:
+        """Attaches / launches / opens the in-app player; False (after telling the user)
+        if that failed."""
+        try:
+            if choice.mode == "attach":
+                if choice.port is None:
+                    raise ValueError("no port to attach to")
+                self._attach_to_vlc(choice.port, host=choice.host)
+            elif choice.mode == "in_app":
+                self.open_in_app_player(choice.media_paths, source_uri=choice.source_uri)
+            else:
+                self._launch_new_vlc(choice)
+        except Exception as exc:  # noqa: BLE001 - reported to the user, the app keeps running
+            self._log.exception("could not start playback (%s)", choice.mode)
+            QMessageBox.warning(self.window, "Open media", f"Could not start playback:\n\n{exc}")
+            return False
+        return True
 
     @staticmethod
     def _launch_dialog_media_filter() -> str:
@@ -318,14 +294,14 @@ class Application(QObject):
 
     def _launch_new_vlc(self, choice: VlcLaunchChoice | list[str]) -> None:
         assert self._settings is not None and self._vlc_path is not None
-        if not isinstance(choice, VlcLaunchChoice):  # older callers passed the media list
+        if not isinstance(choice, VlcLaunchChoice):
             choice = VlcLaunchChoice(mode="launch", media_paths=list(choice))
         bind_host, connect_host = platform_support.vlc_http_hosts(self._vlc_path)
         # A Windows VLC driven from WSL listens on the Windows side, where a Linux-side
         # bind test proves nothing; the connect test still catches a busy port.
         windows_vlc_from_wsl = platform_support.is_wsl() and platform_support.is_windows_executable(self._vlc_path)
         port = find_free_http_port(
-            self._settings.bridge_port(), connect_host=connect_host,
+            self._http_port or self._settings.bridge_port(), connect_host=connect_host,
             bind_host=None if windows_vlc_from_wsl else bind_host,
         )
         self._settings.add_known_vlc_port(port)
@@ -339,60 +315,43 @@ class Application(QObject):
         self._log.info("Launched managed VLC (pid %s) on %s:%d with %d media item(s)",
                        process.pid, connect_host, port, len(choice.media_paths))
 
-    def _swap_adapter(self, new_adapter: PlaybackAdapter, *, mute_on_connect: bool,
-                      new_vlc_process: subprocess.Popen | None, source_uri: str | None = None) -> None:
-        """Retargets this whole running session at a different VLC instance -- used by
-        both _attach_to_vlc and _launch_new_vlc. A previously-spawned VLC process (if
-        any) is left running when attaching/re-launching: the user may still want it
-        open, and closing background processes they didn't ask to close would be an
-        unwelcome surprise.
-        """
-        self._status_timer.stop()
-        self._playlist_timer.stop()
-        self._commands.clear_pending()
-        self._loop_controller.set_adapter(new_adapter)
-        try:
-            self._adapter.disconnect()
-        except Exception:  # noqa: BLE001
-            pass
+    def open_in_app_player(self, media_paths: list[str], *, source_uri: str | None = None) -> None:
+        """Plays `media_paths` inside this app through libVLC (no VLC window)."""
+        from bookmark_studio.playback.libvlc_adapter import LibVlcPlaybackAdapter
 
-        self._adapter = new_adapter
+        adapter = LibVlcPlaybackAdapter(libvlc_dir=self._libvlc_dir, instance_args=self._libvlc_args)
+        adapter.load(media_paths)
+        self._swap_adapter(adapter, mute_on_connect=False, new_vlc_process=None, source_uri=source_uri)
+        if self._settings is not None:
+            self._settings.set_playback_backend("libvlc")
+        self._log.info("In-app player with %d media item(s)", len(media_paths))
+
+    def _swap_adapter(self, new_adapter: PlaybackAdapter, *, mute_on_connect: bool,
+                      new_vlc_process: subprocess.Popen[bytes] | None, source_uri: str | None = None) -> None:
+        """Retargets the whole session at another player. A VLC this app launched earlier
+        is left running (the user may still want it); its handle is simply dropped."""
+        self._loop_controller.set_adapter(new_adapter)
         self._vlc_process = new_vlc_process
         self._vlc_port = None
-        self._source_uri = source_uri
-        self._mute_pending = mute_on_connect
         self._current_vlc_item_id = None
         self._actually_playing_vlc_item_id = None
         self._current_media_id = None
         self._selection_loop_active = False
         self._active_loop_bookmark_id = None
         self._preload_requested.clear()
-        self._song_names_cache.clear()
-        self._resolved = []
-        self._last_snapshot_key = None
-        self._connected = False
-        self.window.set_connected(False)
-        # Regression, reported live: "if i close and open a new vlc instance, it does
-        # not recognize the change in playlist and applies the previous bookmarks to
-        # the next playlist" -- the synchronizer must forget the old session's playlist.
-        self._synchronizer.reset()
-
-        self._connect_adapter(new_adapter)
-        self._status_timer.start(STATUS_POLL_MS)
-        self._playlist_timer.start(PLAYLIST_POLL_MS)
-        self._poll_playlist()
+        # Forget the old player's playlist, or its bookmarks would be applied to whatever
+        # the new one plays.
+        self.playlists.reset(source_uri=source_uri)
+        self.session.swap_adapter(new_adapter, mute_on_connect=mute_on_connect)
 
     # -- play / pause / stop --
 
     def _on_play_pause_clicked(self) -> None:
-        # Direct user report: "if i play a bookmark in loop or otherwise, then pause or
-        # stop... a few seconds later, it starts playing on its own" -- the loop's
-        # boundary timer must be stopped along with playback.
         adapter = self._adapter
-        # The state is updated right away (not on the next poll) so a quick second
-        # press toggles back instead of repeating the same command.
+        # The state is updated right away (not on the next poll) so a quick second press
+        # toggles back instead of repeating the same command.
         if self._last_playback_state == "playing":
-            self._stop_loop()
+            self._stop_loop()  # or the loop's boundary timer would resume playback later
             self._submit(adapter.pause)
             self._last_playback_state = "paused"
         else:
@@ -402,40 +361,36 @@ class Application(QObject):
     def _on_stop_clicked(self) -> None:
         self._stop_loop()
         self._submit(self._adapter.stop)
-        self._last_playback_state = "stopped"  # a following Play/Pause must play, not pause
+        self._last_playback_state = "stopped"
 
     def _stop_loop(self) -> None:
         self._loop_controller.stop()
         self._selection_loop_active = False
         self._active_loop_bookmark_id = None
+        self._loop_item_id = None
+        self._external_stop_votes = 0
 
-    # -- the displayed song vs. the playing song --
-
-    def _displayed_item(self):
-        return self._resolve_playlist_item(self._current_vlc_item_id)
+    # -- the song on screen vs. the song the player is on --
 
     def _goto_for_displayed(self) -> Callable[[], None] | None:
-        """If the song on screen isn't the one VLC is playing, a callable that switches
-        VLC to it (run first, in the same queued command as the seek that follows)."""
+        """A command that switches the player to the song on screen, or None if it is
+        already there. Commands run in order, so from here on the player *will* be on that
+        song -- recorded immediately, or a second command issued before the next poll
+        (e.g. looping a bookmark of the previous song) would skip its own switch."""
         displayed = self._current_vlc_item_id
         if displayed is None or displayed == self._actually_playing_vlc_item_id:
             return None
         adapter = self._adapter
-        # Commands run in order, so from now on VLC *will* be playing `displayed`.
-        # Waiting for the next status poll to say so left a window (found live, from WSL)
-        # in which a second command -- e.g. looping a bookmark of the previous song --
-        # skipped its own switch and ran on the wrong song.
         self._actually_playing_vlc_item_id = displayed
         return lambda: adapter.goto_item(displayed)
 
     def _seek_displayed(self, time_us: int) -> None:
-        """Waveform click / playhead drag / bookmark navigation: seek within the song
-        that's on screen. Previously this always seeked whatever VLC was playing, even
-        while a different song was being previewed -- landing in the wrong song."""
+        """Waveform click / playhead drag / bookmark navigation: a position in the song on
+        screen -- switching the player to it first if another song is playing."""
         goto = self._goto_for_displayed()
         adapter = self._adapter
         if goto is not None:
-            self.window._playlist_panel.set_follow_vlc(True, notify=False)
+            self.window.set_follow_player(True, notify=False)
 
         def _seek() -> None:
             if goto is not None:
@@ -444,81 +399,71 @@ class Application(QObject):
 
         self._submit(_seek, on_done=lambda _r: self._clock.note_seek(time_us))
 
-    def _playlist_item_for_media(self, media_id: UUID):
-        """Maps a bookmark's media_id to the live VLC playlist item that plays it, from
-        the last resolved snapshot (no per-call file/database work). Prefers the item
-        that's playing or displayed when the same media appears twice."""
-        matches = [item for item, media in self._resolved if media.id == media_id]
-        if not matches:
-            return None
-        for preferred in (self._actually_playing_vlc_item_id, self._current_vlc_item_id):
-            for item in matches:
-                if item.vlc_id == preferred:
-                    return item
-        return matches[0]
+    def _playlist_item_for_media(self, media_id: UUID) -> VlcPlaylistItem | None:
+        return self.playlists.item_for_media(
+            media_id, prefer=(self._actually_playing_vlc_item_id, self._current_vlc_item_id)
+        )
 
-    def _show_item(self, item) -> None:
-        """Makes `item` the displayed song (waveform, bookmarks, breadcrumb)."""
+    def _show_item(self, item: VlcPlaylistItem) -> None:
+        """Makes `item` the song on screen (waveform, bookmarks, breadcrumb)."""
         if item.vlc_id == self._current_vlc_item_id and self._current_media_id is not None:
             return
         self._current_vlc_item_id = item.vlc_id
         self._on_current_item_changed(item.uri, _item_duration_us(item))
 
-    def _switch_displayed_song_for_bookmark(self, item) -> None:
-        """Loads the bookmark's own song into the waveform/breadcrumb/bookmark list
-        immediately, instead of waiting for the async VLC command + next status poll."""
-        self.window._playlist_panel.set_follow_vlc(True, notify=False)
+    def _switch_displayed_song_for_bookmark(self, item: VlcPlaylistItem) -> None:
+        self.window.set_follow_player(True, notify=False)
         self._show_item(item)
 
-    # -- selection / bookmark playback --
+    # -- selections and bookmarks --
 
     def _on_loop_selection_requested(self, start_us: int, end_us: int) -> None:
-        """Direct user request: "once i highlight an area and press play, i expect it to
-        play the highlighted area of the song in the waveform" -- if the waveform shows
-        a previewed song, VLC switches to it first (same queued command, so the seek
-        can't overtake the switch)."""
+        """"Play" on a painted selection: loops it (in the song on screen)."""
         before = self._goto_for_displayed()
         if before is not None:
-            self.window._playlist_panel.set_follow_vlc(True, notify=False)
+            self.window.set_follow_player(True, notify=False)
         self._selection_loop_active = True
         self._active_loop_bookmark_id = None
-        self._loop_controller.start(
+        self._start_loop(
             LoopSpec(start_us=start_us, end_us=end_us, repeat_count=None, gap_ms=0,
                      completion_action=CompletionAction.CONTINUE),
             before=before,
         )
 
     def _on_waveform_selection_changed(self, selection: object) -> None:
-        """Direct follow-up request: "when i press play to listen to the selection, i
-        want the ability to adjust the selection by dragging the sides" -- while the
-        waveform's own Play button is looping a raw selection, dragging an edge
-        restarts the loop with the new bounds."""
+        """Dragging an edge of a selection that is being looped restarts the loop with the
+        new bounds; clearing it stops the loop."""
         if not self._selection_loop_active:
             return
         if not isinstance(selection, Selection):
-            self._selection_loop_active = False
-            self._loop_controller.stop()
+            self._stop_loop()
             return
-        self._loop_controller.start(
+        self._start_loop(
             LoopSpec(start_us=selection.start_us, end_us=selection.end_us, repeat_count=None, gap_ms=0,
                      completion_action=CompletionAction.CONTINUE)
         )
 
+    def _start_loop(self, spec: LoopSpec, *, before: Callable[[], object] | None = None) -> None:
+        self._loop_item_id = self._current_vlc_item_id or self._actually_playing_vlc_item_id
+        self._external_stop_votes = 0
+        self._loop_controller.start(spec, before=before)
+
+    def _note_loop_segment_started(self) -> None:
+        self._loop_segment_started = time.monotonic()
+        self._external_stop_votes = 0
+
     def _on_bookmark_song_display_requested(self, bookmark_id: UUID) -> None:
-        """Direct user request: "when i select a bookmarking, i want it to automatically
-        select the song from the playlist above and display its waveform along with the
-        bookmarks" -- previews the bookmark's song without playing anything."""
+        """Selecting a bookmark shows its song (without playing it)."""
         bookmark = self._bookmark_repository.get(bookmark_id)
         if bookmark is None:
             return
         item = self._playlist_item_for_media(bookmark.media_id)
         if item is not None:
-            self.window._playlist_panel.select_item(item.vlc_id)
+            self.window.select_playlist_item(item.vlc_id)
 
     def _on_play_bookmark_requested(self, bookmark_id: UUID) -> None:
-        """Play Bookmark / double-click on a bookmark row. A loop-enabled segment loops
-        with its own settings (bookmarks default to loop-enabled); anything else is a
-        one-shot seek+play. Switches VLC to the bookmark's song first when needed."""
+        """Play Bookmark / double-click: a loop-enabled segment loops with its own settings;
+        anything else is a seek+play. Switches the player to the bookmark's song first."""
         bookmark = self._bookmark_repository.get(bookmark_id)
         if bookmark is None:
             return
@@ -540,19 +485,19 @@ class Application(QObject):
             adapter.play()
 
         self._submit(_play, on_done=lambda _r: self._clock.note_seek(start_us, playing=True))
+        self._last_playback_state = "playing"
 
     def _on_loop_bookmark_requested(self, bookmark_id: UUID) -> None:
         bookmark = self._bookmark_repository.get(bookmark_id)
         if bookmark is None or bookmark.end_us is None:
             return  # a point bookmark has no range to loop
-
         item = self._playlist_item_for_media(bookmark.media_id)
         if item is not None:
             self._switch_displayed_song_for_bookmark(item)
         before = self._goto_for_displayed() if item is not None else None
         self._selection_loop_active = False
         self._active_loop_bookmark_id = bookmark.id
-        self._loop_controller.start(
+        self._start_loop(
             LoopSpec(
                 start_us=bookmark.start_us, end_us=bookmark.end_us,
                 repeat_count=bookmark.repeat_count, gap_ms=bookmark.loop_gap_ms,
@@ -561,15 +506,15 @@ class Application(QObject):
             ),
             before=before,
         )
+        self._last_playback_state = "playing"
 
     def _on_loop_completed(self, _action: object) -> None:
         self._selection_loop_active = False
+        self._loop_item_id = None
 
     def _on_loop_navigation_requested(self, action: object) -> None:
-        """A finished loop whose "After loop" setting is Next/Previous Bookmark: play the
-        neighbouring bookmark of the same song (by start time) with its own settings.
-        LoopController announced this but nothing listened before, so those settings
-        silently did nothing."""
+        """"After loop: Next/Previous Bookmark": plays the neighbouring bookmark of the same
+        song (by start time) with its own settings."""
         current_id = self._active_loop_bookmark_id
         if action is CompletionAction.NEXT_SEGMENT_QUEUE_ITEM:
             self._log.info("Segment Queue is not available yet; continuing playback")
@@ -592,24 +537,21 @@ class Application(QObject):
             # Deferred: we're inside LoopController's own signal emission.
             QTimer.singleShot(0, lambda: self._on_play_bookmark_requested(target_id))
 
-    def _on_bookmark_reorder_requested(self, ordered_bookmark_ids: list) -> None:
-        """Direct user request: "the row entries should also be possible to manually
-        reorder them moving up/down"."""
+    def _on_bookmark_reorder_requested(self, ordered_bookmark_ids: list[UUID]) -> None:
         self._bookmark_repository.reorder(ordered_bookmark_ids)
         self._refresh_bookmark_views()
 
-    def _current_bookmarks_sorted(self) -> list:
+    def _current_bookmarks_sorted(self) -> list[Any]:
         if self._current_media_id is None:
             return []
-        bookmarks = self._bookmark_repository.list_for_context(
-            self._synchronizer.active_playlist_id, self._current_media_id
-        )
+        bookmarks = self._bookmark_repository.list_for_context(self.playlists.active_playlist_id,
+                                                               self._current_media_id)
         return sorted(bookmarks, key=lambda b: b.start_us)
 
     def _displayed_position_us(self) -> int:
         if self._current_vlc_item_id is not None and self._current_vlc_item_id == self._actually_playing_vlc_item_id:
             return self._clock.estimated_position_us()
-        return self.window._waveform_scene.playhead_time_us()
+        return self.window.playhead_time_us()
 
     def _on_previous_bookmark(self) -> None:
         bookmarks = self._current_bookmarks_sorted()
@@ -629,83 +571,27 @@ class Application(QObject):
         target = candidates[0] if candidates else bookmarks[0]
         self._seek_displayed(target.start_us)
 
-    def stop(self) -> None:
-        """Shuts the session down (connected to QApplication.aboutToQuit)."""
-        if self._stopped:
-            return
-        self._stopped = True
-        self._status_timer.stop()
-        self._playlist_timer.stop()
-        # Put VLC's volume back if a fade had moved it, then let queued commands finish.
-        self._loop_controller.stop(restore_volume=True)
-        shutdown = getattr(self._commands, "shutdown", None)
-        if shutdown is not None:
-            shutdown(drain_timeout_s=1.5)
-        self._waveform_orchestrator.cancel_all()
-        self._waveform_orchestrator.wait_for_idle(3000)
-        self._thread_pool.waitForDone(3000)
-        try:
-            self._adapter.disconnect()
-        except Exception:  # noqa: BLE001
-            pass
-        # Only the VLC process this Application currently owns (spawned via
-        # _launch_new_vlc, not attached to) is closed on exit. An attached-to instance
-        # the user already had running, or one left behind by an earlier re-launch, is
-        # deliberately left alone (see _swap_adapter's docstring).
-        if self._vlc_process is not None:
-            try:
-                terminate_managed_vlc(self._vlc_process, self._vlc_path, self._vlc_port)
-            except Exception:  # noqa: BLE001 - never block quitting
-                self._log.exception("could not close the managed VLC")
-
-    # -- polling --
-    #
-    # Each tick dispatches the adapter call to a QThreadPool worker instead of calling
-    # it directly (spec #108). An in-flight guard skips a tick rather than queuing a
-    # second overlapping call if the previous one hasn't returned yet.
-
-    def _poll_status(self) -> None:
-        if self._status_inflight:
-            return
-        self._status_inflight = True
-        self._thread_pool.start(_CallWorker(self._adapter.get_status, self._status_signals))
-
-    def _is_stale(self, issued_ns: int) -> bool:
-        return issued_ns < self._commands.fence_ns("position") + STALE_SAMPLE_MARGIN_NS
+    # -- status --
 
     def _on_status_result(self, payload: object) -> None:
-        self._status_inflight = False
-        issued_ns, status = _unpack_sample(payload)
+        """A status poll result, (issued_ns, status) or a bare status (tests)."""
+        issued_ns, status = unpack_sample(payload)
+        self._on_status_sample(issued_ns, status)
+
+    def _on_status_sample(self, issued_ns: int, status: PlaybackStatus) -> None:
         try:
-            if not self._connected:
-                self._connected = True
-                self.window.set_connected(True)
-            if self._mute_pending:
-                self._mute_pending = False
-                adapter = self._adapter
-                self._submit(lambda: adapter.set_volume(0), fences=("volume",))
-            # Direct user request: "add options to fade in and fade out when playing
-            # back" -- fades ramp to/from whatever the user's real volume is.
+            # Fades ramp to/from the user's real volume (ignored while a fade owns it).
             self._loop_controller.set_target_volume(status.volume, sampled_at_ns=issued_ns)
-            if self._is_stale(issued_ns):
+            if self.session.is_stale(issued_ns):
                 return  # sampled before our last seek/goto/play took effect
             self._clock.update(status)
             self._last_playback_state = status.state
-            self.window._transport.set_time(status.time_us, status.duration_us)
-            # Direct follow-up request: "if playback is active, then the highlight is
-            # green, otherwise, blue".
-            self.window._playlist_panel.set_current_playing(
-                status.current_playlist_item_id, is_playing=status.state == "playing"
-            )
-            # The playhead shows the playing song's position only while that song is
-            # the one on screen; a previewed song keeps its own playhead.
+            self.window.show_playback(status.time_us, status.duration_us, status.current_playlist_item_id,
+                                      is_playing=status.state == "playing")
+            # The playhead follows the player only while its song is the one on screen.
             if self._current_vlc_item_id is not None and self._current_vlc_item_id == status.current_playlist_item_id:
-                self.window._waveform_scene.set_playhead_time_us(status.time_us)
-                self.window._waveform_view.follow_playhead(status.time_us)
-            # The core boundary-timer loop mechanism deliberately does NOT compare
-            # LoopController.state against status.state (an earlier attempt misfired
-            # and killed ordinary loops). A stop issued entirely outside this app
-            # (VLC's own window) is a known, accepted gap.
+                self.window.set_playhead(status.time_us)
+            self._check_external_stop(status)
             self._loop_controller.on_tick()
 
             if status.current_playlist_item_id != self._actually_playing_vlc_item_id:
@@ -714,27 +600,50 @@ class Application(QObject):
         except Exception:  # noqa: BLE001 - spec #104: never crash the UI over one poll
             self._log.exception("status result handling failed")
 
-    def _apply_actually_playing_item_if_following(self, status) -> None:
-        if not self.window._playlist_panel.follow_vlc_enabled():
-            return  # user is previewing a different song -- see _on_playlist_item_selected
-        item = self._resolve_playlist_item(status.current_playlist_item_id)
+    def _check_external_stop(self, status: PlaybackStatus) -> None:
+        """Stops a playing loop when the user paused/stopped playback or changed song in
+        VLC's own window -- otherwise the loop's boundary timer resumed playback moments
+        later. Needs two consecutive fresh samples, outside the grace period after the
+        loop's own seek-backs; a "paused" report only counts if the position stood still."""
+        if self._loop_controller.state is not LoopState.PLAYING:
+            self._external_stop_votes = 0
+            self._loop_last_time_us = None
+            return
+        if time.monotonic() - self._loop_segment_started < EXTERNAL_STOP_GRACE_S:
+            return
+        previous_time = self._loop_last_time_us
+        self._loop_last_time_us = status.time_us
+        switched = (
+            self._loop_item_id is not None and status.current_playlist_item_id is not None
+            and status.current_playlist_item_id != self._loop_item_id
+        )
+        halted = status.state == "stopped" or (
+            status.state == "paused" and previous_time is not None and previous_time == status.time_us
+        )
+        self._external_stop_votes = self._external_stop_votes + 1 if (switched or halted) else 0
+        if self._external_stop_votes >= EXTERNAL_STOP_VOTES:
+            self._log.info("playback was %s outside this app; stopping the loop",
+                           "switched" if switched else status.state)
+            self._stop_loop()
+
+    def _apply_actually_playing_item_if_following(self, status: PlaybackStatus) -> None:
+        if not self.window.follow_player_enabled():
+            return  # the user is previewing another song
+        item = self.playlists.item(status.current_playlist_item_id)
         if item is not None and item.uri:
             self._show_item(item)
             return
-        # StandardHttpPlaybackAdapter.get_status()'s media_uri is often a bare filename
-        # (status.json "meta.filename"), not a resolvable URI -- only use it when the
-        # playlist hasn't been polled yet at all.
+        # VLC's status.json media_uri is often a bare filename, not a resolvable URI --
+        # only used before the first playlist poll.
         if status.media_uri:
             self._current_vlc_item_id = status.current_playlist_item_id
             self._on_current_item_changed(status.media_uri, status.duration_us)
 
     def _on_playlist_item_double_clicked(self, vlc_id: int) -> None:
-        """"when i double click a song, i want it to play the song" -- from the start
-        ("it should start playing it from the beginning, to the end"), stopping any
-        active loop, with the view following it."""
+        """Double-click on a song plays it from the beginning (stopping any loop)."""
         self._stop_loop()
-        item = self._resolve_playlist_item(vlc_id)
-        self.window._playlist_panel.set_follow_vlc(True, notify=False)
+        item = self.playlists.item(vlc_id)
+        self.window.set_follow_player(True, notify=False)
         if item is not None and item.uri:
             self._show_item(item)
         self._actually_playing_vlc_item_id = vlc_id  # see _goto_for_displayed
@@ -746,163 +655,113 @@ class Application(QObject):
             adapter.play()
 
         self._submit(_play_from_start, on_done=lambda _r: self._clock.note_seek(0, playing=True))
+        self._last_playback_state = "playing"
 
     def _on_playlist_item_selected(self, vlc_id: int) -> None:
-        """Direct user request: "when a user clicks through the songs, [the waveform]
-        is instantly visible" -- a single click previews that song's waveform/
-        bookmarks without commanding VLC; double-click is the separate "start playing"
-        action. Previewing a song other than the playing one switches "Follow" off."""
-        item = self._resolve_playlist_item(vlc_id)
+        """A single click previews a song (waveform, bookmarks) without playing it."""
+        item = self.playlists.item(vlc_id)
         if item is None or not item.uri:
             return
         if vlc_id != self._actually_playing_vlc_item_id:
-            self.window._playlist_panel.set_follow_vlc(False)
+            self.window.set_follow_player(False)
         self._show_item(item)
 
     def _on_follow_vlc_toggled(self, enabled: bool) -> None:
         if not enabled or self._actually_playing_vlc_item_id is None:
             return
         if self._actually_playing_vlc_item_id == self._current_vlc_item_id:
-            return  # already showing the actually-playing track
-        item = self._resolve_playlist_item(self._actually_playing_vlc_item_id)
+            return
+        item = self.playlists.item(self._actually_playing_vlc_item_id)
         if item is None or not item.uri:
             return
         self._show_item(item)
 
-    def _resolve_playlist_item(self, vlc_id: int | None):
-        if vlc_id is None:
-            return None
-        return next((i for i in self._playlist_items if i.vlc_id == vlc_id), None)
-
-    def _resolve_current_item_uri(self, vlc_id: int | None) -> str | None:
-        item = self._resolve_playlist_item(vlc_id)
-        return item.uri if item is not None else None
-
-    def _on_status_failed(self, message: str) -> None:
-        self._status_inflight = False
-        if self._connected:
-            self._connected = False
-            self.window.set_connected(False)
-        self._log.debug("status poll failed: %s", message)  # spec #104: never crash the UI
-
-    def _poll_playlist(self) -> None:
-        if self._playlist_inflight:
-            return
-        self._playlist_inflight = True
-        self._thread_pool.start(_CallWorker(self._adapter.get_playlist, self._playlist_signals))
+    # -- playlist --
 
     def _force_playlist_refresh(self) -> None:
         """Playlist > Refresh (F5): re-resolve and re-recognise on the next poll."""
-        self._last_snapshot_key = None
-        self._poll_playlist()
+        self.playlists.force_refresh()
+        self.session.poll_playlist()
 
     def _on_playlist_result(self, payload: object) -> None:
-        self._playlist_inflight = False
-        _issued_ns, items = _unpack_sample(payload)
-        if self._asking_playlist_match:
-            return  # a "same playlist?" question is open; decide after the answer
+        _issued_ns, items = unpack_sample(payload)
         try:
-            items = list(items)
-            self._playlist_items = items
-            snapshot_key = tuple((i.vlc_id, i.uri, i.name, i.duration_s) for i in items)
-            if snapshot_key == self._last_snapshot_key:
-                return  # unchanged playlist: nothing to resolve, sync or redraw
-            resolved: list[tuple[object, object]] = []
-            for item in items:
-                if not item.uri:
-                    continue
-                try:
-                    resolved.append((item, self._media_resolver.resolve(item.uri)))
-                except Exception:  # noqa: BLE001
-                    # One unresolvable item (bad path, permissions, an exotic filename)
-                    # must not hide every OTHER item from the playlist panel.
-                    self._log.exception("failed to resolve playlist item %r", item.uri)
-            self._resolved = resolved
-
-            if not resolved:
-                self.window._playlist_panel.set_playlist([], {})
-                self._last_snapshot_key = snapshot_key
+            if not self.playlists.apply_snapshot(list(items)):
                 return
-
-            ordered_media_ids = [media.id for _item, media in resolved]
-            result = self._synchronizer.on_snapshot(source_uri=self._source_uri, ordered_media_ids=ordered_media_ids)
-            self._log.debug("playlist sync: %s -> %s", result.action, result.playlist_id)
-            if result.action == SyncAction.ASK_USER:
-                self._resolve_ask_user(result, ordered_media_ids)
-
-            for item, media in resolved:
-                self._song_names_cache[media.id] = media.title or media.filename or item.uri
             self._push_exact_durations()
             self._refresh_bookmark_views()
-            self._preload_playlist_waveforms(resolved)
-            self._last_snapshot_key = snapshot_key
+            self._preload_playlist_waveforms()
         except Exception:  # noqa: BLE001 - spec #104: never crash the UI over one poll
             self._log.exception("playlist result handling failed")
-
-    # -- playlist recognition: "is this the same playlist as before?" (spec #12) --
-
-    def _resolve_ask_user(self, result, ordered_media_ids: list[UUID]) -> None:
-        candidate_id = result.candidate_id
-        key = (candidate_id, tuple(ordered_media_ids))
-        accept = False
-        if candidate_id is not None and key not in self._declined_matches:
-            record = self._playlist_repository.get(candidate_id)
-            name = record.playlist.name if record is not None else "a previous playlist"
-            self._asking_playlist_match = True
-            try:
-                accept = bool(self._ask_playlist_match(name, float(result.candidate_score or 0.0)))
-            finally:
-                self._asking_playlist_match = False
-        if accept and candidate_id is not None:
-            self._synchronizer.accept_ask_user_match(candidate_id, ordered_media_ids)
-        else:
-            self._declined_matches.add(key)
-            self._synchronizer.create_ad_hoc(source_uri=self._source_uri, ordered_media_ids=ordered_media_ids)
 
     def _ask_playlist_match_dialog(self, playlist_name: str, score: float) -> bool:
         answer = QMessageBox.question(
             self.window, "Same playlist?",
-            f"The VLC playlist looks like “{playlist_name}” ({score:.0%} similar), "
+            f"The playlist looks like “{playlist_name}” ({score:.0%} similar), "
             "but it has changed.\n\nUse that playlist's bookmarks?",
         )
-        return answer == QMessageBox.Yes
+        return bool(answer == QMessageBox.StandardButton.Yes)
 
     def _on_project_imported(self) -> None:
         """An import may have added the signatures the live playlist should match."""
-        self._synchronizer.reset()
+        self.playlists.synchronizer.reset()
         self._force_playlist_refresh()
+
+    # -- sync (Windows <-> WSL <-> other machines, through a shared folder) --
+
+    def sync_now(self) -> None:
+        if self._sync is None:
+            return
+        try:
+            changed = self._sync.sync_now()
+        except Exception:  # noqa: BLE001 - a broken sync folder must not break the app
+            self._log.exception("sync failed")
+            return
+        if changed:
+            self._on_project_imported()
+            self._refresh_bookmark_views()
+            self.window.bookmarks_changed.emit()
+
+    def _on_sync_requested(self) -> None:
+        if self._sync is None:
+            QMessageBox.information(
+                self.window, "Sync",
+                "No sync folder is set. Start the app with --sync-dir <folder> (use the same "
+                "folder on every machine / in WSL and Windows).",
+            )
+            return
+        self.sync_now()
 
     # -- bookmark views --
 
     def _refresh_bookmark_views(self) -> None:
-        """Pushes every playlist-scoped bookmark across the WHOLE playlist into the
-        bookmark list panel ("the bookmarks should all be listed for all songs") and the
-        per-song counts into the playlist panel. Runs when the playlist changes and
-        after any bookmark edit -- both panels ignore refreshes that change nothing."""
-        playlist_id = self._synchronizer.active_playlist_id
+        """Every bookmark of the playlist (all songs) in the list, and per-song counts in
+        the playlist panel. Both panels ignore refreshes that change nothing."""
+        playlist_id = self.playlists.active_playlist_id
         counts: dict[int, int] = {}
+        resolved = self.playlists.resolved
         if playlist_id is not None:
             bookmarks = self._bookmark_repository.list_for_playlist(playlist_id)
             per_media: dict[UUID, int] = {}
             for bookmark in bookmarks:
                 per_media[bookmark.media_id] = per_media.get(bookmark.media_id, 0) + 1
-            for item, media in self._resolved:
+            for item, media in resolved:
                 counts[item.vlc_id] = per_media.get(media.id, 0)
-            self.window.load_all_bookmarks(bookmarks, dict(self._song_names_cache))
+            self.window.load_all_bookmarks(bookmarks, dict(self.playlists.song_names))
         else:
-            for item, media in self._resolved:
+            for item, media in resolved:
                 counts[item.vlc_id] = len(self._bookmark_repository.list_global_for_media(media.id))
             self.window.load_all_bookmarks([], {})
-        self.window._playlist_panel.set_playlist([item for item, _media in self._resolved], counts)
+        self.window.set_playlist([item for item, _media in resolved], counts)
 
-    # Kept under its old name: tests and older callers refer to it.
     _refresh_bookmark_panel = _refresh_bookmark_views
 
-    def _preload_playlist_waveforms(self, resolved: list) -> None:
-        """Makes sure every track in the playlist has a cached waveform ("make the tool
-        preload the waves for faster operation"), without loading cached ones -- see
-        WaveformOrchestrator.prefetch."""
-        for item, media in resolved:
+    # -- waveforms --
+
+    def _preload_playlist_waveforms(self) -> None:
+        """Makes sure every song in the playlist has a cached waveform (without loading
+        cached ones -- see WaveformOrchestrator.prefetch)."""
+        for item, media in self.playlists.resolved:
             if media.id in self._preload_requested or not media.fast_fingerprint:
                 continue
             local_path = uri_to_local_path(media.canonical_uri or item.uri)
@@ -911,22 +770,15 @@ class Application(QObject):
             self._preload_requested.add(media.id)
             self._waveform_orchestrator.prefetch(media.id, media.fast_fingerprint, str(local_path))
 
-    def _on_playlist_failed(self, message: str) -> None:
-        self._playlist_inflight = False
-        self._log.debug("playlist poll failed: %s", message)
-
-    # -- reactions --
-
     def _on_current_item_changed(self, media_uri: str | None, duration_us: int | None) -> None:
         if not media_uri:
             return
-        media = self._media_resolver.resolve(media_uri, duration_us=duration_us)
+        media = self.playlists.resolver.resolve(media_uri, duration_us=duration_us)
         self._current_media_id = media.id
-        # A drag-selection is a pair of raw offsets with nothing tying it to a track --
-        # reported live as "the paint is not song specific". Cleared on every switch.
-        self.window._waveform_scene.clear_selection()
+        # A painted selection belongs to one song; it goes when the song on screen changes.
+        self.window.clear_waveform_selection()
 
-        playlist_id = self._synchronizer.active_playlist_id
+        playlist_id = self.playlists.active_playlist_id
         playlist_name = "Unknown playlist"
         if playlist_id is not None:
             record = self._playlist_repository.get(playlist_id)
@@ -945,57 +797,45 @@ class Application(QObject):
         )
         self.window.load_bookmarks(bookmarks)
         playing_here = self._current_vlc_item_id is not None and self._current_vlc_item_id == self._actually_playing_vlc_item_id
-        self.window._waveform_scene.set_playhead_time_us(self._clock.estimated_position_us() if playing_here else 0)
-        # Without this, the view stays at its raw 1ms-per-pixel default zoom, so a
-        # multi-minute track shows only its first fraction of a second.
-        self.window._waveform_view.fit_entire_media()
+        self.window.set_playhead(self._clock.estimated_position_us() if playing_here else 0, follow=False)
+        self.window.fit_waveform()  # otherwise a multi-minute song shows its first second
 
         local_path = uri_to_local_path(media.canonical_uri or media_uri)
         if local_path is not None and local_path.exists() and media.fast_fingerprint:
             self._waveform_orchestrator.request(media.id, media.fast_fingerprint, str(local_path))
 
-    def _on_waveform_ready(self, media_id: UUID, pyramid) -> None:
+    def _on_waveform_ready(self, media_id: UUID, pyramid: WaveformPyramid) -> None:
         if media_id != self._current_media_id:
-            return  # switched tracks again before this one finished (spec #65)
-        # The decoded length is exact; VLC's is whole seconds (the waveform used to be
-        # clipped to it).
-        duration_us = pyramid.duration_us or self.window._waveform_scene._duration_us
-        self.window._waveform_scene.set_waveform(pyramid, duration_us)
-        if self.window._waveform_view._fit_mode:
-            self.window._waveform_view.fit_entire_media()  # keep "fit" exact; a manual zoom is left alone
+            return  # switched songs before this one finished (spec #65)
+        self.window.show_waveform(pyramid, pyramid.duration_us or self.window.waveform_duration_us())
+
+    def _on_waveform_progress(self, media_id: UUID, pyramid: WaveformPyramid) -> None:
+        """A partial waveform while a long file is still being decoded."""
+        if media_id == self._current_media_id:
+            self.window.show_waveform(pyramid, max(self.window.waveform_duration_us(), pyramid.duration_us or 0))
 
     def _on_duration_known(self, media_id: UUID, duration_us: int) -> None:
-        """The exact decoded length of a track (VLC's HTTP interface only reports whole
-        seconds): handed to the adapter so its position<->time conversions and seeks
-        line up with the waveform."""
+        """The exact decoded length of a song (VLC's HTTP interface only reports whole
+        seconds), handed to the adapter for its position<->time conversions and seeks."""
         if not duration_us or duration_us <= 0:
             return
         self._exact_duration_by_media[media_id] = int(duration_us)
-        for item, media in self._resolved:
+        for item, media in self.playlists.resolved:
             if media.id == media_id:
                 self._adapter.set_exact_duration(item.vlc_id, int(duration_us))
 
     def _push_exact_durations(self) -> None:
-        for item, media in self._resolved:
+        for item, media in self.playlists.resolved:
             duration = self._exact_duration_by_media.get(media.id)
             if duration:
                 self._adapter.set_exact_duration(item.vlc_id, duration)
 
     def _on_waveform_failed(self, media_id: UUID, message: str) -> None:
-        # A decode failure (bad/missing ffmpeg, an unreadable file, an unsupported codec)
-        # would otherwise leave the waveform lane silently blank.
         self._log.info("waveform generation failed for media %s: %s", media_id, message)
 
-    def _list_ordered_media_ids_for_playlist(self, playlist_id: UUID) -> list[UUID]:
-        return self._playlist_repository.list_item_media_ids(playlist_id)
 
-
-def _item_duration_us(item) -> int | None:
+def _item_duration_us(item: object) -> int | None:
     duration_s = getattr(item, "duration_s", None)
     if duration_s is None or duration_s <= 0:
         return None
     return int(duration_s * 1_000_000)
-
-
-def _uri_to_path(uri: str) -> Path | None:
-    return uri_to_local_path(uri)

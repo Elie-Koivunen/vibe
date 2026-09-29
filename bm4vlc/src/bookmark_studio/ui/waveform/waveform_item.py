@@ -1,7 +1,7 @@
 """WaveformItem: single custom-painted item selecting the nearest pyramid level (spec #112)."""
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF
+from PySide6.QtCore import QLineF, QPointF, QRectF
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QGraphicsItem
 
@@ -28,8 +28,8 @@ def device_pixel_width(painter: QPainter, exposed_scene_rect) -> int:
     viewport, scene-unit width and pixel width can differ by orders of magnitude.
     Using the raw exposedRect.width() as a literal pixel count therefore picks a
     pyramid level (or, worse, a ruler tick interval) calibrated for a view that isn't
-    the one actually being rendered -- confirmed live: this made TimeRulerItem draw a
-    tick roughly every 100ms on a 30s track. painter.worldTransform() reflects the
+    the one actually being rendered (TimeRulerItem would draw a tick about every
+    100 ms on a 30 s track). painter.worldTransform() reflects the
     real scene-to-device mapping at paint time and correctly accounts for zoom.
     """
     return max(1, int(painter.worldTransform().mapRect(exposed_scene_rect).width()))
@@ -41,7 +41,7 @@ class WaveformItem(QGraphicsItem):
     `paint()` recomputes which pyramid level to draw from the currently exposed
     rectangle, so panning/zooming never has to rebuild the scene (spec #112). Renders
     as a single filled min/max envelope polygon (Audacity/Peaks.js style) rather than
-    discrete per-column lines, per direct user request for an Audacity-like look.
+    discrete per-column lines.
     """
 
     def __init__(self, pyramid: WaveformPyramid, duration_us: int, height: float) -> None:
@@ -71,7 +71,7 @@ class WaveformItem(QGraphicsItem):
         peaks = level.slice(start_us, end_us, self._pyramid.sample_rate)
         if peaks.shape[0] == 0:
             painter.setPen(QPen(CENTER_LINE_COLOR, 1))
-            painter.drawLine(exposed.left(), mid_y, exposed.right(), mid_y)
+            painter.drawLine(QLineF(exposed.left(), mid_y, exposed.right(), mid_y))
             return
 
         us_per_peak = level.us_per_peak(self._pyramid.sample_rate)

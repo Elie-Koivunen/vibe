@@ -3,6 +3,88 @@
 All notable changes to VLC Bookmark Studio (bm4vlc). Previous versions are kept in
 [`archive/`](archive/) and tagged in git (`bm4vlc-v<version>`).
 
+## 0.3.0 — 2026-09-29
+
+Features and portability release. Tested on Windows 11 (Python 3.12, VLC 3.0.23 32-bit
+and 64-bit), WSL Ubuntu 24.04 (Python 3.10–3.13, Ubuntu's VLC 3.0.20 and the Windows
+VLC through interop), and as packaged builds.
+
+### In-app player (libVLC)
+
+- New playback mode: **Play inside this app**. libVLC (through `python-vlc`) plays in
+  the app's own process: no VLC window, no port or password, millisecond-exact times
+  and lengths (the HTTP interface only reports whole seconds), a 10 Hz playhead.
+  Offered in the open-media dialog when libVLC is available; the last choice is
+  remembered.
+- libVLC discovery (`playback/libvlc_loader.py`): `--libvlc-dir`, `BM4VLC_LIBVLC_DIR`,
+  the libVLC bundled with a packaged build, the installed VLC (Windows registry and
+  Program Files), the system library (Linux). On Windows the DLL's bitness is read
+  from its PE header: a 32-bit VLC next to 64-bit Python gets a clear explanation
+  instead of "not a valid Win32 application".
+
+### Packaged builds and releases
+
+- `packaging/`: PyInstaller build of a portable **Windows zip** that bundles a 64-bit
+  VLC (in-app player and VLC window) and ffmpeg, and a **Linux AppImage / tar.gz**
+  that uses the system's VLC and ffmpeg. `bm4vlc-portable.cmd`/`.sh` keep all data
+  next to the program. Every build runs its own self-test before it is archived.
+- `.github/workflows/bm4vlc-release.yml` builds both on every `bm4vlc-v*` tag
+  (downloads checksum-verified), self-tests them and publishes a GitHub Release.
+
+### Command line
+
+- `bookmark-studio [MEDIA ... | --playlist FILE] [--adapter auto|http|libvlc]
+  [--attach [HOST:]PORT] [--port N] [--vlc PATH] [--libvlc-dir DIR] [--ffmpeg PATH]
+  [--data-dir DIR] [--sync-dir DIR | --no-sync] [--no-dialog] [--log-level L]
+  [--self-test [--require ...] [--self-test-report FILE]] [--version]`.
+- `--self-test` checks Qt, the database, sync, ffmpeg, VLC and libVLC (it plays a
+  generated tone) and prints a report; used by CI and the packaged builds.
+- `--data-dir` (portable mode) keeps the database, waveforms, logs and settings in
+  one folder.
+
+### Sync between Windows, WSL and other PCs
+
+- `--sync-dir DIR` (remembered): each installation writes its database to its own
+  file in the folder and merges the others' at startup, every minute, on
+  File > Sync Now and on exit. The most recent change of each bookmark wins;
+  deletions travel as tombstones (migration `005_sync.sql`), and an undo of a
+  delete wins over the delete. Songs are matched by content fingerprint and
+  playlists by their song order, so Windows (`C:\...`) and WSL (`/mnt/c/...`)
+  agree. Unchanged databases are not rewritten (no churn in cloud folders).
+- Import: playlists are also matched by their song order re-hashed over the local
+  media ids (a playlist from another machine is merged instead of duplicated).
+  File > Import Project keeps its meaning: the archive's version wins.
+
+### Changed
+
+- **The HTTP password is no longer on VLC's command line** (where any local process
+  could read it): a managed VLC starts with a private config file (owner-only), which
+  also switches off VLC's first-run privacy dialog.
+- **A loop stops when playback is changed in VLC's own window** (pause, stop or
+  another song) instead of resuming playback moments later. Two fresh samples are
+  needed, outside a grace period after the loop's own seeks.
+- **Waveforms are decoded as a stream**: memory no longer grows with the length of
+  the file (was ~115 MB per hour of audio, twice), and a long file's waveform is
+  shown while it decodes, about once a second.
+- Code health: `Application` split into `PlaybackSession` (adapter, polling, command
+  queue) and `PlaylistContext` (playlist recognition); `MainWindow` has a public API
+  instead of Application reaching into its widgets; history-style comments rewritten
+  as present-tense reasons; `ruff` and `mypy --strict` (Qt widget code: relaxed
+  annotations) pass and run in CI.
+- CI also runs the live tests against a real VLC (Windows and Ubuntu) and lints.
+- Version bumped to 0.3.0; `python-vlc` is now a dependency.
+
+### Fixed
+
+- **The Lua bridge could not load in Linux VLC builds**: `goto` is a reserved word
+  in Lua 5.2. Found by the first live test against Ubuntu's VLC.
+- A packaged Linux build no longer hands its bundled libraries to the system's
+  `vlc`/`ffmpeg` it starts (`LD_LIBRARY_PATH` is restored for child processes).
+- The in-app player reports the volume it was set to (libVLC forgets a volume set
+  before its audio output exists, and some outputs always report 0, which would
+  have made fades treat the user's volume as silent).
+- Launch/attach failures are shown in a message instead of escaping a Qt slot.
+
 ## 0.2.0 — 2026-09-29
 
 Bug-fix and portability release. Every bug below was first reproduced (a failing test

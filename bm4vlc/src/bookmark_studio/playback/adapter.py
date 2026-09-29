@@ -1,7 +1,7 @@
 """PlaybackAdapter protocol implemented by Enhanced/Standard/Mock adapters (spec #30)."""
 from __future__ import annotations
 
-from typing import Protocol, TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from bookmark_studio.playback.status import PlaybackStatus, VlcPlaylistItem

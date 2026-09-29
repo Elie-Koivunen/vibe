@@ -6,7 +6,14 @@ from uuid import UUID, uuid4
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QUndoStack
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
 )
 
 from bookmark_studio.app.commands import (
@@ -30,17 +37,15 @@ from bookmark_studio.ui.waveform.view import WaveformView
 
 
 class MainWindow(QMainWindow):
-    # Re-exposes transport/waveform playback intents at the MainWindow level so a
-    # composition root (e.g. app/application.py) has one place to wire real VLC
-    # commands, instead of reaching into private widgets. loop_selection_requested
-    # carries (start_us, end_us). object, not int: int would marshal through a
-    # 32-bit C++ int and silently wrap past ~35.8 minutes (2^31 microseconds) --
-    # same bug class fixed for TransportBar/BookmarkInspector's timecode signals.
-    # Direct follow-up request: "remove the play selection button as it is" -- the
-    # separate non-looping Play Selection button/signal is gone; the one remaining
-    # button (labeled "Play", per "rename the loop selection as 'play'") still loops
-    # under the hood, same as every bookmark already defaults to loop-enabled.
-    loop_selection_requested = Signal(object, object)
+    """The main window. Its public signals and methods are the whole interface the
+    composition root (app/application.py) uses; the widgets themselves stay private.
+
+    Timecodes travel as `object`, not `int`: PySide6 marshals `int` through a 32-bit C++
+    int, which wraps past ~35.8 minutes of microseconds.
+    """
+
+    # Bookmark intents
+    loop_selection_requested = Signal(object, object)  # start_us, end_us ("Play" on a selection)
     launch_vlc_requested = Signal()
     play_bookmark_requested = Signal(object)  # UUID
     loop_bookmark_requested = Signal(object)  # UUID
@@ -48,6 +53,24 @@ class MainWindow(QMainWindow):
     bookmark_song_display_requested = Signal(object)  # UUID -- just selected, not played
     bookmarks_changed = Signal()
     project_imported = Signal()  # a .vlcbmk was merged in; playlist recognition may change
+    sync_requested = Signal()  # File > Sync Now
+    playlist_refresh_requested = Signal()  # Playlist > Refresh
+
+    # Player controls
+    play_pause_requested = Signal()
+    stop_requested = Signal()
+    seek_relative_requested = Signal(object)  # delta_us
+    previous_track_requested = Signal()
+    next_track_requested = Signal()
+    previous_bookmark_requested = Signal()
+    next_bookmark_requested = Signal()
+    seek_requested = Signal(object)  # time_us within the song on screen
+
+    # Waveform / playlist
+    waveform_selection_changed = Signal(object)  # Selection | None
+    playlist_item_selected = Signal(int)  # vlc_id -- previewed, not played
+    playlist_item_double_clicked = Signal(int)  # vlc_id -- play it
+    follow_player_toggled = Signal(bool)
 
     def __init__(
         self,
@@ -102,16 +125,8 @@ class MainWindow(QMainWindow):
         self._selection_label = QLabel("No selection", self)
         layout.addWidget(self._selection_label)
 
-        # The editable (typed-value) Start/End fields that used to sit here were
-        # removed per direct follow-up request -- "these do not serve a purpose" --
-        # once the bookmark list's own Start/End columns and the Inspector's fields
-        # already cover editing a SAVED bookmark's range. This pair is different:
-        # read-only, and specifically for an in-progress drag-selection -- direct
-        # follow-up request: "when i press play to listen to the selection, i want
-        # the ability to adjust the selection by dragging the sides. in addition,
-        # the start and end should reflect the movement ... of the playback".
-        # Dragging is the editing mechanism now (see SelectionItem's resize
-        # handles); these just show the numbers as that happens.
+        # Read-only readout of the drag-selection while it is dragged or resized (see
+        # SelectionItem's handles). Saved bookmarks are edited in the list and Inspector.
         self._selection_start_label = QLabel("--:--:--.---", self)
         layout.addWidget(self._selection_start_label)
         layout.addWidget(QLabel("→", self))
@@ -120,10 +135,7 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
 
-        # Explicit, always-visible zoom controls (spec #84's Ctrl+wheel/Ctrl+0 still
-        # work) -- added directly next to the waveform because "unable to zoom
-        # in/out" was reported live: a hidden modifier-key gesture with no on-screen
-        # affordance at all reads as a broken feature, not an undiscovered one.
+        # Visible zoom buttons: Ctrl+wheel/Ctrl+0 (spec #84) alone are too easy to miss.
         zoom_out_button = QPushButton("Zoom −", self)
         zoom_out_button.setToolTip("Zoom out (Ctrl+-, or scroll wheel down)")
         zoom_out_button.clicked.connect(lambda: self._waveform_view.zoom(0.8))
@@ -139,15 +151,8 @@ class MainWindow(QMainWindow):
         zoom_fit_button.clicked.connect(self._waveform_view.fit_entire_media)
         layout.addWidget(zoom_fit_button)
 
-        # Direct user request: "a button to explicitly bookmark". Always enabled --
-        # unlike "Bookmark Selection" below, this needs no drag-selection first (which
-        # was itself broken by the handle_empty_drag boundary bug -- see scene.py), so
-        # it's the one guaranteed-simple way to drop a bookmark. Context-aware: reported
-        # live as "the bookmarking seems to have changed" after a user had a region
-        # highlighted, clicked this, and got a point bookmark at the playhead instead
-        # of a segment from their selection -- always ignoring an active selection was
-        # the confusing part, not a regression. Now it behaves like Bookmark Selection
-        # whenever one exists, and only falls back to a playhead point when it doesn't.
+        # Always enabled: bookmarks the drag-selection when there is one (like Bookmark
+        # Selection), otherwise the playhead position.
         self._bookmark_now_button = QPushButton("Bookmark Now", self)
         self._bookmark_now_button.setToolTip(
             "Bookmark the current selection, or the playhead position if nothing is selected"
@@ -159,11 +164,7 @@ class MainWindow(QMainWindow):
         self._bookmark_selection_button.clicked.connect(self._on_bookmark_selection_clicked)
         layout.addWidget(self._bookmark_selection_button)
 
-        # Direct follow-up request: "remove the play selection button as it is.
-        # rename the loop selection as 'play'" -- consolidates the two into one
-        # button; it still loops the selection under the hood (matching every
-        # bookmark's own loop-enabled-by-default), just no longer needs a separate
-        # non-looping "Play Selection" alongside it.
+        # "Play" loops the selection, like a new bookmark (loop enabled by default).
         self._loop_selection_button = QPushButton("Play", self)
         self._loop_selection_button.clicked.connect(self._on_loop_selection_clicked)
         layout.addWidget(self._loop_selection_button)
@@ -181,12 +182,12 @@ class MainWindow(QMainWindow):
             button.setEnabled(enabled)
 
     def _build_layout(self) -> None:
-        top_splitter = QSplitter(Qt.Horizontal, self)
+        top_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         top_splitter.addWidget(self._playlist_panel)
         top_splitter.addWidget(self._waveform_view)
         top_splitter.setStretchFactor(1, 1)
 
-        bottom_splitter = QSplitter(Qt.Horizontal, self)
+        bottom_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         bottom_splitter.addWidget(self._bookmark_panel)
         bottom_splitter.addWidget(self._inspector)
 
@@ -196,9 +197,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._breadcrumb)
         layout.addWidget(self._selection_bar)
         layout.addWidget(top_splitter, 2)
-        # Direct user request: "i want the playback buttons to be above, not under" --
-        # previously sat at the very bottom of the window, past the bookmark list and
-        # inspector; moved directly under the waveform it controls instead.
+        # The transport sits directly under the waveform it controls.
         layout.addWidget(self._transport)
         layout.addWidget(bottom_splitter, 1)
         self.setCentralWidget(central)
@@ -207,13 +206,17 @@ class MainWindow(QMainWindow):
         menu_bar = self.menuBar()
 
         file_menu = menu_bar.addMenu("File")
-        launch_vlc_action = file_menu.addAction("Launch VLC...")
-        launch_vlc_action.triggered.connect(self.launch_vlc_requested.emit)
+        launch_vlc_action = file_menu.addAction("Launch VLC / Open Media...")
+        launch_vlc_action.setShortcut("Ctrl+O")
+        launch_vlc_action.triggered.connect(lambda *_: self.launch_vlc_requested.emit())
         file_menu.addSeparator()
         export_action = file_menu.addAction("Export Project...")
         export_action.triggered.connect(self._on_export_project)
         import_action = file_menu.addAction("Import Project...")
         import_action.triggered.connect(self._on_import_project)
+        sync_action = file_menu.addAction("Sync Now")
+        sync_action.setToolTip("Exchange bookmarks with the sync folder (see --sync-dir)")
+        sync_action.triggered.connect(lambda *_: self.sync_requested.emit())
         file_menu.addSeparator()
         exit_action = file_menu.addAction("Exit")
         exit_action.triggered.connect(self.close)
@@ -267,8 +270,7 @@ class MainWindow(QMainWindow):
         playlist_menu = menu_bar.addMenu("Playlist")
         refresh_action = playlist_menu.addAction("Refresh")
         refresh_action.setShortcut("F5")
-        # Application (if wired) connects to refresh_requested; harmless no-op otherwise.
-        self.playlist_refresh_requested = refresh_action.triggered
+        refresh_action.triggered.connect(lambda *_: self.playlist_refresh_requested.emit())
 
         tools_menu = menu_bar.addMenu("Tools")
         diagnostics_action = tools_menu.addAction("Diagnostics...")
@@ -279,8 +281,8 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self._on_show_about)
 
     def _build_shortcuts(self) -> None:
-        QShortcut(QKeySequence("["), self, activated=self._on_mark_selection_start)
-        QShortcut(QKeySequence("]"), self, activated=self._on_mark_selection_end)
+        QShortcut(QKeySequence("["), self).activated.connect(self._on_mark_selection_start)
+        QShortcut(QKeySequence("]"), self).activated.connect(self._on_mark_selection_end)
 
     # -- wiring --
 
@@ -314,6 +316,64 @@ class MainWindow(QMainWindow):
         self._inspector.notes_committed.connect(self._on_notes_committed)
 
         self._playlist_panel.launch_vlc_requested.connect(self.launch_vlc_requested.emit)
+        self._playlist_panel.item_selected.connect(self.playlist_item_selected.emit)
+        self._playlist_panel.item_double_clicked.connect(self.playlist_item_double_clicked.emit)
+        self._playlist_panel.follow_vlc_toggled.connect(self.follow_player_toggled.emit)
+
+        self._waveform_scene.seek_requested.connect(self.seek_requested.emit)
+        self._waveform_scene.selection_changed.connect(self.waveform_selection_changed.emit)
+
+        transport = self._transport
+        transport.play_pause_clicked.connect(self.play_pause_requested.emit)
+        transport.stop_clicked.connect(self.stop_requested.emit)
+        transport.seek_back_clicked.connect(lambda: self.seek_relative_requested.emit(-5_000_000))
+        transport.seek_forward_clicked.connect(lambda: self.seek_relative_requested.emit(5_000_000))
+        transport.previous_track_clicked.connect(self.previous_track_requested.emit)
+        transport.next_track_clicked.connect(self.next_track_requested.emit)
+        transport.previous_bookmark_clicked.connect(self.previous_bookmark_requested.emit)
+        transport.next_bookmark_clicked.connect(self.next_bookmark_requested.emit)
+
+    # -- player display (called by the composition root) --
+
+    def show_playback(self, time_us: int, duration_us: int | None, current_item_id: int | None,
+                      *, is_playing: bool) -> None:
+        self._transport.set_time(time_us, duration_us)
+        self._playlist_panel.set_current_playing(current_item_id, is_playing=is_playing)
+
+    def set_playhead(self, time_us: int, *, follow: bool = True) -> None:
+        self._waveform_scene.set_playhead_time_us(time_us)
+        if follow:
+            self._waveform_view.follow_playhead(time_us)
+
+    def playhead_time_us(self) -> int:
+        return self._waveform_scene.playhead_time_us()
+
+    def clear_waveform_selection(self) -> None:
+        self._waveform_scene.clear_selection()
+
+    def show_waveform(self, pyramid, duration_us: int) -> None:
+        """Draws a (possibly partial) waveform; keeps "fit" exact, leaves a manual zoom."""
+        self._waveform_scene.set_waveform(pyramid, duration_us)
+        if self._waveform_view._fit_mode:
+            self._waveform_view.fit_entire_media()
+
+    def fit_waveform(self) -> None:
+        self._waveform_view.fit_entire_media()
+
+    def waveform_duration_us(self) -> int:
+        return self._waveform_scene._duration_us
+
+    def set_playlist(self, items: list, bookmark_counts: dict[int, int]) -> None:
+        self._playlist_panel.set_playlist(items, bookmark_counts)
+
+    def select_playlist_item(self, vlc_id: int | None) -> None:
+        self._playlist_panel.select_item(vlc_id)
+
+    def set_follow_player(self, enabled: bool, *, notify: bool = True) -> None:
+        self._playlist_panel.set_follow_vlc(enabled, notify=notify)
+
+    def follow_player_enabled(self) -> bool:
+        return self._playlist_panel.follow_vlc_enabled()
 
     # -- context --
 
@@ -326,8 +386,8 @@ class MainWindow(QMainWindow):
 
     def load_bookmarks(self, bookmarks: list[Bookmark]) -> None:
         """Waveform-scoped bookmarks for the one song currently displayed. The
-        bookmark LIST panel is fed separately, from load_all_bookmarks -- direct user
-        request: "the bookmarks should all be listed for all songs", not just this one.
+        bookmark LIST panel is fed separately, from load_all_bookmarks: it lists every
+        song's bookmarks, not just this one's.
         """
         self._waveform_scene.set_bookmarks(bookmarks)
 
@@ -338,8 +398,8 @@ class MainWindow(QMainWindow):
         self._waveform_scene.set_playhead_time_us(time_us)
 
     def set_connected(self, connected: bool) -> None:
-        """Drives both the connection indicator (PlaylistPanel, above Launch VLC --
-        direct follow-up request to move it there) and the transport buttons'
+        """Drives both the connection indicator (PlaylistPanel, above Launch VLC)
+        and the transport buttons'
         enabled state (TransportBar) together, so callers have one place to report
         connection changes instead of reaching into two widgets.
         """
@@ -362,17 +422,15 @@ class MainWindow(QMainWindow):
             self._selection_start_label.setText("--:--:--.---")
             self._selection_end_label.setText("--:--:--.---")
             self._set_selection_buttons_enabled(False)
-        # Direct follow-up request: "fix so that the highlight start and end ...
-        # appear in the fields" -- mirrors the same selection in the Inspector's
-        # own Start/End fields, whenever nothing else is already loaded there (see
+        # Mirrors the selection in the Inspector's Start/End fields whenever no
+        # bookmark is loaded there (see
         # BookmarkInspector.show_selection's docstring for why it won't clobber an
         # actively-inspected bookmark).
         self._inspector.show_selection(selection if isinstance(selection, Selection) else None)
 
     def _on_selection_preview_changed(self, start_us: int, end_us: int) -> None:
-        """Live readout while dragging one of SelectionItem's resize handles --
-        direct follow-up request: "the start and end should reflect the movement
-        ... of the playback" -- fires continuously during the drag, distinct from
+        """Live readout while dragging one of SelectionItem's resize handles: fires
+        continuously during the drag, unlike
         _on_selection_changed (which only fires once the drag settles)."""
         from bookmark_studio.domain.selection import Selection
         from bookmark_studio.ui.transport import format_timecode
@@ -401,9 +459,7 @@ class MainWindow(QMainWindow):
             name=default_bookmark_name(),
             start_us=selection.start_us,
             end_us=selection.end_us,
-            # Direct user request: "per default, bookmark loop should be enabled
-            # (infinite)". repeat_count=None already means "forever" throughout this
-            # codebase (see e.g. inspector.py's Repeat spinbox special value).
+            # New bookmarks loop forever by default (repeat_count=None means "forever").
             loop_enabled=True,
             repeat_count=None,
             loop_gap_ms=0,
@@ -472,11 +528,8 @@ class MainWindow(QMainWindow):
         if bookmark is not None:
             self._load_bookmark_into_inspector(bookmark)
             self._bookmark_panel.select_bookmark(bookmark_id)
-            # Direct user request: "when i select a bookmarking, i want it to
-            # automatically select the song from the playlist above and display its
-            # waveform along with the bookmarks" -- Application resolves which live
-            # playlist row/song this bookmark belongs to (this window has no playlist
-            # snapshot of its own to do that lookup with).
+            # Selecting a bookmark shows its song: Application knows which playlist row
+            # that is (this window has no playlist snapshot of its own).
             self.bookmark_song_display_requested.emit(bookmark_id)
 
     def _on_bookmark_move_finished(self, bookmark_id: UUID, start_us: int, end_us: int) -> None:
@@ -494,7 +547,7 @@ class MainWindow(QMainWindow):
         if bookmark is None:
             return
         old_value = bookmark.start_us if handle == "start" else bookmark.end_us
-        if old_value == value_us:
+        if old_value is None or old_value == value_us:
             return
         self._push(
             ResizeBookmarkCommand(self._bookmark_repository, bookmark_id, handle, old_value, value_us)
@@ -503,12 +556,8 @@ class MainWindow(QMainWindow):
         self._refresh_inspector_if_current(bookmark_id)
 
     def _refresh_inspector_if_current(self, bookmark_id: UUID) -> None:
-        """Direct user request: "if the bookmark is adjusted, it should automatically
-        update the bookmark values" -- dragging/resizing a bookmark region on the
-        waveform already persisted correctly, but the Inspector's Start/End fields
-        (if that same bookmark happened to be loaded there) stayed stuck showing the
-        pre-drag values until the user clicked away and back.
-        """
+        """Reloads the Inspector after a bookmark it shows was dragged or resized on
+        the waveform, so its Start/End fields don't keep the old values."""
         current = self._current_inspected_bookmark()
         if current is None or current.id != bookmark_id:
             return
@@ -599,9 +648,7 @@ class MainWindow(QMainWindow):
         self._refresh_bookmarks()
         self._sync_inspector_snapshot(bookmark.id)
 
-    # Direct follow-up request: "the columns for loop, fade in/out etc, they should
-    # also be directly editable, e.g. clicking would give a drop menu options" --
-    # these three mirror _on_loop_settings_committed's ChangeLoopCommand usage, but
+    # In-place edits from the bookmark list: like _on_loop_settings_committed, but
     # target whichever bookmark row was edited in the list (not necessarily the one
     # currently loaded in the Inspector) and only touch the one field that changed.
 
@@ -663,11 +710,7 @@ class MainWindow(QMainWindow):
         self._refresh_inspector_if_current(bookmark.id)
 
     def _on_inspector_start_committed(self, start_us: int) -> None:
-        """Direct user request: "the begin/end time fields should be manually
-        editable for refined adjustment" -- the Inspector's Start/End QLineEdits
-        already existed and emitted these signals, but nothing was connected to
-        them, so typing a new value and pressing Enter silently did nothing.
-        """
+        """A start time typed into the Inspector (Enter commits)."""
         bookmark = self._current_inspected_bookmark()
         if bookmark is None:
             return
@@ -756,9 +799,9 @@ class MainWindow(QMainWindow):
     # -- menu action bodies --
 
     def build_export_data(self):
-        """Everything "Save Bookmarks..." writes: the active playlist's bookmarks for EVERY
-        song (previously only the song on screen was exported, silently dropping all the
-        others), the media they belong to, the playlist's lanes, and the playlist's order
+        """Everything "Save Bookmarks..." writes: the active playlist's bookmarks for every
+        song (not just the one on screen), the media they belong to, the playlist's lanes,
+        and the playlist's order
         and signatures so the project is recognised again after an import. Without a
         playlist context, the current song's global bookmarks."""
         from bookmark_studio.persistence.lane_repository import LaneRepository

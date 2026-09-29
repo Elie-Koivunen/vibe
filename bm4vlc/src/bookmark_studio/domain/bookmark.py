@@ -19,9 +19,9 @@ _NAME_SUFFIX_ALPHABET = string.ascii_lowercase + string.digits
 
 
 def default_bookmark_name() -> str:
-    """"bookmark-<date>-<6 alphanumeric random unique string>" -- direct user request
-    to replace a flat, indistinguishable "New bookmark" default (every bookmark in a
-    session ended up with the identical name until manually renamed). secrets.choice
+    """"bookmark-<date>-<6 alphanumeric random unique string>": distinguishable
+    default names (a fixed "New bookmark" would give every bookmark the same one).
+    secrets.choice
     (not random) since this only needs to not collide within one person's bookmark
     list, not be cryptographically unguessable -- but the module's already the right
     tool and avoids seeding concerns.
@@ -58,8 +58,7 @@ class Bookmark:
     # BookmarkRepository.list_for_playlist()'s `ORDER BY sort_index, start_us` just
     # falls back to chronological order until the user actually reorders something.
     sort_index: int = 0
-    # Direct user request: "add options to fade in and fade out when playing back".
-    # 0 disables (default) -- matches loop_gap_ms's own "0 means off" convention.
+    # Fade in/out when played; 0 disables (default), like loop_gap_ms.
     fade_in_ms: int = 0
     fade_out_ms: int = 0
 

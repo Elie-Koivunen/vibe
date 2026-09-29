@@ -16,7 +16,7 @@ class WaveformView(QGraphicsView):
     def __init__(self, scene: WaveformScene) -> None:
         super().__init__(scene)
         self._waveform_scene = scene
-        self.setDragMode(QGraphicsView.NoDrag)
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setRenderHint(self.renderHints())
         self._press_time_us: int | None = None
         self._dragging_selection = False
@@ -27,7 +27,7 @@ class WaveformView(QGraphicsView):
         return item is None or item in (self._waveform_scene._waveform_item, self._waveform_scene._ruler_item)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.LeftButton and self._is_empty_space(event.position().toPoint()):
+        if event.button() == Qt.MouseButton.LeftButton and self._is_empty_space(event.position().toPoint()):
             self._press_time_us = scene_x_to_time_us(self.mapToScene(event.position().toPoint()).x())
             self._dragging_selection = False
             event.accept()
@@ -67,11 +67,9 @@ class WaveformView(QGraphicsView):
         # Plain wheel zooms (the natural gesture in a waveform editor -- Audacity,
         # Adobe Audition, etc. all bind bare scroll to horizontal zoom here since
         # there's nothing useful to vertically scroll in a single waveform lane).
-        # Reported live as "unable to zoom in/out": requiring Ctrl for every wheel
-        # tick meant a plain scroll silently did nothing (no vertical content to move
-        # either), which reads as a broken control, not an undiscovered modifier.
-        # Shift+wheel still pans horizontally for anyone used to that combo.
-        if event.modifiers() & Qt.ShiftModifier:
+        # Requiring Ctrl would make a plain scroll do nothing at all (there is no
+        # vertical content), which reads as broken. Shift+wheel pans horizontally.
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
             super().wheelEvent(event)
             return
         self.zoom(1.25 if event.angleDelta().y() > 0 else 0.8, anchor_under_mouse=True)
@@ -84,14 +82,14 @@ class WaveformView(QGraphicsView):
         self._fit_mode = False  # manual zoom overrides a prior "fit entire media"
         if anchor_under_mouse:
             anchor = self.transformationAnchor()
-            self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+            self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
             self.scale(factor, 1.0)
             self.setTransformationAnchor(anchor)
         else:
             self.scale(factor, 1.0)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
-        if event.key() == Qt.Key_Escape:
+        if event.key() == Qt.Key.Key_Escape:
             self._waveform_scene.clear_selection()
             event.accept()
             return
@@ -111,7 +109,7 @@ class WaveformView(QGraphicsView):
 
     def _apply_fit(self) -> None:
         self.resetTransform()
-        self.fitInView(self.scene().sceneRect(), Qt.IgnoreAspectRatio)
+        self.fitInView(self.scene().sceneRect(), Qt.AspectRatioMode.IgnoreAspectRatio)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 from PySide6.QtCore import QSettings
 
-from unittest.mock import patch
-
 from bookmark_studio.bootstrap import (
-    build_main_window, find_vlc_path, open_database, probe_bridge, select_playback_adapter,
+    build_main_window,
+    find_vlc_path,
+    open_database,
+    probe_bridge,
+    select_playback_adapter,
 )
 from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
 from bookmark_studio.persistence.migrations import current_version

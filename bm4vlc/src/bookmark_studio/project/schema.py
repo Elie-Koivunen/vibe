@@ -2,6 +2,7 @@
 .vlcbmk project format (spec #90-#91, #127)."""
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from bookmark_studio.domain.bookmark import Bookmark
@@ -21,7 +22,7 @@ class ProjectFormatUnsupported(Exception):
     """Raised when a .vlcbmk archive's manifest declares an unsupported major version."""
 
 
-def validate_manifest(manifest: dict) -> None:
+def validate_manifest(manifest: dict[str, Any]) -> None:
     """Unknown fields are ignored for forward compatibility (spec #91); only `format`
     and a supported `format_version` are required."""
     if manifest.get("format") != FORMAT_NAME:
@@ -34,7 +35,7 @@ def validate_manifest(manifest: dict) -> None:
         )
 
 
-def validate_bookmark_dict(entry: dict) -> None:
+def validate_bookmark_dict(entry: dict[str, Any]) -> None:
     required = {"id", "media_id", "scope", "bookmark_type", "name", "start_us"}
     missing = required - entry.keys()
     if missing:
@@ -46,7 +47,7 @@ def validate_bookmark_dict(entry: dict) -> None:
         raise ValueError(f"bookmark {entry['id']!r} has end_us <= start_us")
 
 
-def bookmark_to_dict(bookmark: Bookmark) -> dict:
+def bookmark_to_dict(bookmark: Bookmark) -> dict[str, Any]:
     return {
         "id": str(bookmark.id),
         "playlist_id": str(bookmark.playlist_id) if bookmark.playlist_id else None,
@@ -70,7 +71,7 @@ def bookmark_to_dict(bookmark: Bookmark) -> dict:
     }
 
 
-def bookmark_from_dict(entry: dict) -> Bookmark:
+def bookmark_from_dict(entry: dict[str, Any]) -> Bookmark:
     validate_bookmark_dict(entry)
     return Bookmark(
         id=UUID(entry["id"]),
@@ -95,7 +96,7 @@ def bookmark_from_dict(entry: dict) -> Bookmark:
     )
 
 
-def playlist_to_dict(playlist: Playlist) -> dict:
+def playlist_to_dict(playlist: Playlist) -> dict[str, Any]:
     return {
         "id": str(playlist.id),
         "name": playlist.name,
@@ -104,7 +105,7 @@ def playlist_to_dict(playlist: Playlist) -> dict:
     }
 
 
-def playlist_from_dict(entry: dict) -> Playlist:
+def playlist_from_dict(entry: dict[str, Any]) -> Playlist:
     return Playlist(
         id=UUID(entry["id"]),
         name=entry["name"],
@@ -113,7 +114,7 @@ def playlist_from_dict(entry: dict) -> Playlist:
     )
 
 
-def media_to_dict(media: Media) -> dict:
+def media_to_dict(media: Media) -> dict[str, Any]:
     return {
         "id": str(media.id),
         "canonical_uri": media.canonical_uri,
@@ -129,7 +130,7 @@ def media_to_dict(media: Media) -> dict:
     }
 
 
-def media_from_dict(entry: dict) -> Media:
+def media_from_dict(entry: dict[str, Any]) -> Media:
     return Media(
         id=UUID(entry["id"]),
         canonical_uri=entry.get("canonical_uri"),
@@ -145,7 +146,7 @@ def media_from_dict(entry: dict) -> Media:
     )
 
 
-def lane_to_dict(lane: Lane) -> dict:
+def lane_to_dict(lane: Lane) -> dict[str, Any]:
     return {
         "id": str(lane.id),
         "playlist_id": str(lane.playlist_id),
@@ -157,7 +158,7 @@ def lane_to_dict(lane: Lane) -> dict:
     }
 
 
-def lane_from_dict(entry: dict) -> Lane:
+def lane_from_dict(entry: dict[str, Any]) -> Lane:
     return Lane(
         id=UUID(entry["id"]),
         playlist_id=UUID(entry["playlist_id"]),

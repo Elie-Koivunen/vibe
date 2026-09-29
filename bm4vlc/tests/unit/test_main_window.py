@@ -191,10 +191,11 @@ def test_inspector_mirrors_an_in_progress_selection(qtbot) -> None:
 def test_inspector_selection_preview_does_not_clobber_a_loaded_bookmark(qtbot) -> None:
     """An in-progress drag-selection elsewhere on the waveform must not silently
     overwrite the fields for a bookmark someone is actively editing."""
+    from uuid import uuid4
+
     from bookmark_studio.domain.bookmark import Bookmark
     from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
     from bookmark_studio.domain.selection import Selection
-    from uuid import uuid4
 
     window, repo, playlist, media = _build_window(qtbot)
     bookmark = Bookmark(

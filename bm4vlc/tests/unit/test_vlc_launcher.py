@@ -9,7 +9,11 @@ from pathlib import Path
 from PySide6.QtCore import QSettings
 
 from bookmark_studio.app.vlc_launcher import (
-    discover_vlc_instances, find_free_http_port, has_unmanaged_vlc_process, parse_m3u, resolve_startup_media,
+    discover_vlc_instances,
+    find_free_http_port,
+    has_unmanaged_vlc_process,
+    parse_m3u,
+    resolve_startup_media,
 )
 from bookmark_studio.settings.settings_service import SettingsService
 

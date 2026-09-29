@@ -58,7 +58,7 @@ class PlaylistRecognitionService:
         decision, candidate_id = decide(scores)
         candidate_score = dict(scores).get(candidate_id) if candidate_id else None
 
-        if decision == SimilarityDecision.AUTO_MATCH:
+        if decision == SimilarityDecision.AUTO_MATCH and candidate_id is not None:
             self._repository.add_signature(candidate_id, signature)
             return RecognitionResult(RecognitionAction.MATCHED, candidate_id, candidate_id, candidate_score)
         if decision == SimilarityDecision.ASK_USER:

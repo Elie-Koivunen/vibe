@@ -12,8 +12,7 @@ _MIGRATION_RE = re.compile(r"^(\d+)_.*\.sql$")
 def _migrations_dir() -> Path:
     """migrations/ inside the installed package (the wheel force-includes the repo's
     migrations/ there -- see pyproject.toml), else the repo root when running from a
-    source checkout. Previously only the repo-root location was tried, so an installed
-    (non-editable) copy found no migrations and started with an empty database."""
+    source checkout. An installed (non-editable) copy has only the packaged copy."""
     package_dir = Path(__file__).resolve().parents[1] / "migrations"
     if package_dir.is_dir() and any(package_dir.glob("*.sql")):
         return package_dir

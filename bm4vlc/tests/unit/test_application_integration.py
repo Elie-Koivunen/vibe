@@ -122,10 +122,10 @@ def test_resolve_current_item_uri_prefers_the_playlist_over_the_bare_status_file
     )
     app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
     app.start()
-    qtbot.waitUntil(lambda: len(app._playlist_items) > 0, timeout=3000)
+    qtbot.waitUntil(lambda: len(app.playlists.items) > 0, timeout=3000)
 
-    assert app._resolve_current_item_uri(1) == "file:///real/path/song.mp3"
-    assert app._resolve_current_item_uri(999) is None  # unknown id -> caller falls back
+    assert app.playlists.item(1).uri == "file:///real/path/song.mp3"
+    assert app.playlists.item(999) is None  # unknown id -> caller falls back
 
 
 def test_playlist_panel_populates_from_live_polling(qtbot, running_app) -> None:
@@ -258,7 +258,7 @@ def test_play_bookmark_requested_seeks_and_plays(qtbot, running_app) -> None:
     qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
 
     bookmark = Bookmark(
-        id=uuid4(), playlist_id=app._synchronizer.active_playlist_id, media_id=app._current_media_id,
+        id=uuid4(), playlist_id=app.playlists.synchronizer.active_playlist_id, media_id=app._current_media_id,
         scope=BookmarkScope.PLAYLIST_MEDIA, lane_id=None, bookmark_type=BookmarkType.SEGMENT,
         name="Chorus", start_us=20_000_000, end_us=30_000_000, loop_enabled=True, repeat_count=3,
         loop_gap_ms=500, completion_action=CompletionAction.STOP,
@@ -295,9 +295,9 @@ def test_play_bookmark_requested_switches_song_when_bookmark_belongs_to_a_differ
     qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
     assert adapter.get_status().current_playlist_item_id == 1  # Song A is playing
 
-    media_b = app._media_resolver.resolve("file:///b.mp3")
+    media_b = app.playlists.resolver.resolve("file:///b.mp3")
     bookmark = Bookmark(
-        id=uuid4(), playlist_id=app._synchronizer.active_playlist_id, media_id=media_b.id,
+        id=uuid4(), playlist_id=app.playlists.synchronizer.active_playlist_id, media_id=media_b.id,
         scope=BookmarkScope.PLAYLIST_MEDIA, lane_id=None, bookmark_type=BookmarkType.SEGMENT,
         name="Chorus", start_us=20_000_000, end_us=30_000_000, loop_enabled=True, repeat_count=3,
         loop_gap_ms=500, completion_action=CompletionAction.STOP,
@@ -342,7 +342,7 @@ def test_play_bookmark_requested_loops_when_the_bookmark_is_loop_enabled(qtbot, 
     qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
 
     bookmark = Bookmark(
-        id=uuid4(), playlist_id=app._synchronizer.active_playlist_id, media_id=app._current_media_id,
+        id=uuid4(), playlist_id=app.playlists.synchronizer.active_playlist_id, media_id=app._current_media_id,
         scope=BookmarkScope.PLAYLIST_MEDIA, lane_id=None, bookmark_type=BookmarkType.SEGMENT,
         name="Chorus", start_us=1_000_000, end_us=1_300_000, loop_enabled=True, repeat_count=None,
         loop_gap_ms=0, completion_action=CompletionAction.CONTINUE,
@@ -379,7 +379,7 @@ def test_play_bookmark_requested_does_not_loop_when_loop_disabled(qtbot, running
     qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
 
     bookmark = Bookmark(
-        id=uuid4(), playlist_id=app._synchronizer.active_playlist_id, media_id=app._current_media_id,
+        id=uuid4(), playlist_id=app.playlists.synchronizer.active_playlist_id, media_id=app._current_media_id,
         scope=BookmarkScope.PLAYLIST_MEDIA, lane_id=None, bookmark_type=BookmarkType.SEGMENT,
         name="Chorus", start_us=1_000_000, end_us=2_000_000, loop_enabled=False, repeat_count=None,
         loop_gap_ms=0, completion_action=CompletionAction.CONTINUE,
@@ -418,9 +418,9 @@ def test_play_bookmark_re_enables_follow_disabled_by_a_prior_preview(qtbot, runn
     app._on_playlist_item_selected(2)  # preview Song B without playing it
     assert app.window._playlist_panel.follow_vlc_enabled() is False
 
-    media_a = app._media_resolver.resolve("file:///a.mp3")
+    media_a = app.playlists.resolver.resolve("file:///a.mp3")
     bookmark = Bookmark(
-        id=uuid4(), playlist_id=app._synchronizer.active_playlist_id, media_id=media_a.id,
+        id=uuid4(), playlist_id=app.playlists.synchronizer.active_playlist_id, media_id=media_a.id,
         scope=BookmarkScope.PLAYLIST_MEDIA, lane_id=None, bookmark_type=BookmarkType.POINT,
         name="Intro", start_us=5_000_000, end_us=None, loop_enabled=False, repeat_count=None,
         loop_gap_ms=0, completion_action=CompletionAction.CONTINUE,
@@ -452,9 +452,9 @@ def test_loop_bookmark_requested_switches_song_when_bookmark_belongs_to_a_differ
     app.start()
     qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
 
-    media_b = app._media_resolver.resolve("file:///b.mp3")
+    media_b = app.playlists.resolver.resolve("file:///b.mp3")
     bookmark = Bookmark(
-        id=uuid4(), playlist_id=app._synchronizer.active_playlist_id, media_id=media_b.id,
+        id=uuid4(), playlist_id=app.playlists.synchronizer.active_playlist_id, media_id=media_b.id,
         scope=BookmarkScope.PLAYLIST_MEDIA, lane_id=None, bookmark_type=BookmarkType.SEGMENT,
         name="Chorus", start_us=20_000_000, end_us=30_000_000, loop_enabled=True, repeat_count=3,
         loop_gap_ms=500, completion_action=CompletionAction.STOP,
@@ -480,7 +480,7 @@ def test_loop_bookmark_requested_starts_loop_with_its_own_saved_settings(qtbot, 
     qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
 
     bookmark = Bookmark(
-        id=uuid4(), playlist_id=app._synchronizer.active_playlist_id, media_id=app._current_media_id,
+        id=uuid4(), playlist_id=app.playlists.synchronizer.active_playlist_id, media_id=app._current_media_id,
         scope=BookmarkScope.PLAYLIST_MEDIA, lane_id=None, bookmark_type=BookmarkType.SEGMENT,
         name="Chorus", start_us=20_000_000, end_us=30_000_000, loop_enabled=True, repeat_count=3,
         loop_gap_ms=500, completion_action=CompletionAction.STOP,
@@ -508,7 +508,7 @@ def test_loop_bookmark_requested_is_a_noop_for_a_point_bookmark(qtbot, running_a
     qtbot.waitUntil(lambda: app._current_media_id is not None, timeout=3000)
 
     point_bookmark = Bookmark(
-        id=uuid4(), playlist_id=app._synchronizer.active_playlist_id, media_id=app._current_media_id,
+        id=uuid4(), playlist_id=app.playlists.synchronizer.active_playlist_id, media_id=app._current_media_id,
         scope=BookmarkScope.PLAYLIST_MEDIA, lane_id=None, bookmark_type=BookmarkType.POINT,
         name="Intro", start_us=1_000_000, end_us=None, loop_enabled=False, repeat_count=None,
         loop_gap_ms=0, completion_action=CompletionAction.CONTINUE,
@@ -826,9 +826,9 @@ def test_selecting_a_bookmark_switches_the_waveform_to_its_song_without_playing(
     from bookmark_studio.domain.bookmark import Bookmark
     from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
 
-    media_b = app._media_resolver.resolve("file:///b.mp3")
+    media_b = app.playlists.resolver.resolve("file:///b.mp3")
     bookmark = Bookmark(
-        id=uuid4(), playlist_id=app._synchronizer.active_playlist_id, media_id=media_b.id,
+        id=uuid4(), playlist_id=app.playlists.synchronizer.active_playlist_id, media_id=media_b.id,
         scope=BookmarkScope.PLAYLIST_MEDIA, lane_id=None, bookmark_type=BookmarkType.POINT,
         name="Hook", start_us=3_000_000, end_us=None, loop_enabled=False, repeat_count=None,
         loop_gap_ms=0, completion_action=CompletionAction.CONTINUE,
@@ -860,11 +860,11 @@ def test_bookmark_panel_shows_bookmarks_from_every_song_in_the_playlist(qtbot, r
     )
     app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
     app.start()
-    qtbot.waitUntil(lambda: len(app._playlist_items) == 2, timeout=3000)
+    qtbot.waitUntil(lambda: len(app.playlists.items) == 2, timeout=3000)
 
-    media_a = app._media_resolver.resolve("file:///a.mp3")
-    media_b = app._media_resolver.resolve("file:///b.mp3")
-    playlist_id = app._synchronizer.active_playlist_id
+    media_a = app.playlists.resolver.resolve("file:///a.mp3")
+    media_b = app.playlists.resolver.resolve("file:///b.mp3")
+    playlist_id = app.playlists.synchronizer.active_playlist_id
     from uuid import uuid4
 
     from bookmark_studio.domain.bookmark import Bookmark
@@ -898,7 +898,7 @@ def test_bookmark_reorder_requested_persists_and_refreshes_the_panel(qtbot, runn
     from bookmark_studio.domain.bookmark import Bookmark
     from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
 
-    playlist_id = app._synchronizer.active_playlist_id
+    playlist_id = app.playlists.synchronizer.active_playlist_id
 
     def _bookmark(name, start_us):
         return Bookmark(
@@ -939,7 +939,7 @@ def test_mute_on_connect_zeroes_volume_once_vlc_is_reachable(qtbot, running_app)
     app.start()
 
     qtbot.waitUntil(lambda: adapter._volume == 0, timeout=3000)
-    assert app._mute_pending is False
+    assert app.session.mute_pending is False
 
 
 def test_swap_adapter_retargets_session_at_a_new_instance(qtbot, running_app) -> None:
@@ -961,14 +961,14 @@ def test_swap_adapter_retargets_session_at_a_new_instance(qtbot, running_app) ->
     assert app._adapter is new_adapter
     assert old_adapter.connected is False
     assert app._loop_controller._adapter is new_adapter
-    assert app._mute_pending is True
+    assert app.session.mute_pending is True
     assert app._current_media_id is None
     assert app._current_vlc_item_id is None
-    assert app._status_timer.isActive()
-    assert app._playlist_timer.isActive()
+    assert app.session.status_timer.isActive()
+    assert app.session.playlist_timer.isActive()
     # Regression: PlaylistSynchronizer.reset() existed specifically for this
     # ("VLC restarted, spec #105") but was never called anywhere.
-    assert app._synchronizer.active_playlist_id is None
+    assert app.playlists.synchronizer.active_playlist_id is None
 
     qtbot.waitUntil(lambda: new_adapter.connected is True, timeout=3000)  # connect is queued off the UI thread
     qtbot.waitUntil(lambda: new_adapter._volume == 0, timeout=3000)
@@ -990,20 +990,20 @@ def test_swapping_vlc_instance_does_not_carry_over_the_old_playlist_id(qtbot, ru
     )
     app = running_app(old_adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
     app.start()
-    qtbot.waitUntil(lambda: len(app._playlist_items) == 2, timeout=3000)
-    old_playlist_id = app._synchronizer.active_playlist_id
+    qtbot.waitUntil(lambda: len(app.playlists.items) == 2, timeout=3000)
+    old_playlist_id = app.playlists.synchronizer.active_playlist_id
     assert old_playlist_id is not None
 
     new_adapter = MockPlaybackAdapter(
         [VlcPlaylistItem(vlc_id=1, uri="file:///completely_different.mp3", name="Other Song", duration_s=30.0)]
     )
     app._swap_adapter(new_adapter, mute_on_connect=False, new_vlc_process=None)
-    assert app._synchronizer.active_playlist_id is None  # reset immediately on swap
+    assert app.playlists.synchronizer.active_playlist_id is None  # reset immediately on swap
 
-    qtbot.waitUntil(lambda: len(app._playlist_items) == 1, timeout=3000)
-    qtbot.waitUntil(lambda: app._synchronizer.active_playlist_id is not None, timeout=3000)
+    qtbot.waitUntil(lambda: len(app.playlists.items) == 1, timeout=3000)
+    qtbot.waitUntil(lambda: app.playlists.synchronizer.active_playlist_id is not None, timeout=3000)
 
-    assert app._synchronizer.active_playlist_id != old_playlist_id
+    assert app.playlists.synchronizer.active_playlist_id != old_playlist_id
 
 
 def test_prompt_vlc_launch_dialog_without_settings_shows_message_and_does_not_touch_adapter(

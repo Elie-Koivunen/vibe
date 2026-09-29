@@ -89,7 +89,7 @@ def _two_song_app(make_app, qtbot, tmp_path, **kwargs):
     app = make_app(adapter, **kwargs)
     app.start()
     qtbot.waitUntil(
-        lambda: app._current_media_id is not None and app._synchronizer.active_playlist_id is not None,
+        lambda: app._current_media_id is not None and app.playlists.synchronizer.active_playlist_id is not None,
         timeout=5000,
     )
     qtbot.waitUntil(lambda: app.window._playlist_panel._tree.topLevelItemCount() == 2, timeout=5000)
@@ -103,7 +103,7 @@ def test_loop_with_gap_resumes_by_itself(make_app, qtbot, tmp_path) -> None:
     """0.1.0: LoopController announced the gap and waited to be resumed, but nothing
     listened -- any bookmark with a Gap paused forever after its first pass."""
     app, adapter = _two_song_app(make_app, qtbot, tmp_path)
-    bookmark = _segment(app._current_media_id, app._synchronizer.active_playlist_id, end_us=200_000, loop_gap_ms=100)
+    bookmark = _segment(app._current_media_id, app.playlists.synchronizer.active_playlist_id, end_us=200_000, loop_gap_ms=100)
     app._bookmark_repository.insert(bookmark)
     iterations = []
     app._loop_controller.iteration_changed.connect(lambda remaining: iterations.append(remaining))
@@ -114,7 +114,7 @@ def test_loop_with_gap_resumes_by_itself(make_app, qtbot, tmp_path) -> None:
 
 def test_next_bookmark_completion_plays_the_next_bookmark(make_app, qtbot, tmp_path) -> None:
     app, adapter = _two_song_app(make_app, qtbot, tmp_path)
-    playlist_id = app._synchronizer.active_playlist_id
+    playlist_id = app.playlists.synchronizer.active_playlist_id
     first = _segment(app._current_media_id, playlist_id, start_us=0, end_us=150_000, repeat_count=1,
                      completion_action=CompletionAction.NEXT_BOOKMARK)
     second = _segment(app._current_media_id, playlist_id, start_us=1_000_000, end_us=1_500_000,
@@ -145,15 +145,15 @@ def test_back_to_back_bookmarks_in_different_songs_each_switch_song(make_app, qt
     song A before the next status poll skipped the switch (the app still believed A was
     playing) and looped the wrong song."""
     app, adapter = _two_song_app(make_app, qtbot, tmp_path)
-    (item_a, media_a), (item_b, media_b) = app._resolved
-    playlist_id = app._synchronizer.active_playlist_id
+    (item_a, media_a), (item_b, media_b) = app.playlists.resolved
+    playlist_id = app.playlists.synchronizer.active_playlist_id
     point_b = _segment(media_b.id, playlist_id, bookmark_type=BookmarkType.POINT, start_us=2_000_000,
                        end_us=None, loop_enabled=False)
     loop_a = _segment(media_a.id, playlist_id, start_us=1_000_000, end_us=1_300_000, repeat_count=1,
                       completion_action=CompletionAction.PAUSE)
     app._bookmark_repository.insert(point_b)
     app._bookmark_repository.insert(loop_a)
-    app._status_timer.stop()  # worst case: no poll between the two commands
+    app.session.status_timer.stop()  # worst case: no poll between the two commands
     app._on_play_bookmark_requested(point_b.id)
     app._on_play_bookmark_requested(loop_a.id)
     qtbot.waitUntil(lambda: app._loop_controller.state is LoopState.COMPLETED, timeout=3000)
@@ -231,7 +231,7 @@ def test_threaded_queue_coalesces_volume_ramps(qtbot) -> None:
 
 def test_poll_does_not_revert_text_being_typed_in_the_inspector(make_app, qtbot, tmp_path) -> None:
     app, adapter = _two_song_app(make_app, qtbot, tmp_path)
-    bookmark = _segment(app._current_media_id, app._synchronizer.active_playlist_id, name="original")
+    bookmark = _segment(app._current_media_id, app.playlists.synchronizer.active_playlist_id, name="original")
     app._bookmark_repository.insert(bookmark)
     app._refresh_bookmark_views()
     app.window._bookmark_panel.select_bookmark(bookmark.id)
@@ -244,7 +244,7 @@ def test_poll_does_not_revert_text_being_typed_in_the_inspector(make_app, qtbot,
 def test_poll_does_not_yank_a_previewed_song_back(make_app, qtbot, tmp_path) -> None:
     app, adapter = _two_song_app(make_app, qtbot, tmp_path)
     media_a = app._current_media_id
-    bookmark = _segment(media_a, app._synchronizer.active_playlist_id)
+    bookmark = _segment(media_a, app.playlists.synchronizer.active_playlist_id)
     app._bookmark_repository.insert(bookmark)
     app._refresh_bookmark_views()
     app.window._bookmark_panel.select_bookmark(bookmark.id)
@@ -331,7 +331,7 @@ def test_loop_column_edit_with_a_custom_count(qtbot) -> None:
 
 def test_tags_and_notes_are_saved_and_undoable(make_app, qtbot, tmp_path) -> None:
     app, adapter = _two_song_app(make_app, qtbot, tmp_path)
-    bookmark = _segment(app._current_media_id, app._synchronizer.active_playlist_id)
+    bookmark = _segment(app._current_media_id, app.playlists.synchronizer.active_playlist_id)
     app._bookmark_repository.insert(bookmark)
     app.window._on_bookmark_activated(bookmark.id)
     inspector = app.window._inspector
@@ -350,7 +350,7 @@ def test_tags_and_notes_are_saved_and_undoable(make_app, qtbot, tmp_path) -> Non
 
 def test_undo_refreshes_the_inspector_and_uses_the_right_old_value(make_app, qtbot, tmp_path) -> None:
     app, adapter = _two_song_app(make_app, qtbot, tmp_path)
-    bookmark = _segment(app._current_media_id, app._synchronizer.active_playlist_id, name="A")
+    bookmark = _segment(app._current_media_id, app.playlists.synchronizer.active_playlist_id, name="A")
     app._bookmark_repository.insert(bookmark)
     app.window._on_bookmark_activated(bookmark.id)
     inspector = app.window._inspector
@@ -373,7 +373,7 @@ def test_inspector_start_field_is_editable_after_loading_a_bookmark(qtbot) -> No
 
 def test_clicking_a_bookmark_without_moving_it_adds_no_undo_step(make_app, qtbot, tmp_path) -> None:
     app, adapter = _two_song_app(make_app, qtbot, tmp_path)
-    bookmark = _segment(app._current_media_id, app._synchronizer.active_playlist_id)
+    bookmark = _segment(app._current_media_id, app.playlists.synchronizer.active_playlist_id)
     app._bookmark_repository.insert(bookmark)
     count = app.window._undo_stack.count()
     app.window._on_bookmark_move_finished(bookmark.id, bookmark.start_us, bookmark.end_us)
@@ -391,8 +391,8 @@ def _db(tmp_path: Path, name: str = "t.db") -> sqlite3.Connection:
 
 def test_export_contains_every_song_and_all_fields(make_app, qtbot, tmp_path) -> None:
     app, adapter = _two_song_app(make_app, qtbot, tmp_path)
-    playlist_id = app._synchronizer.active_playlist_id
-    (_item_a, media_a), (_item_b, media_b) = app._resolved
+    playlist_id = app.playlists.synchronizer.active_playlist_id
+    (_item_a, media_a), (_item_b, media_b) = app.playlists.resolved
     app._bookmark_repository.insert(_segment(media_a.id, playlist_id, fade_in_ms=400, fade_out_ms=800, sort_index=3))
     app._bookmark_repository.insert(_segment(media_b.id, playlist_id, name="other song"))
     app.window.set_context(playlist_name="P", track_name="A", playlist_id=playlist_id,
@@ -525,12 +525,12 @@ def test_similar_playlist_asks_the_user(make_app, qtbot, tmp_path, answer) -> No
     adapter = MockPlaybackAdapter(items[:9])
     app = make_app(adapter, ask_playlist_match=lambda name, score: questions.append((name, score)) or answer)
     app.start()
-    qtbot.waitUntil(lambda: app._synchronizer.active_playlist_id is not None, timeout=5000)
-    original = app._synchronizer.active_playlist_id
+    qtbot.waitUntil(lambda: app.playlists.synchronizer.active_playlist_id is not None, timeout=5000)
+    original = app.playlists.synchronizer.active_playlist_id
     app._swap_adapter(MockPlaybackAdapter(items), mute_on_connect=False, new_vlc_process=None)
-    qtbot.waitUntil(lambda: app._synchronizer.active_playlist_id is not None, timeout=5000)
+    qtbot.waitUntil(lambda: app.playlists.synchronizer.active_playlist_id is not None, timeout=5000)
     assert len(questions) == 1
-    assert (app._synchronizer.active_playlist_id == original) is answer
+    assert (app.playlists.synchronizer.active_playlist_id == original) is answer
 
 
 # -- media identity --
@@ -601,8 +601,8 @@ def test_waveform_service_keeps_no_results_after_a_decode(tmp_path: Path, monkey
     from bookmark_studio.waveform import service as service_module
     from bookmark_studio.waveform.service import WaveformKey, WaveformService
 
-    monkeypatch.setattr(service_module, "decode_media_to_pcm",
-                        lambda *_a, **_k: np.zeros(8000, dtype="<f4").tobytes())
+    monkeypatch.setattr(service_module, "stream_media_pcm",
+                        lambda *_a, **_k: iter([np.zeros(8000, dtype="<f4").tobytes()]))
     svc = WaveformService(ffmpeg_path="ffmpeg", cache_dir=tmp_path)
     generated = svc.generate(WaveformKey(uuid4(), "fp"), "x.wav")
     assert generated.pyramid.duration_us == 1_000_000
