@@ -11,7 +11,7 @@ Runs on **Windows**, **Linux**, and **WSL (Ubuntu on Windows)**.
 
 ## Status
 
-Version 0.5.1. The core is implemented and tested: domain model, SQLite
+Version 0.6.0. The core is implemented and tested: domain model, SQLite
 persistence + migrations, media fingerprint/resolution, playlist
 recognition across sessions (similarity scoring over stored playlist
 order), the FFmpeg waveform pipeline (streamed, shown while it decodes), four
@@ -129,15 +129,36 @@ separate databases; keep them in step with a sync folder (below).
 If you pause, stop or change the song in VLC's own window while a bookmark is
 looping, the loop stops instead of resuming playback.
 
-**Volume:** the VOL fader beside the waveform works like a DJ mixer's channel fader
-(0–125 %, the amber mark is 100 %): drag it, click where it should go, scroll, or use
-the arrow keys (Page Up/Down: 10 %); a double-click returns to 100 %. It follows the
-player's volume, including fades. Playing or looping a bookmark raises a quieter (or
-muted) player to 85 %; a louder setting is kept.
+### The window
 
-**Transport:** previous bookmark, previous track, stop, play/pause, next track and
-next bookmark sit together in the middle under the waveform. Seeking by 5 seconds is
-on the Left/Right arrow keys (Playback menu).
+- **Above the waveform:** the playback buttons (previous bookmark, previous track,
+  stop, play/pause, next track, next bookmark) centred, the volume on the left and the
+  position and song length on the right. Seeking by 5 seconds is on the Left/Right
+  arrow keys (Playback menu).
+- **Beside the waveform:** View (Zoom −, Zoom +, Fit), Bookmark (Bookmark now,
+  Bookmark selection) and Selection (Play selection, Clear selection).
+- **Below the waveform:** the selection -- start, end and length -- while you drag
+  one out ([ and ] set its start and end at the playhead).
+- **Beside the bookmark list, two tabs:** **Bookmark** holds the selected bookmark's
+  settings (name, times, loop, fades, tags, notes); **Volume & EQ** the player's volume
+  and equalizer. Click the volume readout above the waveform to jump to it. The open
+  tab, the window size and the panel sizes come back on the next start.
+
+**Volume:** the VOL fader works like a DJ mixer's channel fader (0–125 %, the amber
+mark is 100 %): drag it, click where it should go, scroll, or use the arrow keys (Page
+Up/Down: 10 %); a double-click returns to 100 %. It follows the player's volume,
+including fades. Playing or looping a bookmark raises a quieter (or muted) player to
+85 %; a louder setting is kept.
+
+**Equalizer:** VLC's 10-band equalizer with a preamp and VLC's 18 presets (Flat, Rock,
+Club, Dance, ...), ±20 dB per band. Tick *Equalizer* to switch it on; while it is off
+the faders are greyed out. Pick a preset or drag the faders (a double-click returns a
+fader to neutral: 0 dB for a band, +12 dB for the preamp, which is VLC's neutral
+level). The settings belong to the player, not to a bookmark: they are remembered and
+applied to whichever player you use -- the in-app player or a VLC window (through its
+HTTP interface; they stay across song changes). The band frequencies follow the player:
+60 Hz ... 16 kHz in a VLC window, 31 Hz ... 16 kHz in the in-app player. A switched-off
+equalizer leaves a VLC window's own equalizer setting alone.
 
 **Quit** (the button next to Launch VLC…, File > Quit or Ctrl+Q) saves whatever is
 still being typed in the Inspector, the window layout and a final sync file, closes the

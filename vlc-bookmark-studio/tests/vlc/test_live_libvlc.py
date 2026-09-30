@@ -167,3 +167,19 @@ def test_live_in_app_player_loops_a_bookmark_in_another_song(qtbot, tmp_path) ->
     finally:
         app.stop()
         conn.close()
+
+
+def test_live_libvlc_equalizer(player) -> None:
+    """0.6.0: the in-app player takes the equalizer before and while playing, and uses the
+    ISO bands (31 Hz ... 16 kHz)."""
+    from bookmark_studio.domain.equalizer import ISO_BANDS_HZ, EqualizerSettings
+
+    adapter, items = player
+    assert adapter.supports_equalizer
+    assert [round(hz) for hz in adapter.equalizer_band_hz] == [round(hz) for hz in ISO_BANDS_HZ]
+    adapter.set_equalizer(EqualizerSettings.from_preset("Club"))  # before anything plays
+    adapter.goto_item(items[0].vlc_id)
+    _wait(lambda: adapter.get_status().state == "playing")
+    adapter.set_equalizer(EqualizerSettings.from_preset("Rock").with_band(0, -20.0))
+    adapter.set_equalizer(EqualizerSettings(enabled=False))
+    _wait(lambda: adapter.get_status().time_us > 0)  # still playing after all of it

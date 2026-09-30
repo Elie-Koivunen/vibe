@@ -4,6 +4,45 @@ All notable changes to VLC Bookmark Studio (called bm4vlc up to 0.3.1). Previous
 versions are kept in [`archive/`](archive/) and tagged in git
 (`vlc-bookmark-studio-v<version>`; `bm4vlc-v<version>` up to 0.3.1).
 
+## 0.6.0 — 2026-09-30
+
+### Changed: the window's layout
+
+- **The playback buttons moved above the waveform**, still centred, with the position
+  and song length (now on two lines) on the right and the volume on the left.
+- **The selection readout moved below the waveform**, where the playback buttons were,
+  and now shows the selection's length too.
+- **Zoom −, Zoom +, Fit, Bookmark now, Bookmark selection, Play selection and Clear
+  selection** moved from the row above the waveform into a column beside it, where the
+  volume fader was, in three groups (View, Bookmark, Selection). The row above the
+  waveform is gone, so the waveform is taller.
+- **The bookmark settings panel has two tabs:** *Bookmark* (the settings, as before)
+  and *Volume & EQ* (the volume fader, moved here, and the new equalizer). The volume
+  stays visible above the waveform; clicking it opens the tab. The open tab is
+  remembered.
+
+### New
+
+- **Equalizer** on the Volume & EQ tab: VLC's 10 bands and preamp, painted like the
+  volume fader, VLC's 18 presets, a Flat button and an on/off switch. It works with the
+  in-app player (libVLC) and with a VLC window (VLC's HTTP interface: checked live on
+  VLC 3.0.23 -- the equalizer has to be on before VLC accepts band changes, and it
+  stays across song changes). Settings are remembered and re-applied whenever a player
+  connects (a VLC window that restarts on the same port gets them again). The band
+  labels follow the player: a VLC window uses 60 Hz ... 16 kHz, libVLC 31 Hz ... 16 kHz.
+  The Lua bridge has no equalizer; the tab says so.
+
+### Fixed
+
+- The time ruler's labels above the waveform were dark grey on a dark theme's dark
+  background; they now use the theme's text colour.
+- In a narrow window the play/pause button could be squeezed until its symbols spilled
+  out of it.
+- The window could be made narrower than its panels need: with wider fonts (Linux's)
+  900 px was too little, and the playback buttons were drawn over each other. The
+  smallest window size now follows what the panels need (still at least 900 × 600); a
+  long playlist name in the header is cut off instead of widening the window.
+
 ## 0.5.1 — 2026-09-30
 
 ### Fixed

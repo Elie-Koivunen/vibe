@@ -1,6 +1,7 @@
 """MockPlaybackAdapter: in-memory PlaybackAdapter for tests and UI automation (spec #30)."""
 from __future__ import annotations
 
+from bookmark_studio.domain.equalizer import VLC_BANDS_HZ, EqualizerSettings
 from bookmark_studio.playback.status import PlaybackStatus, VlcPlaylistItem
 
 
@@ -18,6 +19,8 @@ class MockPlaybackAdapter:
         self._volume = 256
         self.connected = False
         self.exact_durations: dict[int, int | None] = {}
+        self.equalizer: EqualizerSettings | None = None  # the last settings applied
+        self.equalizer_calls: list[tuple[EqualizerSettings, bool]] = []
 
     def connect(self) -> None:
         self.connected = True
@@ -95,6 +98,13 @@ class MockPlaybackAdapter:
 
     def set_exact_duration(self, vlc_id: int, duration_us: int | None) -> None:
         self.exact_durations[vlc_id] = duration_us
+
+    supports_equalizer = True
+    equalizer_band_hz = VLC_BANDS_HZ
+
+    def set_equalizer(self, settings: EqualizerSettings, *, full: bool = False) -> None:
+        self.equalizer = settings
+        self.equalizer_calls.append((settings, full))
 
     # -- test-only helpers, not part of the PlaybackAdapter protocol --
 

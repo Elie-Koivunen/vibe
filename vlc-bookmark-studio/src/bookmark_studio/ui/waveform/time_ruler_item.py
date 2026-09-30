@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QLineF, QPointF, QRectF
-from PySide6.QtGui import QColor, QPainter, QPen, QTransform
+from PySide6.QtGui import QColor, QPainter, QPalette, QPen, QTransform
 from PySide6.QtWidgets import QGraphicsItem
 
 from bookmark_studio.domain.timecode import format_timecode
@@ -76,6 +76,8 @@ class TimeRulerItem(QGraphicsItem):
         # constant screen size regardless of zoom (like QGraphicsItem's
         # ItemIgnoresTransformations flag, but per-piece-of-text within one item).
         world_transform = painter.worldTransform()
+        # The theme's text colour: the fixed dark grey was unreadable on a dark theme.
+        text_color = widget.palette().color(QPalette.ColorRole.Text) if widget is not None else TEXT_COLOR
         tick_us = first_tick
         while tick_us <= end_us + interval_us:
             x = time_us_to_scene_x(tick_us)
@@ -86,7 +88,7 @@ class TimeRulerItem(QGraphicsItem):
             device_anchor = world_transform.map(QPointF(x + 2, self._height - 10))
             painter.save()
             painter.setWorldTransform(QTransform())
-            painter.setPen(QPen(TEXT_COLOR))
+            painter.setPen(QPen(text_color))
             painter.drawText(device_anchor, label)
             painter.restore()
 

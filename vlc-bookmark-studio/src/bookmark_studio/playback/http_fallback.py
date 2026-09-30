@@ -8,6 +8,7 @@ from xml.etree import ElementTree
 
 import requests
 
+from bookmark_studio.domain.equalizer import VLC_BANDS_HZ, EqualizerSettings
 from bookmark_studio.playback.status import PlaybackStatus, VlcPlaylistItem
 
 STATUS_TIMEOUT_S = 0.5
@@ -50,6 +51,7 @@ class StandardHttpPlaybackAdapter:
         self._exact_duration_us: dict[int, int] = {}
         self._last_duration_us: int | None = None  # VLC's own length for whatever was current
         self._goto_seq = 0  # bumped by every goto_item(); see get_status()
+        self._eq_sent: EqualizerSettings | None = None  # what VLC's equalizer was last set to
 
     # -- connection --
 
@@ -115,7 +117,12 @@ class StandardHttpPlaybackAdapter:
     def get_status(self) -> PlaybackStatus:
         with self._lock:
             goto_seq = self._goto_seq
-        data = self._status_json()
+        try:
+            data = self._status_json()
+        except requests.RequestException:
+            with self._lock:  # VLC may come back as a new process: resend the equalizer
+                self._eq_sent = None
+            raise
         current_id = _valid_id(data.get("currentplid"))
         vlc_duration_us = _seconds_to_us(data.get("length"))
         with self._lock:
@@ -233,6 +240,34 @@ class StandardHttpPlaybackAdapter:
     def set_volume(self, level: int) -> None:
         # VLC's built-in interface takes 0-512 (256 = 100%), not a percentage.
         self._command("volume", {"val": max(0, min(512, int(level)))})
+
+    # -- equalizer --
+
+    supports_equalizer = True
+    equalizer_band_hz = VLC_BANDS_HZ
+
+    def set_equalizer(self, settings: EqualizerSettings, *, full: bool = False) -> None:
+        """Sends only what changed since the last call, unless `full`. VLC ignores preamp
+        and band changes while its equalizer is off (checked live on 3.0.23), so it is
+        switched on first. The settings stick across stop/play and track changes."""
+        with self._lock:
+            sent = None if full else self._eq_sent
+        if not settings.enabled:
+            if sent is None or sent.enabled:
+                self._command("enableeq", {"val": 0})
+            with self._lock:
+                self._eq_sent = settings
+            return
+        resend_all = sent is None or not sent.enabled
+        if resend_all:
+            self._command("enableeq", {"val": 1})
+        if resend_all or settings.preamp_db != sent.preamp_db:  # type: ignore[union-attr]
+            self._command("preamp", {"val": f"{settings.preamp_db:.1f}"})
+        for band, db in enumerate(settings.bands_db):
+            if resend_all or db != sent.bands_db[band]:  # type: ignore[union-attr]
+                self._command("equalizer", {"band": band, "val": f"{db:.1f}"})
+        with self._lock:
+            self._eq_sent = settings
 
     def _command(self, command: str, params: dict[str, Any] | None = None) -> None:
         self._get("/requests/status.json", timeout=COMMAND_TIMEOUT_S, params={"command": command, **(params or {})})

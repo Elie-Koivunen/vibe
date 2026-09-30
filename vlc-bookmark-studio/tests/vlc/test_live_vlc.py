@@ -353,3 +353,31 @@ def test_live_lua_bridge(tmp_path, qtbot) -> None:
         adapter.disconnect()
     finally:
         live.close()
+
+
+def _vlc_equalizer(adapter: StandardHttpPlaybackAdapter) -> tuple[float, list[float]] | None:
+    """What a VLC window reports: status.json's "equalizer" is empty while it is off."""
+    eq = adapter._status_json().get("equalizer")
+    if not eq:
+        return None
+    bands = {int(key.split('"')[1]): value for key, value in eq["bands"].items()}
+    return float(eq["preamp"]), [float(bands[i]) for i in range(10)]
+
+
+def test_live_equalizer_over_http(live) -> None:
+    """0.6.0: the Volume & EQ tab drives a VLC window's equalizer, and it sticks across
+    song changes."""
+    from bookmark_studio.domain.equalizer import EqualizerSettings
+
+    adapter = live.adapter()
+    items = _wait(lambda: _playlist_ready(adapter), timeout=15)
+    rock = EqualizerSettings.from_preset("Rock")
+    adapter.set_equalizer(rock)
+    assert _wait(lambda: _vlc_equalizer(adapter)) == (rock.preamp_db, list(rock.bands_db))
+    tweaked = rock.with_band(4, -6.5).with_preamp(9.0)
+    adapter.set_equalizer(tweaked)  # only the changes are sent
+    assert _wait(lambda: _vlc_equalizer(adapter) == (9.0, list(tweaked.bands_db)))
+    adapter.goto_item(items[1].vlc_id)
+    assert _vlc_equalizer(adapter) == (9.0, list(tweaked.bands_db))
+    adapter.set_equalizer(tweaked.with_enabled(False))
+    assert _wait(lambda: _vlc_equalizer(adapter) is None)

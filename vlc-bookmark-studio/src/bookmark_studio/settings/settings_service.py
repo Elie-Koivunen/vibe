@@ -5,6 +5,8 @@ import secrets
 
 from PySide6.QtCore import QByteArray, QSettings
 
+from bookmark_studio.domain.equalizer import NEUTRAL_PREAMP_DB, EqualizerSettings
+
 ORGANIZATION = "VLCBookmarkStudio"
 APPLICATION = "VLCBookmarkStudio"
 # Where the settings lived before 0.4.0; copied over once, never removed.
@@ -15,6 +17,13 @@ DEFAULT_BRIDGE_PORT = 43119
 
 def _bytes_or_none(value: object) -> QByteArray | None:
     return value if isinstance(value, QByteArray) else None
+
+
+def _as_bool(value: object) -> bool:
+    """QSettings hands back "true"/"false" strings from .ini files (Linux)."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
 
 
 def _adopt_legacy_settings(settings: QSettings, legacy: QSettings) -> None:
@@ -49,6 +58,37 @@ class SettingsService:
 
     def set_splitter_state(self, name: str, state: QByteArray) -> None:
         self._settings.setValue(f"splitters/{name}", state)
+
+    def panel_tab(self, name: str) -> int:
+        """The tab last shown in a tabbed panel (0 if none was saved)."""
+        try:
+            return int(str(self._settings.value(f"tabs/{name}", 0)))
+        except ValueError:
+            return 0
+
+    def set_panel_tab(self, name: str, index: int) -> None:
+        self._settings.setValue(f"tabs/{name}", int(index))
+
+    # -- player --
+
+    def equalizer(self) -> EqualizerSettings:
+        """The equalizer the user set up (the player's, not a bookmark's); off by default."""
+        value = self._settings.value
+        try:
+            bands_text = str(value("equalizer/bands", "") or "")
+            bands = tuple(float(b) for b in bands_text.split(",") if b.strip())
+            return EqualizerSettings(
+                enabled=_as_bool(value("equalizer/enabled", False)),
+                preamp_db=float(str(value("equalizer/preamp", NEUTRAL_PREAMP_DB))),
+                bands_db=bands,
+            )
+        except ValueError:  # a hand-edited settings file
+            return EqualizerSettings()
+
+    def set_equalizer(self, settings: EqualizerSettings) -> None:
+        self._settings.setValue("equalizer/enabled", settings.enabled)
+        self._settings.setValue("equalizer/preamp", f"{settings.preamp_db:.1f}")
+        self._settings.setValue("equalizer/bands", ",".join(f"{b:.1f}" for b in settings.bands_db))
 
     def theme(self) -> str:
         return str(self._settings.value("appearance/theme", "system") or "system")

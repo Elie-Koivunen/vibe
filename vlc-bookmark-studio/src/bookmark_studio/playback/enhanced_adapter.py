@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 
+from bookmark_studio.domain.equalizer import VLC_BANDS_HZ, EqualizerSettings
 from bookmark_studio.playback.bridge_client import BridgeClient
 from bookmark_studio.playback.status import PlaybackStatus, VlcPlaylistItem
 
@@ -95,3 +96,10 @@ class EnhancedLuaPlaybackAdapter:
 
     def set_exact_duration(self, vlc_id: int, duration_us: int | None) -> None:
         """No-op: the bridge already reports microsecond time and length."""
+
+    # The Lua bridge has no equalizer commands.
+    supports_equalizer = False
+    equalizer_band_hz = VLC_BANDS_HZ
+
+    def set_equalizer(self, settings: EqualizerSettings, *, full: bool = False) -> None:
+        raise NotImplementedError("the Lua bridge has no equalizer")

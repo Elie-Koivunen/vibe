@@ -11,6 +11,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSpinBox,
+    QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -19,6 +21,7 @@ from bookmark_studio.domain.timecode import parse_timecode as parse_timecode  # 
 
 BUTTON_FONT_POINT_SIZE = 16
 BUTTON_MIN_SIZE = 44
+TIME_FONT_POINT_SIZE = 12
 
 
 class _UnitSpinBox(QSpinBox):
@@ -173,8 +176,8 @@ class TimecodeEdit(QWidget):
 
 class TransportBar(QWidget):
     """Playback buttons as one centred group -- previous bookmark, previous track, stop,
-    play/pause, next track, next bookmark -- with the position readout on the right.
-    (Seeking by 5 s is on the Left/Right arrow keys, Playback menu.)"""
+    play/pause, next track, next bookmark -- with the volume on the left and the position
+    readout on the right. (Seeking by 5 s is on the Left/Right arrow keys, Playback menu.)"""
 
     previous_bookmark_clicked = Signal()
     previous_track_clicked = Signal()
@@ -182,34 +185,53 @@ class TransportBar(QWidget):
     play_pause_clicked = Signal()
     next_track_clicked = Signal()
     next_bookmark_clicked = Signal()
+    volume_clicked = Signal()  # the volume readout: opens the Volume & EQ tab
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(8)
         button_font = QFont()
         button_font.setPointSize(BUTTON_FONT_POINT_SIZE)
 
-        # Equal stretch on both sides keeps the button group centred in the window,
-        # whatever the width of the time readout on the right.
+        # Equal stretch on both sides keeps the button group centred, whatever the
+        # widths of the volume (left) and time (right) readouts.
         left = QWidget(self)
         centre = QWidget(self)
         right = QWidget(self)
         group = QHBoxLayout(centre)
         group.setContentsMargins(0, 0, 0, 0)
-        group.setSpacing(8)
-        readout = QHBoxLayout(right)
+        group.setSpacing(6)
+        volume_side = QHBoxLayout(left)
+        volume_side.setContentsMargins(0, 0, 0, 0)
+        readout = QVBoxLayout(right)
         readout.setContentsMargins(0, 0, 0, 0)
-        readout.addStretch(1)
+        readout.setSpacing(0)
         layout.addWidget(left, 1)
         layout.addWidget(centre, 0)
         layout.addWidget(right, 1)
 
+        # Always visible, whichever tab is open below; a click opens Volume & EQ.
+        self.volume_button = QToolButton(left)
+        self.volume_button.setAutoRaise(True)
+        self.volume_button.setToolTip("Player volume -- click for Volume & EQ")
+        self.volume_button.clicked.connect(self.volume_clicked.emit)
+        volume_font = QFont()
+        volume_font.setBold(True)
+        self.volume_button.setFont(volume_font)
+        self.volume_button.setText("VOL 125 %")
+        self.volume_button.setMinimumWidth(self.volume_button.sizeHint().width())
+        self.set_volume_percent(100)
+        volume_side.addWidget(self.volume_button)
+        volume_side.addStretch(1)
+
         def add_button(text: str, signal: SignalInstance, *, tooltip: str) -> QPushButton:
             button = QPushButton(text, centre)
             button.setFont(button_font)
-            button.setMinimumSize(BUTTON_MIN_SIZE, BUTTON_MIN_SIZE)
+            # Never narrower than its symbols (a squeezed "▶ ⏸" spilled out of its button).
+            text_width = button.fontMetrics().horizontalAdvance(text) + 16
+            button.setMinimumSize(max(BUTTON_MIN_SIZE, text_width), BUTTON_MIN_SIZE)
             button.setToolTip(tooltip)
             button.clicked.connect(signal.emit)
             group.addWidget(button)
@@ -222,16 +244,24 @@ class TransportBar(QWidget):
         self.next_track_button = add_button("⏩", self.next_track_clicked, tooltip="Next track")
         self.next_bookmark_button = add_button("⏭", self.next_bookmark_clicked, tooltip="Next bookmark")
 
-        # Read-only: timecodes are edited on bookmarks (Inspector, bookmark list).
+        # Read-only: timecodes are edited on bookmarks (Inspector, bookmark list). Two
+        # lines (position over length) keep the row narrow enough to sit above the
+        # waveform beside the playlist.
+        time_font = QFont()
+        time_font.setPointSize(TIME_FONT_POINT_SIZE)
+        time_font.setBold(True)
         self._position_label = QLabel("00:00:00.000", right)
-        self._position_label.setFont(button_font)
+        self._position_label.setFont(time_font)
+        self._position_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._position_label.setToolTip("Playback position")
         readout.addWidget(self._position_label)
         self._duration_label = QLabel("/ 00:00:00.000", right)
-        self._duration_label.setFont(button_font)
+        self._duration_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._duration_label.setToolTip("Length of the song")
         readout.addWidget(self._duration_label)
-        # Both sides get the readout's width as their minimum, so equal stretch really
-        # centres the buttons (a wide readout would otherwise push them off centre).
-        side_width = right.sizeHint().width()
+        # Both sides get the wider side's width as their minimum, so equal stretch
+        # really centres the buttons.
+        side_width = max(left.sizeHint().width(), right.sizeHint().width())
         left.setMinimumWidth(side_width)
         right.setMinimumWidth(side_width)
 
@@ -243,6 +273,9 @@ class TransportBar(QWidget):
         self._position_label.setText(format_timecode(position_us))
         duration_text = format_timecode(duration_us) if duration_us is not None else "--:--:--.---"
         self._duration_label.setText(f"/ {duration_text}")
+
+    def set_volume_percent(self, percent: int) -> None:
+        self.volume_button.setText(f"VOL {percent} %")
 
     def set_transport_enabled(self, enabled: bool) -> None:
         """spec #137: 'VLC offline -> all VLC transport disabled'."""

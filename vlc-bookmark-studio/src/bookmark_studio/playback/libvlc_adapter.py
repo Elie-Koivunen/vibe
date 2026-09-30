@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from bookmark_studio import platform_support
+from bookmark_studio.domain.equalizer import ISO_BANDS_HZ, EqualizerSettings
 from bookmark_studio.playback.libvlc_loader import instance_failure_hint, load_vlc_module
 from bookmark_studio.playback.status import PlaybackStatus, VlcPlaylistItem
 
@@ -63,6 +64,14 @@ class LibVlcPlaybackAdapter:
         self._volume_pct = 100
         self._volume_pending = False  # set while libVLC has no audio output to apply it to
         self._closed = False
+        # libVLC's equalizer uses the ISO octave bands (31 Hz ... 16 kHz), not VLC's.
+        try:
+            count = self._vlc.libvlc_audio_equalizer_get_band_count()
+            self.equalizer_band_hz: tuple[float, ...] = tuple(
+                float(self._vlc.libvlc_audio_equalizer_get_band_frequency(i)) for i in range(count)
+            ) or ISO_BANDS_HZ
+        except Exception:  # noqa: BLE001 - a python-vlc without the equalizer API
+            self.equalizer_band_hz = ISO_BANDS_HZ
 
     # -- playlist (owned by the app) --
 
@@ -262,6 +271,28 @@ class LibVlcPlaybackAdapter:
     def _apply_volume_locked(self) -> None:
         # audio_set_volume returns -1 while there is no audio output; retried when playing.
         self._volume_pending = self._player.audio_set_volume(self._volume_pct) != 0
+
+    # -- equalizer --
+
+    supports_equalizer = True
+
+    def set_equalizer(self, settings: EqualizerSettings, *, full: bool = False) -> None:
+        """Applies at once and to every later song; it works before anything plays."""
+        with self._lock:
+            if self._closed:
+                return
+            if not settings.enabled:
+                self._player.set_equalizer(None)
+                return
+            equalizer = self._vlc.libvlc_audio_equalizer_new()
+            try:
+                self._vlc.libvlc_audio_equalizer_set_preamp(equalizer, settings.preamp_db)
+                for band, db in enumerate(settings.bands_db[: len(self.equalizer_band_hz)]):
+                    self._vlc.libvlc_audio_equalizer_set_amp_at_index(equalizer, db, band)
+                if self._vlc.libvlc_media_player_set_equalizer(self._player, equalizer) != 0:
+                    raise RuntimeError("libVLC refused the equalizer settings")
+            finally:  # libVLC copies the settings; the object can go right away
+                self._vlc.libvlc_audio_equalizer_release(equalizer)
 
     def set_exact_duration(self, vlc_id: int, duration_us: int | None) -> None:
         """No-op: libVLC already reports millisecond-precise lengths."""

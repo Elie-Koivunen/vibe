@@ -37,6 +37,7 @@ from bookmark_studio.app.vlc_launcher import (
 )
 from bookmark_studio.app.waveform_orchestrator import WaveformOrchestrator
 from bookmark_studio.domain.enums import CompletionAction, LoopState
+from bookmark_studio.domain.equalizer import VLC_BANDS_HZ, EqualizerSettings
 from bookmark_studio.domain.loop import LoopSpec
 from bookmark_studio.domain.selection import Selection
 from bookmark_studio.logging.setup import get_logger
@@ -120,7 +121,7 @@ class Application(QObject):
         self.session.mute_pending = mute_on_connect
         self.session.status_sampled.connect(self._on_status_sample)
         self.session.playlist_sampled.connect(self._on_playlist_result)
-        self.session.connection_changed.connect(lambda connected: self.window.set_connected(connected))
+        self.session.connection_changed.connect(self._on_connection_changed)
         self.playlists = PlaylistContext(
             self._media_repository, self._playlist_repository,
             ask_playlist_match or self._ask_playlist_match_dialog,
@@ -146,6 +147,10 @@ class Application(QObject):
         self._loop_controller.iteration_changed.connect(lambda _remaining: self._note_loop_segment_started())
 
         self.window = MainWindow(self._bookmark_repository, undo_stack=QUndoStack(self))
+        # The player's equalizer: the user's saved settings, applied to every player.
+        self._equalizer = settings.equalizer() if settings is not None else EqualizerSettings()
+        self.window.show_equalizer(self._equalizer)
+        self._show_equalizer_support(adapter)
 
         self._current_media_id: UUID | None = None
         self._current_vlc_item_id: int | None = None  # the song on screen
@@ -239,6 +244,7 @@ class Application(QObject):
         w.playlist_refresh_requested.connect(self._force_playlist_refresh)
         w.sync_requested.connect(self._on_sync_requested)
         w.volume_requested.connect(self._set_player_volume)
+        w.equalizer_requested.connect(self._set_equalizer)
         w.quit_requested.connect(self.quit)
 
     # -- commands --
@@ -275,6 +281,39 @@ class Application(QObject):
                 lambda: adapter.set_volume(level), coalesce_key="volume", fences=("volume",),
                 on_error=lambda exc: self._log.debug("volume change failed: %s", exc),
             )
+
+    # -- equalizer --
+
+    def _set_equalizer(self, settings: EqualizerSettings) -> None:
+        """The user changed the equalizer (Volume & EQ tab): remembered, and sent to the
+        player now. A fader drag collapses into its latest position."""
+        self._equalizer = settings
+        if self._settings is not None:
+            self._settings.set_equalizer(settings)
+        self._apply_equalizer()
+
+    def _apply_equalizer(self) -> None:
+        adapter = self._adapter
+        if not getattr(adapter, "supports_equalizer", False):
+            return
+        settings = self._equalizer
+        self.session.commands.submit(
+            lambda: adapter.set_equalizer(settings), coalesce_key="equalizer",
+            on_error=lambda exc: self._log.info("equalizer change failed: %s", exc),
+        )
+
+    def _show_equalizer_support(self, adapter: PlaybackAdapter) -> None:
+        supported = bool(getattr(adapter, "supports_equalizer", False))
+        band_hz = tuple(getattr(adapter, "equalizer_band_hz", ())) or VLC_BANDS_HZ
+        note = "" if supported else "This player has no equalizer (VLC's Lua bridge)."
+        self.window.set_equalizer_support(supported, band_hz, note)
+
+    def _on_connection_changed(self, connected: bool) -> None:
+        self.window.set_connected(connected)
+        # A player just (re)connected: give it the user's equalizer. One that is off is
+        # left alone, so a VLC window keeps an equalizer set up in VLC itself.
+        if connected and self._equalizer.enabled:
+            self._apply_equalizer()
 
     def _raise_volume_for_bookmark(self, *, fades_in: bool = False) -> None:
         """Playing a bookmark brings a quieter (or muted) player up to 85 %; a louder
@@ -389,6 +428,7 @@ class Application(QObject):
         # Forget the old player's playlist, or its bookmarks would be applied to whatever
         # the new one plays.
         self.playlists.reset(source_uri=source_uri)
+        self._show_equalizer_support(new_adapter)
         self.session.swap_adapter(new_adapter, mute_on_connect=mute_on_connect)
 
     # -- play / pause / stop --

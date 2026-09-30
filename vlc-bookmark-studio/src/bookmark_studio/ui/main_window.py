@@ -3,15 +3,18 @@ from __future__ import annotations
 
 from uuid import UUID, uuid4
 
-from PySide6.QtCore import QByteArray, Qt, Signal
+from PySide6.QtCore import QByteArray, QEvent, QSize, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QUndoStack
 from PySide6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -27,15 +30,31 @@ from bookmark_studio.app.commands import (
 )
 from bookmark_studio.domain.bookmark import Bookmark, default_bookmark_name
 from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
+from bookmark_studio.domain.equalizer import EqualizerSettings
 from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
 from bookmark_studio.ui.bookmark_panel import BookmarkPanel
 from bookmark_studio.ui.branding import APP_NAME, app_icon, logo_pixmap
-from bookmark_studio.ui.deck_fader import VolumeStrip
+from bookmark_studio.ui.deck_fader import VolumeStrip, level_to_percent
 from bookmark_studio.ui.inspector import BookmarkInspector
 from bookmark_studio.ui.playlist_panel import PlaylistPanel
 from bookmark_studio.ui.transport import TransportBar
+from bookmark_studio.ui.volume_eq_panel import VolumeEqPanel
 from bookmark_studio.ui.waveform.scene import WaveformScene
 from bookmark_studio.ui.waveform.view import WaveformView
+
+
+def _scrolling(widget: QWidget, *, vertical_only: bool = False) -> QScrollArea:
+    """`widget` in a frameless scroll area, so a small window scrolls it instead of
+    growing to fit it."""
+    area = QScrollArea()
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setWidgetResizable(True)
+    area.setWidget(widget)
+    if vertical_only:
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Room for a scroll bar, so one appearing never squeezes the buttons.
+        area.setFixedWidth(widget.sizeHint().width() + area.verticalScrollBar().sizeHint().width())
+    return area
 
 
 class MainWindow(QMainWindow):
@@ -58,6 +77,7 @@ class MainWindow(QMainWindow):
     sync_requested = Signal()  # File > Sync Now
     playlist_refresh_requested = Signal()  # Playlist > Refresh
     volume_requested = Signal(int)  # the volume fader moved (0-512, 256 = 100 %)
+    equalizer_requested = Signal(object)  # EqualizerSettings, from the Volume & EQ tab
     quit_requested = Signal()  # Quit button / File > Quit / Ctrl+Q
 
     # Player controls
@@ -103,6 +123,7 @@ class MainWindow(QMainWindow):
         self._context_names = ("No playlist", "No track")
         self._breadcrumb = QLabel("No playlist › No track › 0 bookmarks", self)
         self._breadcrumb.setStyleSheet("padding: 4px 8px; font-weight: 600;")
+        self._breadcrumb.setMinimumWidth(1)  # a long playlist name is cut off, never widens the window
 
         self._playlist_panel = PlaylistPanel(self)
         self._waveform_scene = WaveformScene()
@@ -110,79 +131,117 @@ class MainWindow(QMainWindow):
         self._bookmark_panel = BookmarkPanel(self)
         self._inspector = BookmarkInspector(self)
         self._transport = TransportBar(self)
-        self._volume = VolumeStrip(self)
-        self._volume.setToolTip("Player volume")
+        self._volume_eq = VolumeEqPanel(self)
+        self._volume: VolumeStrip = self._volume_eq.volume_strip
 
         self._build_selection_bar()
+        self._build_tool_column()
         self._build_menu_bar()
         self._build_layout()
         self._build_shortcuts()
         self._wire_signals()
+        self._fit_minimum_size()
+
+    def _fit_minimum_size(self) -> None:
+        """Never smaller than the panels need (wider fonts, e.g. Linux's, need more than
+        900 px): below that the playback buttons were squeezed on top of each other.
+        Polished first -- the style's metrics add to the widgets' minimums."""
+        self.ensurePolished()
+        minimum = self.minimumSizeHint().expandedTo(QSize(900, 600))
+        if minimum != self.minimumSize():
+            self.setMinimumSize(minimum)
+
+    def event(self, event: QEvent) -> bool:
+        handled = super().event(event)
+        # The panels' needs change after construction (style polish, texts): keep up.
+        if event.type() == QEvent.Type.LayoutRequest:
+            self._fit_minimum_size()
+        return handled
 
     # -- layout --
 
     def _build_selection_bar(self) -> None:
-        """Visible actions for a painted selection (spec #37: 'floating actions appear:
-        Bookmark / Play / Loop / Clear'). Not a floating popup -- a persistent, always
-        visible row that enables when a selection exists -- simpler and, per direct
-        user feedback ('no buttons to save highlighted areas'), the actual bug was that
-        no such control existed at all, floating or otherwise.
-        """
+        """The selection readout, under the waveform: where a drag-selection starts and
+        ends and how long it is. Read-only -- it follows the selection while it is
+        dragged or resized (see SelectionItem's handles); saved bookmarks are edited in
+        the list and the Bookmark tab."""
         self._selection_bar = QWidget(self)
         layout = QHBoxLayout(self._selection_bar)
-        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setContentsMargins(8, 2, 8, 2)
         layout.setSpacing(8)
+        self._selection_bar.setToolTip(
+            "Drag on the waveform to select; [ and ] set the start and end at the playhead"
+        )
 
         self._selection_label = QLabel("No selection", self)
+        self._selection_label.setStyleSheet("font-weight: 600;")
         layout.addWidget(self._selection_label)
-
-        # Read-only readout of the drag-selection while it is dragged or resized (see
-        # SelectionItem's handles). Saved bookmarks are edited in the list and Inspector.
         self._selection_start_label = QLabel("--:--:--.---", self)
         layout.addWidget(self._selection_start_label)
         layout.addWidget(QLabel("→", self))
         self._selection_end_label = QLabel("--:--:--.---", self)
         layout.addWidget(self._selection_end_label)
-
+        self._selection_duration_label = QLabel("", self)
+        layout.addWidget(self._selection_duration_label)
         layout.addStretch(1)
 
+    def _build_tool_column(self) -> None:
+        """View, bookmark and selection buttons in a column beside the waveform, grouped
+        (spec #37's selection actions: a persistent control that enables when a
+        selection exists, not a floating popup)."""
+        self._tool_column = QWidget(self)
+        layout = QVBoxLayout(self._tool_column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        def heading(text: str) -> None:
+            label = QLabel(text, self._tool_column)
+            label.setStyleSheet("font-size: 8pt; font-weight: 700; letter-spacing: 1px;")
+            layout.addSpacing(4)
+            layout.addWidget(label)
+
+        def button(text: str, tooltip: str, slot) -> QPushButton:  # noqa: ANN001
+            widget = QPushButton(text, self._tool_column)
+            widget.setToolTip(tooltip)
+            widget.clicked.connect(slot)
+            return widget
+
         # Visible zoom buttons: Ctrl+wheel/Ctrl+0 (spec #84) alone are too easy to miss.
-        zoom_out_button = QPushButton("Zoom −", self)
-        zoom_out_button.setToolTip("Zoom out (Ctrl+-, or scroll wheel down)")
-        zoom_out_button.clicked.connect(lambda: self._waveform_view.zoom(0.8))
-        layout.addWidget(zoom_out_button)
+        heading("VIEW")
+        zoom_row = QHBoxLayout()
+        zoom_row.setSpacing(4)
+        self._zoom_out_button = button("Zoom −", "Zoom out (Ctrl+-, or Ctrl+wheel)",
+                                       lambda: self._waveform_view.zoom(0.8))
+        self._zoom_in_button = button("Zoom +", "Zoom in (Ctrl++, or Ctrl+wheel)",
+                                      lambda: self._waveform_view.zoom(1.25))
+        zoom_row.addWidget(self._zoom_out_button)
+        zoom_row.addWidget(self._zoom_in_button)
+        layout.addLayout(zoom_row)
+        self._zoom_fit_button = button("Fit", "Show the whole song (Ctrl+0)", self._waveform_view.fit_entire_media)
+        layout.addWidget(self._zoom_fit_button)
 
-        zoom_in_button = QPushButton("Zoom +", self)
-        zoom_in_button.setToolTip("Zoom in (Ctrl++, or scroll wheel up)")
-        zoom_in_button.clicked.connect(lambda: self._waveform_view.zoom(1.25))
-        layout.addWidget(zoom_in_button)
-
-        zoom_fit_button = QPushButton("Fit", self)
-        zoom_fit_button.setToolTip("Fit entire track to the window (Ctrl+0)")
-        zoom_fit_button.clicked.connect(self._waveform_view.fit_entire_media)
-        layout.addWidget(zoom_fit_button)
-
-        # Always enabled: bookmarks the drag-selection when there is one (like Bookmark
-        # Selection), otherwise the playhead position.
-        self._bookmark_now_button = QPushButton("Bookmark Now", self)
-        self._bookmark_now_button.setToolTip(
-            "Bookmark the current selection, or the playhead position if nothing is selected"
+        # Bookmark now is always enabled: it bookmarks the drag-selection when there is
+        # one (like Bookmark selection), otherwise the playhead position.
+        heading("BOOKMARK")
+        self._bookmark_now_button = button(
+            "Bookmark now", "Bookmark the selection, or the playhead position if nothing is selected",
+            self._on_bookmark_now_clicked,
         )
-        self._bookmark_now_button.clicked.connect(self._on_bookmark_now_clicked)
         layout.addWidget(self._bookmark_now_button)
-
-        self._bookmark_selection_button = QPushButton("Bookmark Selection (Ctrl+B)", self)
-        self._bookmark_selection_button.clicked.connect(self._on_bookmark_selection_clicked)
+        self._bookmark_selection_button = button(
+            "Bookmark selection", "Bookmark the selection (Ctrl+B)", self._on_bookmark_selection_clicked,
+        )
         layout.addWidget(self._bookmark_selection_button)
 
-        # "Play" loops the selection, like a new bookmark (loop enabled by default).
-        self._loop_selection_button = QPushButton("Play", self)
-        self._loop_selection_button.clicked.connect(self._on_loop_selection_clicked)
+        # "Play selection" loops the selection, like a new bookmark (loop on by default).
+        heading("SELECTION")
+        self._loop_selection_button = button("Play selection", "Loop the selection", self._on_loop_selection_clicked)
         layout.addWidget(self._loop_selection_button)
-
-        self._clear_selection_button = QPushButton("Clear", self)
-        self._clear_selection_button.clicked.connect(lambda: self._waveform_scene.clear_selection())
+        self._clear_selection_button = button(
+            "Clear selection", "Remove the selection", lambda: self._waveform_scene.clear_selection(),
+        )
         layout.addWidget(self._clear_selection_button)
+        layout.addStretch(1)
 
         self._set_selection_buttons_enabled(False)
 
@@ -193,22 +252,38 @@ class MainWindow(QMainWindow):
             button.setEnabled(enabled)
 
     def _build_layout(self) -> None:
-        # The volume fader stands beside the waveform, like a channel fader on a deck.
+        # The deck, top to bottom: transport, waveform with its tool column, selection.
         deck = QWidget(self)
-        deck_layout = QHBoxLayout(deck)
+        deck_layout = QVBoxLayout(deck)
         deck_layout.setContentsMargins(0, 0, 0, 0)
-        deck_layout.setSpacing(6)
-        deck_layout.addWidget(self._waveform_view, 1)
-        deck_layout.addWidget(self._volume)
+        deck_layout.setSpacing(4)
+        deck_layout.addWidget(self._transport)
+        waveform_row = QHBoxLayout()
+        waveform_row.setSpacing(6)
+        waveform_row.addWidget(self._waveform_view, 1)
+        waveform_row.addWidget(_scrolling(self._tool_column, vertical_only=True))
+        deck_layout.addLayout(waveform_row, 1)
+        deck_layout.addWidget(self._selection_bar)
 
         top_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         top_splitter.addWidget(self._playlist_panel)
         top_splitter.addWidget(deck)
         top_splitter.setStretchFactor(1, 1)
 
+        # Beside the bookmark list: the selected bookmark's settings, and the player's
+        # volume and equalizer. Scroll areas keep a short window usable.
+        self._side_tabs = QTabWidget(self)
+        self._side_tabs.setDocumentMode(True)
+        self._side_tabs.addTab(_scrolling(self._inspector), "Bookmark")
+        self._side_tabs.addTab(_scrolling(self._volume_eq), "Volume && EQ")
+        self._side_tabs.setTabToolTip(0, "The selected bookmark's settings")
+        self._side_tabs.setTabToolTip(1, "The player's volume and equalizer")
+
         bottom_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         bottom_splitter.addWidget(self._bookmark_panel)
-        bottom_splitter.addWidget(self._inspector)
+        bottom_splitter.addWidget(self._side_tabs)
+        bottom_splitter.setStretchFactor(0, 1)
+        bottom_splitter.setStretchFactor(1, 1)
         self._splitters = {"top": top_splitter, "bottom": bottom_splitter}
 
         header = QHBoxLayout()
@@ -220,12 +295,13 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setSpacing(6)
         layout.addLayout(header)
-        layout.addWidget(self._selection_bar)
         layout.addWidget(top_splitter, 2)
-        # The transport sits directly under the waveform it controls.
-        layout.addWidget(self._transport)
         layout.addWidget(bottom_splitter, 1)
         self.setCentralWidget(central)
+
+    def show_side_tab(self, name: str) -> None:
+        """"bookmark" or "volume": brings that tab of the side panel to the front."""
+        self._side_tabs.setCurrentIndex(1 if name == "volume" else 0)
 
     def _build_menu_bar(self) -> None:
         menu_bar = self.menuBar()
@@ -345,6 +421,9 @@ class MainWindow(QMainWindow):
         self._playlist_panel.launch_vlc_requested.connect(self.launch_vlc_requested.emit)
         self._playlist_panel.quit_requested.connect(self.quit_requested.emit)
         self._volume.volume_changed.connect(self.volume_requested.emit)
+        self._volume.volume_changed.connect(lambda level: self._transport.set_volume_percent(level_to_percent(level)))
+        self._volume_eq.equalizer_changed.connect(self.equalizer_requested.emit)
+        self._transport.volume_clicked.connect(self._on_volume_readout_clicked)
         self._playlist_panel.item_selected.connect(self.playlist_item_selected.emit)
         self._playlist_panel.item_double_clicked.connect(self.playlist_item_double_clicked.emit)
         self._playlist_panel.follow_vlc_toggled.connect(self.follow_player_toggled.emit)
@@ -363,11 +442,29 @@ class MainWindow(QMainWindow):
     # -- player display (called by the composition root) --
 
     def show_volume(self, level: int) -> None:
-        """The player's volume (0-512) on the fader; ignored while the user drags it."""
+        """The player's volume (0-512) on the fader and the transport's readout; the
+        fader ignores it while the user drags it."""
         self._volume.set_level(level)
+        self._transport.set_volume_percent(level_to_percent(self._volume.level()))
 
     def volume_level(self) -> int:
         return self._volume.level()
+
+    def _on_volume_readout_clicked(self) -> None:
+        self.show_side_tab("volume")
+        self._volume_eq.focus_volume()
+
+    def show_equalizer(self, settings: EqualizerSettings) -> None:
+        """Saved equalizer settings on the Volume & EQ tab (no equalizer_requested)."""
+        self._volume_eq.set_equalizer(settings)
+
+    def equalizer_settings(self) -> EqualizerSettings:
+        return self._volume_eq.equalizer()
+
+    def set_equalizer_support(self, supported: bool, band_hz: tuple[float, ...], note: str = "") -> None:
+        """What the connected player can do: its band frequencies, or no equalizer."""
+        self._volume_eq.set_band_frequencies(band_hz)
+        self._volume_eq.set_equalizer_supported(supported, note)
 
     # -- session state --
 
@@ -379,6 +476,7 @@ class MainWindow(QMainWindow):
         settings.set_window_geometry(self.saveGeometry())
         for name, splitter in self._splitters.items():
             settings.set_splitter_state(name, splitter.saveState())
+        settings.set_panel_tab("side", self._side_tabs.currentIndex())
 
     def restore_layout(self, settings) -> None:  # noqa: ANN001
         geometry = settings.window_geometry()
@@ -388,6 +486,9 @@ class MainWindow(QMainWindow):
             state = settings.splitter_state(name)
             if isinstance(state, QByteArray) and not state.isEmpty():
                 splitter.restoreState(state)
+        tab = settings.panel_tab("side")
+        if 0 <= tab < self._side_tabs.count():
+            self._side_tabs.setCurrentIndex(tab)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
         # Closing the window is quitting too: keep what is being typed.
@@ -476,17 +577,16 @@ class MainWindow(QMainWindow):
 
     def _on_selection_changed(self, selection: object) -> None:
         from bookmark_studio.domain.selection import Selection
-        from bookmark_studio.domain.timecode import format_timecode
 
         if isinstance(selection, Selection):
-            self._selection_label.setText(f"Selection ({format_timecode(selection.duration_us)})")
-            self._selection_start_label.setText(format_timecode(selection.start_us))
-            self._selection_end_label.setText(format_timecode(selection.end_us))
+            self._selection_label.setText("Selection")
+            self._show_selection_range(selection.start_us, selection.end_us)
             self._set_selection_buttons_enabled(True)
         else:
             self._selection_label.setText("No selection")
             self._selection_start_label.setText("--:--:--.---")
             self._selection_end_label.setText("--:--:--.---")
+            self._selection_duration_label.setText("")
             self._set_selection_buttons_enabled(False)
         # Mirrors the selection in the Inspector's Start/End fields whenever no
         # bookmark is loaded there (see
@@ -499,11 +599,16 @@ class MainWindow(QMainWindow):
         continuously during the drag, unlike
         _on_selection_changed (which only fires once the drag settles)."""
         from bookmark_studio.domain.selection import Selection
+
+        self._show_selection_range(start_us, end_us)
+        self._inspector.show_selection(Selection(start_us=start_us, end_us=end_us))
+
+    def _show_selection_range(self, start_us: int, end_us: int) -> None:
         from bookmark_studio.domain.timecode import format_timecode
 
         self._selection_start_label.setText(format_timecode(start_us))
         self._selection_end_label.setText(format_timecode(end_us))
-        self._inspector.show_selection(Selection(start_us=start_us, end_us=end_us))
+        self._selection_duration_label.setText(f"   length {format_timecode(max(0, end_us - start_us))}")
 
     def _on_bookmark_now_clicked(self) -> None:
         if self._waveform_scene.selection() is not None:
