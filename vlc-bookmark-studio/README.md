@@ -1,5 +1,7 @@
 # VLC Bookmark Studio
 
+<img src="src/bookmark_studio/resources/icon.svg" alt="VLC Bookmark Studio logo" width="96" align="right">
+
 A playlist-aware visual bookmarking, segment-selection, navigation and
 looping system for VLC Media Player. See [PROJECT_SPEC.md](PROJECT_SPEC.md)
 for the full design and engineering specification (198 sections), and
@@ -9,7 +11,7 @@ Runs on **Windows**, **Linux**, and **WSL (Ubuntu on Windows)**.
 
 ## Status
 
-Version 0.4.0. The core is implemented and tested: domain model, SQLite
+Version 0.5.0. The core is implemented and tested: domain model, SQLite
 persistence + migrations, media fingerprint/resolution, playlist
 recognition across sessions (similarity scoring over stored playlist
 order), the FFmpeg waveform pipeline (streamed, shown while it decodes), four
@@ -126,6 +128,21 @@ separate databases; keep them in step with a sync folder (below).
 
 If you pause, stop or change the song in VLC's own window while a bookmark is
 looping, the loop stops instead of resuming playback.
+
+**Volume:** the VOL fader beside the waveform works like a DJ mixer's channel fader
+(0–125 %, the amber mark is 100 %): drag it, click where it should go, scroll, or use
+the arrow keys (Page Up/Down: 10 %); a double-click returns to 100 %. It follows the
+player's volume, including fades. Playing or looping a bookmark raises a quieter (or
+muted) player to 85 %; a louder setting is kept.
+
+**Transport:** previous bookmark, previous track, stop, play/pause, next track and
+next bookmark sit together in the middle under the waveform. Seeking by 5 seconds is
+on the Left/Right arrow keys (Playback menu).
+
+**Quit** (the button next to Launch VLC…, File > Quit or Ctrl+Q) saves whatever is
+still being typed in the Inspector, the window layout and a final sync file, closes the
+VLC this app launched (one you attached to keeps running), and exits. Bookmarks
+themselves are saved the moment you change them. Closing the window does the same.
 
 ## Command line
 
@@ -296,7 +313,8 @@ src/bookmark_studio/   application package (see PROJECT_SPEC.md #116)
 vlc/bookmarkstudio.lua thin VLC Lua HTTP bridge (spec #18-#27)
 migrations/            SQLite schema migrations (spec #126), also packaged into the wheel
 tests/                 unit (offscreen Qt) and vlc (live, opt-in)
-packaging/             PyInstaller spec, build script, icon, third-party notices
+packaging/             PyInstaller spec, build script, third-party notices
+src/bookmark_studio/resources/icon.svg  the logo (window, taskbar, dialogs, executables)
 archive/               every previous version, unchanged
 ```
 

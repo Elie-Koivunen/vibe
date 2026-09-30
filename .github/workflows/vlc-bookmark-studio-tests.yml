@@ -59,7 +59,7 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then VPY="$RUNNER_TEMP/venv/Scripts/python"; else VPY="$RUNNER_TEMP/venv/bin/python"; fi
           "$VPY" -m pip install "$RUNNER_TEMP"/wheel/*.whl
           cd "$RUNNER_TEMP"
-          "$VPY" -c "from pathlib import Path; from bookmark_studio.bootstrap import open_database; from bookmark_studio.persistence.migrations import current_version; c = open_database(Path('ci.db')); v = current_version(c); print('schema version', v); assert v >= 5"
+          "$VPY" -c "from pathlib import Path; from bookmark_studio.bootstrap import open_database; from bookmark_studio.persistence.migrations import current_version; c = open_database(Path('ci.db')); v = current_version(c); print('schema version', v); assert v >= 5; from bookmark_studio.ui.branding import logo_svg; assert logo_svg().lstrip().startswith(b'<svg'), 'logo missing from the wheel'"
 
   live-vlc:
     # Real VLC: the HTTP interface, the Lua bridge (Linux; needs a private VLC data dir)

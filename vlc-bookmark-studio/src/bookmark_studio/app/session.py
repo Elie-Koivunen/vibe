@@ -152,6 +152,10 @@ class PlaybackSession(QObject):
     def is_stale(self, issued_ns: int) -> bool:
         return issued_ns < self.commands.fence_ns("position") + STALE_SAMPLE_MARGIN_NS
 
+    def is_volume_stale(self, issued_ns: int) -> bool:
+        """The sample may predate our last volume change (the fader would jump back)."""
+        return issued_ns < self.commands.fence_ns("volume") + STALE_SAMPLE_MARGIN_NS
+
     # -- polling --
 
     def poll_status(self) -> None:
@@ -175,10 +179,8 @@ class PlaybackSession(QObject):
         self._status_inflight = False
         issued_ns, status = unpack_sample(payload)
         self._set_connected(True)
-        if self.mute_pending:
-            self.mute_pending = False
-            adapter = self._adapter
-            self.submit(lambda: adapter.set_volume(0), fences=("volume",))
+        # mute_pending is acted on by the listener (Application), which also has to tell
+        # the loop controller that the listening volume is now 0.
         self.status_sampled.emit(issued_ns, status)
 
     def _on_status_failed(self, message: str) -> None:

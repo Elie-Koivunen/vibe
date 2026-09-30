@@ -1,10 +1,14 @@
 """WaveformItem: single custom-painted item selecting the nearest pyramid level (spec #112)."""
 from __future__ import annotations
 
-from PySide6.QtCore import QLineF, QPointF, QRectF
-from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF
+from typing import Any
+
+import numpy as np
+from PySide6.QtCore import QLineF, QPoint, QRect, QRectF, Qt
+from PySide6.QtGui import QBrush, QColor, QPainter, QPalette, QPen, QPolygon
 from PySide6.QtWidgets import QGraphicsItem
 
+from bookmark_studio.waveform.peaks import reduce_peaks
 from bookmark_studio.waveform.pyramid import WaveformPyramid
 
 WAVEFORM_FILL = QColor(90, 140, 200, 190)
@@ -12,13 +16,32 @@ WAVEFORM_OUTLINE = QColor(50, 100, 160)
 CENTER_LINE_COLOR = QColor(160, 180, 200)
 
 
-def time_us_to_scene_x(time_us: int) -> float:
-    """1 scene X unit = 1 millisecond (spec #39)."""
+def time_us_to_scene_x(time_us: Any) -> Any:
+    """1 scene X unit = 1 millisecond (spec #39). Also maps a numpy array element-wise."""
     return time_us / 1000.0
 
 
 def scene_x_to_time_us(x: float) -> int:
     return max(0, round(x * 1000))
+
+
+def _over(color: QColor, background: QColor) -> QColor:
+    """`color` (possibly translucent) blended onto `background`, as an opaque colour."""
+    alpha = color.alphaF()
+    return QColor(
+        round(color.red() * alpha + background.red() * (1 - alpha)),
+        round(color.green() * alpha + background.green() * (1 - alpha)),
+        round(color.blue() * alpha + background.blue() * (1 - alpha)),
+    )
+
+
+def cosmetic_pen(color: QColor, width: float = 1.0) -> QPen:
+    """A pen `width` screen pixels wide at any zoom. A plain QPen's width is in scene
+    units (1 unit = 1 ms): zoomed out it's thinner than a pixel and vanishes; zoomed in
+    Qt strokes it dozens of pixels wide, which made every waveform repaint ~50 ms."""
+    pen = QPen(color, width)
+    pen.setCosmetic(True)
+    return pen
 
 
 def device_pixel_width(painter: QPainter, exposed_scene_rect) -> int:
@@ -40,15 +63,19 @@ class WaveformItem(QGraphicsItem):
 
     `paint()` recomputes which pyramid level to draw from the currently exposed
     rectangle, so panning/zooming never has to rebuild the scene (spec #112). Renders
-    as a single filled min/max envelope polygon (Audacity/Peaks.js style) rather than
-    discrete per-column lines.
+    as a filled min/max envelope (Audacity/Peaks.js style), one column per pixel.
     """
 
     def __init__(self, pyramid: WaveformPyramid, duration_us: int, height: float) -> None:
         super().__init__()
+        self.setZValue(-10)  # beneath the bookmarks and the selection (it is opaque)
         self._pyramid = pyramid
         self._duration_us = duration_us
         self._height = height
+        # Without this flag Qt passes the item's *whole* rect as option.exposedRect, and
+        # every repaint drew the entire song at the current zoom's detail level --
+        # hundreds of ms (seconds when zoomed in) per zoom step.
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemUsesExtendedStyleOption, True)
 
     def set_pyramid(self, pyramid: WaveformPyramid, duration_us: int) -> None:
         self.prepareGeometryChange()
@@ -70,24 +97,45 @@ class WaveformItem(QGraphicsItem):
         level = self._pyramid.best_level(max(1, end_us - start_us), pixel_width)
         peaks = level.slice(start_us, end_us, self._pyramid.sample_rate)
         if peaks.shape[0] == 0:
-            painter.setPen(QPen(CENTER_LINE_COLOR, 1))
+            painter.setPen(cosmetic_pen(CENTER_LINE_COLOR))
             painter.drawLine(QLineF(exposed.left(), mid_y, exposed.right(), mid_y))
             return
 
         us_per_peak = level.us_per_peak(self._pyramid.sample_rate)
+        first_index = max(0, int(start_us / us_per_peak))
+        # The chosen level has 1-4 peaks per screen pixel: merge them to one min/max
+        # column per pixel (numpy does the per-peak work, not a Python loop).
+        group = max(1, peaks.shape[0] // max(1, pixel_width))
+        if group > 1:
+            peaks = reduce_peaks(peaks, group)
+        step_us = us_per_peak * group
+        xs = time_us_to_scene_x(first_index * us_per_peak + np.arange(peaks.shape[0] + 1) * step_us)
         amplitude = self._height / 2.0
-        base_time_us = start_us - (start_us % max(1, int(us_per_peak)))
+        tops = mid_y - peaks[:, 1] * amplitude
+        bottoms = mid_y - peaks[:, 0] * amplitude
 
-        top_points: list[QPointF] = []
-        bottom_points: list[QPointF] = []
-        for index in range(peaks.shape[0]):
-            peak_time_us = base_time_us + index * us_per_peak
-            x = time_us_to_scene_x(int(peak_time_us))
-            minimum, maximum = float(peaks[index, 0]), float(peaks[index, 1])
-            top_points.append(QPointF(x, mid_y - maximum * amplitude))
-            bottom_points.append(QPointF(x, mid_y - minimum * amplitude))
-
-        polygon = QPolygonF(top_points + list(reversed(bottom_points)))
+        # Drawn in whole screen pixels, as one opaque rectangle per column. Measured
+        # (1400 px wide view): a filled polygon costs ~0.3 s -- Qt's polygon filler
+        # is quadratic in zig-zag edges and a waveform zig-zags at every pixel -- and
+        # any translucent fill ~35 ms; opaque pixel-aligned rectangles ~2 ms.
+        transform = painter.worldTransform()
+        dev_x = np.floor(xs * transform.m11() + transform.dx()).astype(np.int64)
+        dev_top = np.floor(tops * transform.m22() + transform.dy()).astype(np.int64)
+        dev_bottom = np.ceil(bottoms * transform.m22() + transform.dy()).astype(np.int64)
+        widths = np.maximum(dev_x[1:] - dev_x[:-1], 1)
+        heights = np.maximum(dev_bottom - dev_top, 1)
+        background = widget.palette().color(QPalette.ColorRole.Base) if widget is not None else QColor(Qt.GlobalColor.white)
+        painter.save()
+        painter.resetTransform()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(_over(WAVEFORM_FILL, background)))
+        lefts = dev_x[:-1].tolist()
+        painter.drawRects([
+            QRect(left, top, width, height)
+            for left, top, width, height in zip(lefts, dev_top.tolist(), widths.tolist(), heights.tolist())
+        ])
+        centres = (dev_x[:-1] + widths // 2).tolist()
         painter.setPen(QPen(WAVEFORM_OUTLINE, 1))
-        painter.setBrush(QBrush(WAVEFORM_FILL))
-        painter.drawPolygon(polygon)
+        painter.drawPolyline(QPolygon([QPoint(x, y) for x, y in zip(centres, dev_top.tolist())]))
+        painter.drawPolyline(QPolygon([QPoint(x, y) for x, y in zip(centres, dev_bottom.tolist())]))
+        painter.restore()

@@ -221,9 +221,13 @@ def main(argv: list[str] | None = None) -> int:
     log.info("VLC Bookmark Studio %s on %s (WSL: %s, packaged: %s)", __version__, sys.platform,
              platform_support.is_wsl(), platform_support.is_frozen())
 
+    from bookmark_studio.ui.branding import APP_NAME, app_icon, set_windows_app_id
+
+    set_windows_app_id()  # before the first window: our icon in the Windows taskbar
     qt_app = QApplication([argv[0]])  # our options are not Qt's
-    qt_app.setApplicationName("VLC Bookmark Studio")
+    qt_app.setApplicationName(APP_NAME)
     qt_app.setApplicationVersion(__version__)
+    qt_app.setWindowIcon(app_icon())  # every window and dialog, the taskbar, Alt+Tab
     if args.data_dir:  # portable: settings next to the data instead of the registry / ~/.config
         settings = SettingsService(QSettings(str(platform_support.user_data_dir() / "settings.ini"),
                                              QSettings.Format.IniFormat))
@@ -275,6 +279,10 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         application.stop()
         settings.sync()
+        try:  # fold the write-ahead log into the database file: one self-contained file
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error:
+            log.exception("WAL checkpoint failed")
         conn.close()
 
 

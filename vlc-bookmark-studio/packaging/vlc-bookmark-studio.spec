@@ -16,6 +16,7 @@ NAME = "VLCBookmarkStudio" if sys.platform == "win32" else "vlc-bookmark-studio"
 
 datas = [
     (str(ROOT / "migrations"), "bookmark_studio/migrations"),
+    (str(ROOT / "src" / "bookmark_studio" / "resources"), "bookmark_studio/resources"),
     (str(ROOT / "vlc" / "bookmarkstudio.lua"), "bookmark_studio/vlc"),
 ]
 

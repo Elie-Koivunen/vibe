@@ -195,6 +195,16 @@ class BookmarkInspector(QWidget):
         finally:
             self._loading = False
 
+    def commit_pending(self) -> None:
+        """Saves text still being typed (name, times, tags, notes) -- before quitting."""
+        if self._bookmark is None or self._loading:
+            return
+        self._on_name_committed()
+        self._on_start_committed()
+        self._on_end_committed()
+        self._on_tags_committed()
+        self._on_notes_committed()
+
     def _flush_notes(self) -> None:
         """Commits notes typed into the field before the inspector switches away."""
         if self._bookmark is not None and not self._loading:

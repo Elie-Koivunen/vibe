@@ -7,7 +7,6 @@ from PySide6.QtCore import Qt, Signal, SignalInstance
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -173,64 +172,63 @@ class TimecodeEdit(QWidget):
 
 
 class TransportBar(QWidget):
+    """Playback buttons as one centred group -- previous bookmark, previous track, stop,
+    play/pause, next track, next bookmark -- with the position readout on the right.
+    (Seeking by 5 s is on the Left/Right arrow keys, Playback menu.)"""
+
     previous_bookmark_clicked = Signal()
     previous_track_clicked = Signal()
-    seek_back_clicked = Signal()
     stop_clicked = Signal()
     play_pause_clicked = Signal()
-    seek_forward_clicked = Signal()
     next_track_clicked = Signal()
     next_bookmark_clicked = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        # A grid keeps fields in the same column aligned without hand-tuned spacers.
-        layout = QGridLayout(self)
-        # Breathing room between buttons (the default grid packs them edge to edge).
+        layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 6, 8, 6)
-        layout.setHorizontalSpacing(8)
-        layout.setVerticalSpacing(6)
+        layout.setSpacing(8)
         button_font = QFont()
         button_font.setPointSize(BUTTON_FONT_POINT_SIZE)
 
-        def add_button(text: str, signal: SignalInstance, *, tooltip: str, col: int) -> QPushButton:
-            button = QPushButton(text, self)
+        # Equal stretch on both sides keeps the button group centred in the window,
+        # whatever the width of the time readout on the right.
+        left = QWidget(self)
+        centre = QWidget(self)
+        right = QWidget(self)
+        group = QHBoxLayout(centre)
+        group.setContentsMargins(0, 0, 0, 0)
+        group.setSpacing(8)
+        readout = QHBoxLayout(right)
+        readout.setContentsMargins(0, 0, 0, 0)
+        readout.addStretch(1)
+        layout.addWidget(left, 1)
+        layout.addWidget(centre, 0)
+        layout.addWidget(right, 1)
+
+        def add_button(text: str, signal: SignalInstance, *, tooltip: str) -> QPushButton:
+            button = QPushButton(text, centre)
             button.setFont(button_font)
             button.setMinimumSize(BUTTON_MIN_SIZE, BUTTON_MIN_SIZE)
             button.setToolTip(tooltip)
             button.clicked.connect(signal.emit)
-            layout.addWidget(button, 0, col)
+            group.addWidget(button)
             return button
 
-        # Large media glyphs. Play/Pause/Stop and the seeks around them form a centred
-        # cluster; track and bookmark navigation sit on the outer edges.
-        self.previous_bookmark_button = add_button(
-            "⏮", self.previous_bookmark_clicked, tooltip="Previous bookmark", col=0
-        )
-        self.previous_track_button = add_button("⏪", self.previous_track_clicked, tooltip="Previous track", col=1)
-
-        layout.setColumnStretch(2, 1)
-
-        self.seek_back_button = add_button("−5s", self.seek_back_clicked, tooltip="Seek back 5 seconds", col=3)
-        self.stop_button = add_button("⏹", self.stop_clicked, tooltip="Stop", col=4)
-        self.play_pause_button = add_button("▶ ⏸", self.play_pause_clicked, tooltip="Play / Pause", col=5)
-        self.seek_forward_button = add_button(
-            "+5s", self.seek_forward_clicked, tooltip="Seek forward 5 seconds", col=6
-        )
-
-        layout.setColumnStretch(7, 1)
-
-        self.next_track_button = add_button("⏩", self.next_track_clicked, tooltip="Next track", col=8)
-        self.next_bookmark_button = add_button("⏭", self.next_bookmark_clicked, tooltip="Next bookmark", col=9)
+        self.previous_bookmark_button = add_button("⏮", self.previous_bookmark_clicked, tooltip="Previous bookmark")
+        self.previous_track_button = add_button("⏪", self.previous_track_clicked, tooltip="Previous track")
+        self.stop_button = add_button("⏹", self.stop_clicked, tooltip="Stop")
+        self.play_pause_button = add_button("▶ ⏸", self.play_pause_clicked, tooltip="Play / Pause (Space)")
+        self.next_track_button = add_button("⏩", self.next_track_clicked, tooltip="Next track")
+        self.next_bookmark_button = add_button("⏭", self.next_bookmark_clicked, tooltip="Next bookmark")
 
         # Read-only: timecodes are edited on bookmarks (Inspector, bookmark list).
-        self._position_label = QLabel("00:00:00.000", self)
+        self._position_label = QLabel("00:00:00.000", right)
         self._position_label.setFont(button_font)
-        layout.addWidget(self._position_label, 0, 10)
-
-        self._duration_label = QLabel("/ 00:00:00.000", self)
+        readout.addWidget(self._position_label)
+        self._duration_label = QLabel("/ 00:00:00.000", right)
         self._duration_label.setFont(button_font)
-        layout.addWidget(self._duration_label, 0, 11)
+        readout.addWidget(self._duration_label)
 
         # Disabled until a player is connected, so a click can't silently do nothing.
         # MainWindow.set_connected() drives this and PlaylistPanel's indicator together.
@@ -244,8 +242,7 @@ class TransportBar(QWidget):
     def set_transport_enabled(self, enabled: bool) -> None:
         """spec #137: 'VLC offline -> all VLC transport disabled'."""
         for button in (
-            self.previous_track_button, self.seek_back_button, self.stop_button,
-            self.play_pause_button, self.seek_forward_button, self.next_track_button,
+            self.previous_track_button, self.stop_button, self.play_pause_button, self.next_track_button,
         ):
             button.setEnabled(enabled)
 

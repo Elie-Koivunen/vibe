@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from uuid import UUID, uuid4
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QByteArray, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QUndoStack
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -29,6 +29,8 @@ from bookmark_studio.domain.bookmark import Bookmark, default_bookmark_name
 from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
 from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
 from bookmark_studio.ui.bookmark_panel import BookmarkPanel
+from bookmark_studio.ui.branding import APP_NAME, app_icon, logo_pixmap
+from bookmark_studio.ui.deck_fader import VolumeStrip
 from bookmark_studio.ui.inspector import BookmarkInspector
 from bookmark_studio.ui.playlist_panel import PlaylistPanel
 from bookmark_studio.ui.transport import TransportBar
@@ -55,6 +57,8 @@ class MainWindow(QMainWindow):
     project_imported = Signal()  # a .vlcbmk was merged in; playlist recognition may change
     sync_requested = Signal()  # File > Sync Now
     playlist_refresh_requested = Signal()  # Playlist > Refresh
+    volume_requested = Signal(int)  # the volume fader moved (0-512, 256 = 100 %)
+    quit_requested = Signal()  # Quit button / File > Quit / Ctrl+Q
 
     # Player controls
     play_pause_requested = Signal()
@@ -79,7 +83,8 @@ class MainWindow(QMainWindow):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("VLC Bookmark Studio")
+        self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(app_icon())
         self.setMinimumSize(900, 600)  # spec #132
 
         self._bookmark_repository = bookmark_repository
@@ -92,6 +97,10 @@ class MainWindow(QMainWindow):
         self._pushing = False
         self._undo_stack.indexChanged.connect(self._on_undo_index_changed)
 
+        self._logo = QLabel(self)
+        self._logo.setPixmap(logo_pixmap(28))
+        self._logo.setToolTip(APP_NAME)
+        self._context_names = ("No playlist", "No track")
         self._breadcrumb = QLabel("No playlist › No track › 0 bookmarks", self)
         self._breadcrumb.setStyleSheet("padding: 4px 8px; font-weight: 600;")
 
@@ -101,6 +110,8 @@ class MainWindow(QMainWindow):
         self._bookmark_panel = BookmarkPanel(self)
         self._inspector = BookmarkInspector(self)
         self._transport = TransportBar(self)
+        self._volume = VolumeStrip(self)
+        self._volume.setToolTip("Player volume")
 
         self._build_selection_bar()
         self._build_menu_bar()
@@ -182,19 +193,33 @@ class MainWindow(QMainWindow):
             button.setEnabled(enabled)
 
     def _build_layout(self) -> None:
+        # The volume fader stands beside the waveform, like a channel fader on a deck.
+        deck = QWidget(self)
+        deck_layout = QHBoxLayout(deck)
+        deck_layout.setContentsMargins(0, 0, 0, 0)
+        deck_layout.setSpacing(6)
+        deck_layout.addWidget(self._waveform_view, 1)
+        deck_layout.addWidget(self._volume)
+
         top_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         top_splitter.addWidget(self._playlist_panel)
-        top_splitter.addWidget(self._waveform_view)
+        top_splitter.addWidget(deck)
         top_splitter.setStretchFactor(1, 1)
 
         bottom_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         bottom_splitter.addWidget(self._bookmark_panel)
         bottom_splitter.addWidget(self._inspector)
+        self._splitters = {"top": top_splitter, "bottom": bottom_splitter}
+
+        header = QHBoxLayout()
+        header.setContentsMargins(4, 0, 0, 0)
+        header.addWidget(self._logo)
+        header.addWidget(self._breadcrumb, 1)
 
         central = QWidget(self)
         layout = QVBoxLayout(central)
         layout.setSpacing(6)
-        layout.addWidget(self._breadcrumb)
+        layout.addLayout(header)
         layout.addWidget(self._selection_bar)
         layout.addWidget(top_splitter, 2)
         # The transport sits directly under the waveform it controls.
@@ -218,8 +243,10 @@ class MainWindow(QMainWindow):
         sync_action.setToolTip("Exchange bookmarks with the sync folder (see --sync-dir)")
         sync_action.triggered.connect(lambda *_: self.sync_requested.emit())
         file_menu.addSeparator()
-        exit_action = file_menu.addAction("Exit")
-        exit_action.triggered.connect(self.close)
+        quit_action = file_menu.addAction("Quit")
+        quit_action.setShortcut("Ctrl+Q")
+        quit_action.setToolTip("Save everything, close the VLC this app launched, and quit")
+        quit_action.triggered.connect(lambda *_: self.quit_requested.emit())
 
         edit_menu = menu_bar.addMenu("Edit")
         undo_action = self._undo_stack.createUndoAction(self, "Undo")
@@ -262,10 +289,10 @@ class MainWindow(QMainWindow):
         stop_action.triggered.connect(self._transport.stop_clicked.emit)
         seek_back_action = playback_menu.addAction("Seek -5s")
         seek_back_action.setShortcut("Left")
-        seek_back_action.triggered.connect(self._transport.seek_back_clicked.emit)
+        seek_back_action.triggered.connect(lambda *_: self.seek_relative_requested.emit(-5_000_000))
         seek_forward_action = playback_menu.addAction("Seek +5s")
         seek_forward_action.setShortcut("Right")
-        seek_forward_action.triggered.connect(self._transport.seek_forward_clicked.emit)
+        seek_forward_action.triggered.connect(lambda *_: self.seek_relative_requested.emit(5_000_000))
 
         playlist_menu = menu_bar.addMenu("Playlist")
         refresh_action = playlist_menu.addAction("Refresh")
@@ -316,6 +343,8 @@ class MainWindow(QMainWindow):
         self._inspector.notes_committed.connect(self._on_notes_committed)
 
         self._playlist_panel.launch_vlc_requested.connect(self.launch_vlc_requested.emit)
+        self._playlist_panel.quit_requested.connect(self.quit_requested.emit)
+        self._volume.volume_changed.connect(self.volume_requested.emit)
         self._playlist_panel.item_selected.connect(self.playlist_item_selected.emit)
         self._playlist_panel.item_double_clicked.connect(self.playlist_item_double_clicked.emit)
         self._playlist_panel.follow_vlc_toggled.connect(self.follow_player_toggled.emit)
@@ -326,14 +355,44 @@ class MainWindow(QMainWindow):
         transport = self._transport
         transport.play_pause_clicked.connect(self.play_pause_requested.emit)
         transport.stop_clicked.connect(self.stop_requested.emit)
-        transport.seek_back_clicked.connect(lambda: self.seek_relative_requested.emit(-5_000_000))
-        transport.seek_forward_clicked.connect(lambda: self.seek_relative_requested.emit(5_000_000))
         transport.previous_track_clicked.connect(self.previous_track_requested.emit)
         transport.next_track_clicked.connect(self.next_track_requested.emit)
         transport.previous_bookmark_clicked.connect(self.previous_bookmark_requested.emit)
         transport.next_bookmark_clicked.connect(self.next_bookmark_requested.emit)
 
     # -- player display (called by the composition root) --
+
+    def show_volume(self, level: int) -> None:
+        """The player's volume (0-512) on the fader; ignored while the user drags it."""
+        self._volume.set_level(level)
+
+    def volume_level(self) -> int:
+        return self._volume.level()
+
+    # -- session state --
+
+    def commit_pending_edits(self) -> None:
+        """Saves anything still being typed in the Inspector (before quitting)."""
+        self._inspector.commit_pending()
+
+    def save_layout(self, settings) -> None:  # noqa: ANN001 - SettingsService (no UI import cycle)
+        settings.set_window_geometry(self.saveGeometry())
+        for name, splitter in self._splitters.items():
+            settings.set_splitter_state(name, splitter.saveState())
+
+    def restore_layout(self, settings) -> None:  # noqa: ANN001
+        geometry = settings.window_geometry()
+        if isinstance(geometry, QByteArray) and not geometry.isEmpty():
+            self.restoreGeometry(geometry)
+        for name, splitter in self._splitters.items():
+            state = settings.splitter_state(name)
+            if isinstance(state, QByteArray) and not state.isEmpty():
+                splitter.restoreState(state)
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        # Closing the window is quitting too: keep what is being typed.
+        self.commit_pending_edits()
+        super().closeEvent(event)
 
     def show_playback(self, time_us: int, duration_us: int | None, current_item_id: int | None,
                       *, is_playing: bool) -> None:
@@ -381,8 +440,14 @@ class MainWindow(QMainWindow):
                      media_id: UUID | None, bookmark_count: int, duration_us: int = 0) -> None:
         self._current_playlist_id = playlist_id
         self._current_media_id = media_id
-        self._breadcrumb.setText(f"{playlist_name} › {track_name} › {bookmark_count} bookmarks")
+        self._context_names = (playlist_name, track_name)
+        self._show_breadcrumb(bookmark_count)
         self._waveform_scene.set_duration_us(duration_us)
+
+    def _show_breadcrumb(self, bookmark_count: int) -> None:
+        playlist_name, track_name = self._context_names
+        noun = "bookmark" if bookmark_count == 1 else "bookmarks"
+        self._breadcrumb.setText(f"{playlist_name} › {track_name} › {bookmark_count} {noun}")
 
     def load_bookmarks(self, bookmarks: list[Bookmark]) -> None:
         """Waveform-scoped bookmarks for the one song currently displayed. The
@@ -390,6 +455,7 @@ class MainWindow(QMainWindow):
         song's bookmarks, not just this one's.
         """
         self._waveform_scene.set_bookmarks(bookmarks)
+        self._show_breadcrumb(len(bookmarks))  # stays right as bookmarks come and go
 
     def load_all_bookmarks(self, bookmarks: list[Bookmark], song_names: dict[UUID, str]) -> None:
         self._bookmark_panel.set_bookmarks(bookmarks, song_names)
@@ -893,8 +959,14 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Diagnostics", "\n".join(lines))
 
     def _on_show_about(self) -> None:
-        QMessageBox.about(
-            self, "About VLC Bookmark Studio",
-            "VLC Bookmark Studio\n\nA playlist-aware visual bookmarking and looping "
-            "tool for VLC Media Player.",
+        from bookmark_studio import __version__
+
+        box = QMessageBox(self)
+        box.setWindowTitle(f"About {APP_NAME}")
+        box.setIconPixmap(logo_pixmap(96))
+        box.setText(f"<h3>{APP_NAME} {__version__}</h3>")
+        box.setInformativeText(
+            "Playlist-aware visual bookmarking and looping for VLC Media Player.<br><br>"
+            "Free software under the GNU GPL v3."
         )
+        box.exec()

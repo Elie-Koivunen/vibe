@@ -32,6 +32,7 @@ class PlaylistPanel(QWidget):
     item_double_clicked = Signal(int)  # vlc_id -- play in VLC (spec #147)
     follow_vlc_toggled = Signal(bool)
     launch_vlc_requested = Signal()
+    quit_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -51,7 +52,15 @@ class PlaylistPanel(QWidget):
             "Attach to an already-open VLC instance, or launch a new one with a playlist"
         )
         self._launch_vlc_button.clicked.connect(self.launch_vlc_requested.emit)
-        layout.addWidget(self._launch_vlc_button)
+        self._quit_button = QPushButton("Quit", self)
+        self._quit_button.setToolTip(
+            "Save everything, close the VLC this app launched, and quit (Ctrl+Q)"
+        )
+        self._quit_button.clicked.connect(self.quit_requested.emit)
+        session_row = QHBoxLayout()
+        session_row.addWidget(self._launch_vlc_button, 1)
+        session_row.addWidget(self._quit_button)
+        layout.addLayout(session_row)
 
         # Connection status and the Follow checkbox, right under the button that
         # makes the connection.

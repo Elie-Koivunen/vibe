@@ -6,7 +6,12 @@ from PySide6.QtGui import QColor, QPainter, QPen, QTransform
 from PySide6.QtWidgets import QGraphicsItem
 
 from bookmark_studio.domain.timecode import format_timecode
-from bookmark_studio.ui.waveform.waveform_item import device_pixel_width, scene_x_to_time_us, time_us_to_scene_x
+from bookmark_studio.ui.waveform.waveform_item import (
+    cosmetic_pen,
+    device_pixel_width,
+    scene_x_to_time_us,
+    time_us_to_scene_x,
+)
 
 RULER_HEIGHT = 24
 TICK_COLOR = QColor(120, 120, 120)
@@ -33,6 +38,9 @@ class TimeRulerItem(QGraphicsItem):
         self._duration_us = duration_us
         self._height = height
         self.setZValue(90)
+        # Only the exposed part is drawn (see WaveformItem): without this flag every
+        # repaint drew a label for every tick of the whole song.
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemUsesExtendedStyleOption, True)
 
     def set_duration_us(self, duration_us: int) -> None:
         self.prepareGeometryChange()
@@ -49,10 +57,11 @@ class TimeRulerItem(QGraphicsItem):
         interval_us = _pick_interval_us(us_per_pixel)
 
         start_us = scene_x_to_time_us(max(0.0, exposed.left()))
-        first_tick = (start_us // interval_us) * interval_us
+        # One tick earlier: its label may reach into the exposed strip.
+        first_tick = max(0, (start_us // interval_us - 1) * interval_us)
         end_us = scene_x_to_time_us(exposed.right())
 
-        painter.setPen(QPen(TICK_COLOR, 1))
+        painter.setPen(cosmetic_pen(TICK_COLOR))
         painter.drawLine(QLineF(exposed.left(), self._height - 1, exposed.right(), self._height - 1))
 
         # Tick marks are drawn in the item's normal (scene) coordinate space -- short
@@ -70,7 +79,7 @@ class TimeRulerItem(QGraphicsItem):
         tick_us = first_tick
         while tick_us <= end_us + interval_us:
             x = time_us_to_scene_x(tick_us)
-            painter.setPen(QPen(TICK_COLOR, 1))
+            painter.setPen(cosmetic_pen(TICK_COLOR))
             painter.drawLine(QLineF(x, self._height - 8, x, self._height - 1))
 
             label = format_timecode(tick_us) if interval_us < 1_000_000 else format_timecode(tick_us)[:8]

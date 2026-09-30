@@ -1,7 +1,7 @@
 """WaveformView(QGraphicsView): mouse/wheel/key handling, zoom-to-cursor (spec #38, #54)."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QGraphicsView
 
 from bookmark_studio.ui.waveform.scene import WaveformScene
@@ -10,6 +10,7 @@ from bookmark_studio.ui.waveform.waveform_item import scene_x_to_time_us, time_u
 CLICK_VS_DRAG_THRESHOLD_US = 20_000  # 20ms of pointer movement before it counts as a drag
 FOLLOW_THRESHOLD_FRACTION = 0.8  # spec #55: "follow when playhead reaches 80% of viewport"
 FOLLOW_RECENTER_FRACTION = 0.2  # where the playhead lands after a follow-jump
+WHEEL_ZOOM_PER_NOTCH = 1.25
 
 
 class WaveformView(QGraphicsView):
@@ -21,6 +22,14 @@ class WaveformView(QGraphicsView):
         self._press_time_us: int | None = None
         self._dragging_selection = False
         self._fit_mode = False
+        # Wheel events are summed and applied once per event-loop pass: a fast wheel or
+        # a touchpad sends many small events, and each used to zoom a full step and
+        # repaint.
+        self._pending_wheel_delta = 0
+        self._wheel_timer = QTimer(self)
+        self._wheel_timer.setSingleShot(True)
+        self._wheel_timer.setInterval(0)
+        self._wheel_timer.timeout.connect(self._apply_wheel_zoom)
 
     def _is_empty_space(self, view_pos) -> bool:
         item = self.itemAt(view_pos)
@@ -72,8 +81,17 @@ class WaveformView(QGraphicsView):
         if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
             super().wheelEvent(event)
             return
-        self.zoom(1.25 if event.angleDelta().y() > 0 else 0.8, anchor_under_mouse=True)
+        delta = event.angleDelta().y()
+        if delta:  # a purely horizontal scroll used to zoom out
+            self._pending_wheel_delta += delta
+            self._wheel_timer.start()
         event.accept()
+
+    def _apply_wheel_zoom(self) -> None:
+        """One notch (120) zooms 25%; smaller steps (touchpads) zoom proportionally."""
+        delta, self._pending_wheel_delta = self._pending_wheel_delta, 0
+        if delta:
+            self.zoom(WHEEL_ZOOM_PER_NOTCH ** (delta / 120), anchor_under_mouse=True)
 
     def zoom(self, factor: float, *, anchor_under_mouse: bool = False) -> None:
         """Shared by wheel-zoom and the toolbar Zoom In/Out buttons (spec #84) so both

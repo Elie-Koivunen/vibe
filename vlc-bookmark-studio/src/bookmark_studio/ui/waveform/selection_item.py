@@ -6,12 +6,12 @@ but the body can't be moved (dragging the middle does nothing).
 from __future__ import annotations
 
 from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QPainter, QPen
+from PySide6.QtGui import QBrush, QColor, QPainter
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject
 
 from bookmark_studio.domain.bookmark import MIN_SEGMENT_DURATION_US
 from bookmark_studio.domain.selection import Selection
-from bookmark_studio.ui.waveform.waveform_item import time_us_to_scene_x
+from bookmark_studio.ui.waveform.waveform_item import cosmetic_pen, time_us_to_scene_x
 
 # Green tint: a drag-selection about to become a bookmark.
 SELECTION_FILL = QColor(90, 200, 120, 80)
@@ -76,7 +76,7 @@ class SelectionItem(QGraphicsObject):
     def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: N802
         rect = self.boundingRect()
         painter.setBrush(QBrush(SELECTION_FILL))
-        painter.setPen(QPen(SELECTION_BORDER, 1))
+        painter.setPen(cosmetic_pen(SELECTION_BORDER))
         painter.drawRect(rect)
         handle_width = self._handle_width_scene()
         painter.fillRect(QRectF(rect.left(), 0, handle_width, self._height), SELECTION_BORDER)

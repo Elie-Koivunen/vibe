@@ -8,7 +8,7 @@ from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QTransform
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject
 
 from bookmark_studio.domain.bookmark import MIN_SEGMENT_DURATION_US, Bookmark
-from bookmark_studio.ui.waveform.waveform_item import scene_x_to_time_us, time_us_to_scene_x
+from bookmark_studio.ui.waveform.waveform_item import cosmetic_pen, scene_x_to_time_us, time_us_to_scene_x
 
 HANDLE_WIDTH_PX = 8.0  # target on-screen handle width, in real device pixels
 REGION_FILL = QColor(240, 180, 60, 130)
@@ -89,7 +89,7 @@ class BookmarkRegionItem(QGraphicsObject):
         rect = self.boundingRect()
         handle_width = self._handle_width_scene()
         painter.setBrush(QBrush(REGION_FILL))
-        painter.setPen(QPen(REGION_BORDER, 1))
+        painter.setPen(cosmetic_pen(REGION_BORDER))
         painter.drawRect(rect)
         painter.fillRect(QRectF(rect.left(), 0, handle_width, self._height), HANDLE_COLOR)
         painter.fillRect(QRectF(rect.right() - handle_width, 0, handle_width, self._height), HANDLE_COLOR)
@@ -204,7 +204,7 @@ class BookmarkPointItem(QGraphicsObject):
 
     def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: N802
         half = self._MARKER_HALF_WIDTH
-        painter.setPen(QPen(POINT_COLOR, 1.5))
+        painter.setPen(cosmetic_pen(POINT_COLOR, 2))
         painter.drawLine(QLineF(0, 0, 0, self._height))
         painter.setBrush(QBrush(POINT_COLOR))
         painter.drawPolygon([QPointF(0, 0), QPointF(half, half), QPointF(0, half * 2), QPointF(-half, half)])

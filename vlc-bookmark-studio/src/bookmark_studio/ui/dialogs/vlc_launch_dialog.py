@@ -42,8 +42,18 @@ class VlcLaunchDialog(QDialog):
         self._media_paths: list[str] = []
         self._source_uri: str | None = None
 
+        from bookmark_studio.ui.branding import APP_NAME, logo_pixmap
+
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Choose how to play: an open VLC window, a new one, or inside this app.", self))
+        header = QHBoxLayout()
+        logo = QLabel(self)
+        logo.setPixmap(logo_pixmap(48))
+        title = QLabel(f"<b style='font-size:13pt'>{APP_NAME}</b><br>"
+                       "Choose how to play: an open VLC window, a new one, or inside this app.", self)
+        title.setWordWrap(True)
+        header.addWidget(logo)
+        header.addWidget(title, 1)
+        layout.addLayout(header)
 
         self._combo = QComboBox(self)
         for instance in instances:

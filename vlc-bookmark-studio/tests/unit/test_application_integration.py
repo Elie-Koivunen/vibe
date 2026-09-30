@@ -203,14 +203,14 @@ def test_transport_play_pause_button_commands_the_real_adapter(qtbot, running_ap
     qtbot.waitUntil(lambda: adapter.get_status().state == "stopped", timeout=3000)
 
 
-def test_transport_seek_forward_commands_the_real_adapter(qtbot, running_app) -> None:
+def test_seek_forward_shortcut_commands_the_real_adapter(qtbot, running_app) -> None:
     adapter = MockPlaybackAdapter(
         [VlcPlaylistItem(vlc_id=1, uri="file:///a.mp3", name="Song A", duration_s=10.0)]
     )
     app = running_app(adapter, ffmpeg_path="not-a-real-ffmpeg.exe")
     app.start()
 
-    app.window._transport.seek_forward_clicked.emit()
+    app.window.seek_relative_requested.emit(5_000_000)  # the Right arrow (Playback > Seek +5s)
     qtbot.waitUntil(lambda: adapter.get_status().time_us == 5_000_000, timeout=3000)
 
 

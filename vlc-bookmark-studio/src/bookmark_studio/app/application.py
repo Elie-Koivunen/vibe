@@ -23,7 +23,7 @@ from uuid import UUID
 
 from PySide6.QtCore import QObject, QTimer
 from PySide6.QtGui import QUndoStack
-from PySide6.QtWidgets import QDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from bookmark_studio import platform_support
 from bookmark_studio.app.playlist_context import AskPlaylistMatch, PlaylistContext
@@ -68,6 +68,8 @@ if TYPE_CHECKING:
 EXTERNAL_STOP_GRACE_S = 0.6
 EXTERNAL_STOP_VOTES = 2
 _SYNC_INTERVAL_MS = 60_000
+# Playing a bookmark brings a quieter (or muted) player up to 85 % (VLC's 0-512 scale).
+BOOKMARK_PLAY_VOLUME = round(0.85 * 256)
 
 
 class Application(QObject):
@@ -92,6 +94,7 @@ class Application(QObject):
         libvlc_args: list[str] | None = None,
         sync_service: "SyncService | None" = None,
         http_port: int | None = None,
+        quit_app: Callable[[], None] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -105,6 +108,7 @@ class Application(QObject):
         self._libvlc_args = libvlc_args
         self._sync = sync_service
         self._http_port = http_port  # --port: first port to try for a launched VLC
+        self._quit_app = quit_app or QApplication.quit
         self._stopped = False
 
         self._bookmark_repository = BookmarkRepository(conn)
@@ -161,17 +165,36 @@ class Application(QObject):
     # -- lifecycle --
 
     def start(self) -> None:
+        if self._settings is not None:
+            self.window.restore_layout(self._settings)
         self.session.start()
         if self._sync is not None:
             self.sync_now()
             self._sync_timer.start(_SYNC_INTERVAL_MS)
         self.window.show()
 
+    def quit(self) -> None:
+        """Quit button / File > Quit / Ctrl+Q. Saves what is still being typed and the
+        window layout, then exits; stop() (on aboutToQuit) runs the final sync export and
+        closes the VLC this app launched. Bookmarks themselves are saved on every edit."""
+        self.window.commit_pending_edits()
+        self._save_window_layout()
+        self._quit_app()
+
+    def _save_window_layout(self) -> None:
+        if self._settings is not None:
+            try:
+                self.window.save_layout(self._settings)
+                self._settings.sync()
+            except Exception:  # noqa: BLE001 - never block quitting
+                self._log.exception("could not save the window layout")
+
     def stop(self) -> None:
         """Shuts the session down (connected to QApplication.aboutToQuit)."""
         if self._stopped:
             return
         self._stopped = True
+        self._save_window_layout()
         self._sync_timer.stop()
         self._loop_controller.stop(restore_volume=True)  # undo a fade's volume change
         self.session.stop(drain_timeout_s=1.5)
@@ -215,6 +238,8 @@ class Application(QObject):
         w.project_imported.connect(self._on_project_imported)
         w.playlist_refresh_requested.connect(self._force_playlist_refresh)
         w.sync_requested.connect(self._on_sync_requested)
+        w.volume_requested.connect(self._set_player_volume)
+        w.quit_requested.connect(self.quit)
 
     # -- commands --
 
@@ -236,6 +261,28 @@ class Application(QObject):
     def _seek_relative(self, delta_us: int) -> None:
         adapter = self._adapter
         self._submit(lambda: adapter.seek_relative_us(delta_us))
+
+    # -- volume --
+
+    def _set_player_volume(self, level: int, *, write: bool = True) -> None:
+        """A volume the user chose (0-512): the fader, or a bookmark's start level. It
+        becomes what fades ramp to, and goes to the player now unless a fade is running.
+        Consecutive changes (a fader drag) collapse into the latest one."""
+        self.session.mute_pending = False  # the user decided: no mute-on-connect after this
+        if self._loop_controller.set_user_volume(level) and write:
+            adapter = self._adapter
+            self.session.commands.submit(
+                lambda: adapter.set_volume(level), coalesce_key="volume", fences=("volume",),
+                on_error=lambda exc: self._log.debug("volume change failed: %s", exc),
+            )
+
+    def _raise_volume_for_bookmark(self, *, fades_in: bool = False) -> None:
+        """Playing a bookmark brings a quieter (or muted) player up to 85 %; a louder
+        setting is kept. With a fade-in, the fade itself ramps up to that level."""
+        if self._loop_controller.target_volume >= BOOKMARK_PLAY_VOLUME:
+            return
+        self._set_player_volume(BOOKMARK_PLAY_VOLUME, write=not fades_in)
+        self.window.show_volume(BOOKMARK_PLAY_VOLUME)
 
     # -- choosing the player: attach / launch a VLC window / play inside the app --
 
@@ -471,6 +518,7 @@ class Application(QObject):
             self._on_loop_bookmark_requested(bookmark_id)
             return
         self._stop_loop()
+        self._raise_volume_for_bookmark()
         item = self._playlist_item_for_media(bookmark.media_id)
         if item is not None:
             self._switch_displayed_song_for_bookmark(item)
@@ -497,6 +545,7 @@ class Application(QObject):
         before = self._goto_for_displayed() if item is not None else None
         self._selection_loop_active = False
         self._active_loop_bookmark_id = bookmark.id
+        self._raise_volume_for_bookmark(fades_in=bookmark.fade_in_ms > 0)
         self._start_loop(
             LoopSpec(
                 start_us=bookmark.start_us, end_us=bookmark.end_us,
@@ -579,9 +628,18 @@ class Application(QObject):
         self._on_status_sample(issued_ns, status)
 
     def _on_status_sample(self, issued_ns: int, status: PlaybackStatus) -> None:
+        if self.session.mute_pending:
+            # A VLC this app launched starts muted (it would otherwise blast the first
+            # song). Through the volume model, so fades and a bookmark's 85 % know it's 0
+            # right away -- not one poll later.
+            self._set_player_volume(0)
+            self.window.show_volume(0)
+            return
         try:
             # Fades ramp to/from the user's real volume (ignored while a fade owns it).
             self._loop_controller.set_target_volume(status.volume, sampled_at_ns=issued_ns)
+            if not self.session.is_volume_stale(issued_ns):
+                self.window.show_volume(status.volume)
             if self.session.is_stale(issued_ns):
                 return  # sampled before our last seek/goto/play took effect
             self._clock.update(status)

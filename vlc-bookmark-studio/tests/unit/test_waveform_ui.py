@@ -236,7 +236,8 @@ def test_manual_zoom_disables_sticky_fit_mode(qtbot) -> None:
         Qt.NoButton, Qt.ControlModifier, Qt.NoScrollPhase, False,
     )
     view.wheelEvent(event)
-    assert view.transform() != fitted_transform
+    # Wheel steps are combined and applied on the next event-loop pass.
+    qtbot.waitUntil(lambda: view.transform() != fitted_transform, timeout=1000)
 
     zoomed_transform = view.transform()
     view.resize(400, 150)

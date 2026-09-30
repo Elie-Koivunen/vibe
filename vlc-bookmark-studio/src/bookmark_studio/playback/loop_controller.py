@@ -121,6 +121,23 @@ class LoopController(QObject):
         self._target_volume = max(0, min(_MAX_VOLUME, int(level)))
 
     @property
+    def target_volume(self) -> int:
+        """The user's listening volume (0-512): what fades ramp to and from."""
+        return self._target_volume
+
+    def set_user_volume(self, level: int) -> bool:
+        """A volume the user chose explicitly (the fader, or the level a bookmark starts
+        at). Always becomes the target, even mid-fade. Returns True if the caller should
+        write it to the player now; False while a fade is running (the fade ramps to the
+        new target by itself)."""
+        self._target_volume = max(0, min(_MAX_VOLUME, int(level)))
+        if self._fade_active:
+            return False
+        self._volume_owned = False  # a ducked (faded-out) volume is replaced by the user's
+        self._mark_volume_written()
+        return True
+
+    @property
     def state(self) -> LoopState:
         return self._state
 

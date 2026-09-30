@@ -18,6 +18,7 @@ import argparse
 import os
 import platform
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
@@ -42,29 +43,45 @@ def log(message: str) -> None:
     print(f"[build] {message}", flush=True)
 
 
+ICO_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
+
+
+def write_ico(path: Path, pngs: list[tuple[int, bytes]]) -> None:
+    """A Windows .ico holding one PNG per size, so Explorer, the taskbar and the title
+    bar each pick a sharp image instead of scaling one down."""
+    header = struct.pack("<HHH", 0, 1, len(pngs))
+    offset = 6 + 16 * len(pngs)
+    entries, data = b"", b""
+    for size, png in pngs:
+        dim = 0 if size >= 256 else size  # 0 means 256 in the directory entry
+        entries += struct.pack("<BBBBHHII", dim, dim, 0, 0, 1, 32, len(png), offset + len(data))
+        data += png
+    path.write_bytes(header + entries + data)
+
+
 def render_icons(work: Path) -> tuple[Path, Path | None]:
-    """icon.svg -> 256 px PNG (Linux/AppImage) and a multi-size .ico (Windows)."""
+    """The app's logo (src/bookmark_studio/resources/icon.svg) -> a 256 px PNG
+    (Linux/AppImage) and a multi-size .ico (Windows executable)."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtCore import Qt
-    from PySide6.QtGui import QGuiApplication, QImage, QPainter
-    from PySide6.QtSvg import QSvgRenderer
+    from PySide6.QtCore import QBuffer, QIODevice
+    from PySide6.QtGui import QGuiApplication
+
+    from bookmark_studio.ui.branding import logo_image
 
     app = QGuiApplication.instance() or QGuiApplication([sys.argv[0]])  # noqa: F841 - needed for painting
-    renderer = QSvgRenderer(str(HERE / "icon.svg"))
-    image = QImage(256, 256, QImage.Format.Format_ARGB32)
-    image.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(image)
-    renderer.render(painter)
-    painter.end()
+
+    def png_bytes(size: int) -> bytes:
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        logo_image(size).save(buffer, "PNG")
+        return bytes(buffer.data().data())
+
     png = work / f"{ASSET_PREFIX}.png"
-    if not image.save(str(png)):
-        raise RuntimeError("could not write the PNG icon")
+    png.write_bytes(png_bytes(256))
     ico = None
     if IS_WINDOWS:
         ico = work / f"{ASSET_PREFIX}.ico"
-        if not image.save(str(ico)):
-            ico = None
-            log("warning: Qt could not write .ico; the executable keeps the default icon")
+        write_ico(ico, [(size, png_bytes(size)) for size in ICO_SIZES])
     return png, ico
 
 

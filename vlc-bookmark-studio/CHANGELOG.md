@@ -4,6 +4,48 @@ All notable changes to VLC Bookmark Studio (called bm4vlc up to 0.3.1). Previous
 versions are kept in [`archive/`](archive/) and tagged in git
 (`vlc-bookmark-studio-v<version>`; `bm4vlc-v<version>` up to 0.3.1).
 
+## 0.5.0 — 2026-09-30
+
+### New
+
+- **Logo everywhere:** window title bar, taskbar and Alt+Tab (on Windows the app now
+  has its own taskbar button, also when run from source), the header next to the
+  playlist name, the Open media dialog, the About box, the Windows executable (a
+  multi-size icon, sharp at every Explorer size), the Linux AppImage and the READMEs.
+- **Volume fader** beside the waveform, in the style of a DJ mixer's channel fader:
+  0–125 %, unity (100 %) marked in amber, a lit slot up to the level. Drag, click,
+  scroll or arrow keys; double-click for 100 %. It shows the player's volume as it
+  changes, fades included, and never jumps under your finger.
+- **Playing or looping a bookmark raises the volume to 85 %** if the player is quieter
+  or muted (a VLC this app launches starts muted); a louder setting is kept. With a
+  fade-in, the fade ramps up to 85 %.
+- **Quit** button (next to Launch VLC…), File > Quit and Ctrl+Q: saves text still being
+  typed in the Inspector, the window layout and a final sync file, closes the VLC this
+  app launched, and exits. The window size and panel sizes are now restored on the
+  next start. On exit the database's write-ahead log is folded into the database file.
+
+### Changed
+
+- The playback buttons (previous/next bookmark, previous/next track, stop, play/pause)
+  form one group centred under the waveform. The −5 s / +5 s buttons are gone; the
+  Left/Right arrow keys still seek 5 seconds.
+
+### Fixed
+
+- **Zooming the waveform (Ctrl+wheel) lagged** -- about 0.5 s per step on a 10-minute
+  song, up to 8 s when zoomed in; now about 25 ms. The waveform and the time ruler
+  redrew the whole song on every repaint (Qt only reports the visible part to items
+  that ask for it), Qt's polygon fill is quadratic on a waveform's zig-zag outline, and
+  translucent fills are slow: they now draw only what is visible, as opaque
+  pixel-aligned columns. Wheel steps are combined and sized by the wheel (touchpads
+  zoom smoothly), and a sideways scroll no longer zooms out.
+- Point bookmarks and the ruler's ticks were invisible when the whole song was shown
+  (their lines were thinner than a pixel at that zoom); lines now keep their width at
+  every zoom.
+- The header's bookmark count stayed at the number the song had when it was opened.
+- A VLC launched by the app is muted until the first status; the volume logic learned
+  about that mute one poll later, so a bookmark played in that moment stayed silent.
+
 ## 0.4.0 — 2026-09-30
 
 ### Renamed: bm4vlc is now VLC Bookmark Studio
