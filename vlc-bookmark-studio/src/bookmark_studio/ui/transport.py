@@ -229,6 +229,11 @@ class TransportBar(QWidget):
         self._duration_label = QLabel("/ 00:00:00.000", right)
         self._duration_label.setFont(button_font)
         readout.addWidget(self._duration_label)
+        # Both sides get the readout's width as their minimum, so equal stretch really
+        # centres the buttons (a wide readout would otherwise push them off centre).
+        side_width = right.sizeHint().width()
+        left.setMinimumWidth(side_width)
+        right.setMinimumWidth(side_width)
 
         # Disabled until a player is connected, so a click can't silently do nothing.
         # MainWindow.set_connected() drives this and PlaylistPanel's indicator together.

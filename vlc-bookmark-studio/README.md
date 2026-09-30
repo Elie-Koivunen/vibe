@@ -11,7 +11,7 @@ Runs on **Windows**, **Linux**, and **WSL (Ubuntu on Windows)**.
 
 ## Status
 
-Version 0.5.0. The core is implemented and tested: domain model, SQLite
+Version 0.5.1. The core is implemented and tested: domain model, SQLite
 persistence + migrations, media fingerprint/resolution, playlist
 recognition across sessions (similarity scoring over stored playlist
 order), the FFmpeg waveform pipeline (streamed, shown while it decodes), four

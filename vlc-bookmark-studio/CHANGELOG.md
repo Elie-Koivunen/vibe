@@ -4,6 +4,20 @@ All notable changes to VLC Bookmark Studio (called bm4vlc up to 0.3.1). Previous
 versions are kept in [`archive/`](archive/) and tagged in git
 (`vlc-bookmark-studio-v<version>`; `bm4vlc-v<version>` up to 0.3.1).
 
+## 0.5.1 — 2026-09-30
+
+### Fixed
+
+- **The playback buttons could sit off centre.** They were centred only while the time
+  readout on the right was narrower than the space left of the buttons -- not so in a
+  narrow window or with larger system fonts. Both sides now reserve the same width, so
+  the group stays centred. (Found by the Windows CI runs of 0.5.0.)
+
+### CI
+
+- A failing test run posts the failing tests as an annotation, readable without signing
+  in (as the release builds already did).
+
 ## 0.5.0 — 2026-09-30
 
 ### New

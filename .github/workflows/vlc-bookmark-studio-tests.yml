@@ -47,7 +47,14 @@ jobs:
         run: python -m pip install -e ".[dev]"
       - name: Unit and integration tests
         working-directory: ${{ env.WORKDIR }}
-        run: python -m pytest -q -rfs
+        run: |
+          LOG="$RUNNER_TEMP/pytest.log"
+          if ! python -m pytest -q -rfs 2>&1 | tee "$LOG"
+          then
+            msg=$(grep -E '^(FAILED|ERROR|E  )' "$LOG" | head -n 30 | cut -c1-180 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=tests failed::$msg"
+            exit 1
+          fi
       - name: Self-test
         working-directory: ${{ env.WORKDIR }}
         run: python -m bookmark_studio --self-test --require ffmpeg --data-dir "$RUNNER_TEMP/selftest"
@@ -96,7 +103,14 @@ jobs:
         run: python -m bookmark_studio --self-test --require vlc,libvlc,ffmpeg --data-dir "$RUNNER_TEMP/selftest"
       - name: Live tests
         working-directory: ${{ env.WORKDIR }}
-        run: python -m pytest tests/vlc -q -rfs
+        run: |
+          LOG="$RUNNER_TEMP/pytest-live.log"
+          if ! python -m pytest tests/vlc -q -rfs 2>&1 | tee "$LOG"
+          then
+            msg=$(grep -E '^(FAILED|ERROR|E  )' "$LOG" | head -n 30 | cut -c1-180 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=live tests failed::$msg"
+            exit 1
+          fi
 
   lint:
     name: ruff + mypy
