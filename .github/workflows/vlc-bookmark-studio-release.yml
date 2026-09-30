@@ -1,0 +1,171 @@
+# VLC Bookmark Studio: packaged builds.
+# On a `vlc-bookmark-studio-v<version>` tag: builds the Windows portable zip (with a 64-bit VLC and
+# ffmpeg) and the Linux tar.gz + AppImage, runs each build's self-test, and publishes
+# them as a GitHub Release. A change to the packaging (or to this file) on main, or a
+# manual run, only builds: the packages are then in the run's artifacts.
+# A failing build posts the end of its output as an annotation (readable without
+# signing in, unlike the job log).
+name: VLC Bookmark Studio release
+
+on:
+  push:
+    tags: ["vlc-bookmark-studio-v*"]
+    branches: [main]
+    paths: ["vlc-bookmark-studio/packaging/**", ".github/workflows/vlc-bookmark-studio-release.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  WORKDIR: vlc-bookmark-studio
+  VLC_VERSION: "3.0.23"
+
+jobs:
+  windows:
+    name: Windows portable zip
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: vlc-bookmark-studio
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: python -c "import sys; sys.path.insert(0, 'src'); import bookmark_studio as b; tag = '${{ github.ref_name }}'; assert tag == 'vlc-bookmark-studio-v' + b.__version__, (tag, b.__version__)"
+      - name: Install
+        run: python -m pip install -e ".[packaging]"
+      - name: Scratch folder as a D:/... path (fine for bash and Windows programs alike)
+        run: echo "BUILD_TMP=$(cygpath -m "$RUNNER_TEMP")" >> "$GITHUB_ENV"
+      - name: VLC ${{ env.VLC_VERSION }} 64-bit (checksum-verified)
+        run: |
+          base="https://download.videolan.org/pub/videolan/vlc/${VLC_VERSION}/win64"
+          curl -fsSL --retry 3 -o "$BUILD_TMP/vlc.zip" "$base/vlc-${VLC_VERSION}-win64.zip"
+          curl -fsSL --retry 3 -o "$BUILD_TMP/vlc.zip.sha256" "$base/vlc-${VLC_VERSION}-win64.zip.sha256"
+          expected=$(cut -d' ' -f1 < "$BUILD_TMP/vlc.zip.sha256" | tr -d '\r\n')
+          actual=$(sha256sum "$BUILD_TMP/vlc.zip" | cut -d' ' -f1)
+          echo "expected $expected"; echo "actual   $actual"
+          test "$expected" = "$actual"
+          python -m zipfile -e "$BUILD_TMP/vlc.zip" "$BUILD_TMP/vlc"
+      - name: ffmpeg (gyan.dev release essentials, checksum-verified)
+        run: |
+          base="https://www.gyan.dev/ffmpeg/builds"
+          curl -fsSL --retry 3 -o "$BUILD_TMP/ffmpeg.zip" "$base/ffmpeg-release-essentials.zip"
+          curl -fsSL --retry 3 -o "$BUILD_TMP/ffmpeg.zip.sha256" "$base/ffmpeg-release-essentials.zip.sha256"
+          expected=$(tr -d ' \r\n' < "$BUILD_TMP/ffmpeg.zip.sha256" | cut -c1-64)
+          actual=$(sha256sum "$BUILD_TMP/ffmpeg.zip" | cut -d' ' -f1)
+          echo "expected $expected"; echo "actual   $actual"
+          test "$expected" = "$actual"
+          python -m zipfile -e "$BUILD_TMP/ffmpeg.zip" "$BUILD_TMP/ffmpeg"
+          echo "FFMPEG_EXE=$(ls "$BUILD_TMP"/ffmpeg/*/bin/ffmpeg.exe)" >> "$GITHUB_ENV"
+      - name: Build (runs the packaged self-test)
+        env:
+          VLC_BOOKMARK_STUDIO_SELFTEST_TRACEBACK: "1"
+        run: |
+          LOG="$BUILD_TMP/build.log"
+          if ! python packaging/build.py --vlc-dir "$BUILD_TMP/vlc/vlc-${VLC_VERSION}" --ffmpeg "$FFMPEG_EXE" --out dist 2>&1 | tee "$LOG"
+          then
+            msg=$(grep -vE '^[0-9]+ INFO:' "$LOG" | tail -n 30 | cut -c1-180 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Windows build failed::$msg"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vlc-bookmark-studio-windows
+          path: vlc-bookmark-studio/dist/*.zip
+          if-no-files-found: error
+
+  linux:
+    name: Linux tar.gz + AppImage
+    # The oldest supported runner: the build then runs on glibc 2.35 and newer.
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        shell: bash
+        working-directory: vlc-bookmark-studio
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: python -c "import sys; sys.path.insert(0, 'src'); import bookmark_studio as b; tag = '${{ github.ref_name }}'; assert tag == 'vlc-bookmark-studio-v' + b.__version__, (tag, b.__version__)"
+      - name: VLC, ffmpeg and Qt's runtime libraries (the self-test uses them)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y vlc ffmpeg libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 \
+            libxcb-cursor0 libfontconfig1 libdbus-1-3
+      - name: Install
+        run: python -m pip install -e ".[packaging]"
+      - name: appimagetool
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/appimagetool"
+      - name: Build (runs the packaged self-test)
+        env:
+          APPIMAGETOOL: ${{ runner.temp }}/appimagetool
+          VLC_BOOKMARK_STUDIO_SELFTEST_TRACEBACK: "1"
+        run: |
+          LOG="$RUNNER_TEMP/build.log"
+          if ! python packaging/build.py --appimage --require vlc,libvlc,ffmpeg --out dist 2>&1 | tee "$LOG"
+          then
+            msg=$(grep -vE '^[0-9]+ INFO:' "$LOG" | tail -n 30 | cut -c1-180 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Linux build failed::$msg"
+            exit 1
+          fi
+      - name: The AppImage runs
+        env:
+          VLC_BOOKMARK_STUDIO_SELFTEST_TRACEBACK: "1"
+        run: |
+          LOG="$RUNNER_TEMP/appimage.log"
+          if ! APPIMAGE_EXTRACT_AND_RUN=1 dist/*.AppImage --self-test --require vlc,libvlc,ffmpeg --data-dir "$RUNNER_TEMP/st" 2>&1 | tee "$LOG"
+          then
+            msg=$(grep -vE '^[0-9]+ INFO:' "$LOG" | tail -n 30 | cut -c1-180 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=AppImage self-test failed::$msg"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vlc-bookmark-studio-linux
+          path: |
+            vlc-bookmark-studio/dist/*.tar.gz
+            vlc-bookmark-studio/dist/*.AppImage
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/vlc-bookmark-studio-v')
+    needs: [windows, linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
+      - name: Release notes from CHANGELOG.md
+        id: notes
+        run: |
+          version="${GITHUB_REF_NAME#vlc-bookmark-studio-v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          python3 - "$version" > notes.md <<'PY'
+          import re, sys
+          text = open("vlc-bookmark-studio/CHANGELOG.md", encoding="utf-8").read()
+          match = re.search(rf"^## {re.escape(sys.argv[1])}\b.*?$(.*?)(?=^## |\Z)", text, re.M | re.S)
+          print(match.group(1).strip() if match else f"VLC Bookmark Studio {sys.argv[1]}")
+          PY
+          cat notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: VLC Bookmark Studio ${{ steps.notes.outputs.version }}
+          body_path: notes.md
+          files: packages/*
+          fail_on_unmatched_files: true

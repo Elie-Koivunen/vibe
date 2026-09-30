@@ -1,0 +1,120 @@
+# VLC Bookmark Studio: runs the test suite on real Windows and Linux machines.
+# Lives at the repo root because GitHub only runs workflows from <repo>/.github/workflows/;
+# it only triggers when something under vlc-bookmark-studio/ (or this file) changes.
+name: VLC Bookmark Studio tests
+
+on:
+  push:
+    paths: ["vlc-bookmark-studio/**", ".github/workflows/vlc-bookmark-studio-tests.yml"]
+  pull_request:
+    paths: ["vlc-bookmark-studio/**", ".github/workflows/vlc-bookmark-studio-tests.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  WORKDIR: vlc-bookmark-studio
+  QT_QPA_PLATFORM: offscreen
+
+jobs:
+  tests:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04, ubuntu-22.04]
+        python: ["3.10", "3.12", "3.13"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+      - name: ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --no-progress -y
+      - name: Install
+        working-directory: ${{ env.WORKDIR }}
+        run: python -m pip install -e ".[dev]"
+      - name: Unit and integration tests
+        working-directory: ${{ env.WORKDIR }}
+        run: python -m pytest -q -rfs
+      - name: Self-test
+        working-directory: ${{ env.WORKDIR }}
+        run: python -m bookmark_studio --self-test --require ffmpeg --data-dir "$RUNNER_TEMP/selftest"
+      - name: Installed wheel creates its database (migrations are packaged)
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          python -m pip wheel . --no-deps -w "$RUNNER_TEMP/wheel"
+          python -m venv "$RUNNER_TEMP/venv"
+          if [ "$RUNNER_OS" = "Windows" ]; then VPY="$RUNNER_TEMP/venv/Scripts/python"; else VPY="$RUNNER_TEMP/venv/bin/python"; fi
+          "$VPY" -m pip install "$RUNNER_TEMP"/wheel/*.whl
+          cd "$RUNNER_TEMP"
+          "$VPY" -c "from pathlib import Path; from bookmark_studio.bootstrap import open_database; from bookmark_studio.persistence.migrations import current_version; c = open_database(Path('ci.db')); v = current_version(c); print('schema version', v); assert v >= 5"
+
+  live-vlc:
+    # Real VLC: the HTTP interface, the Lua bridge (Linux; needs a private VLC data dir)
+    # and the in-app libVLC player, all silent (-I dummy, --aout=adummy).
+    name: live VLC / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04]
+    defaults:
+      run:
+        shell: bash
+    env:
+      VLC_BOOKMARK_STUDIO_LIVE_VLC: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: VLC and ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y vlc ffmpeg libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+      - name: VLC (64-bit) and ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install vlc ffmpeg --no-progress -y
+      - name: Install
+        working-directory: ${{ env.WORKDIR }}
+        run: python -m pip install -e ".[dev]"
+      - name: Self-test finds VLC, libVLC and ffmpeg
+        working-directory: ${{ env.WORKDIR }}
+        run: python -m bookmark_studio --self-test --require vlc,libvlc,ffmpeg --data-dir "$RUNNER_TEMP/selftest"
+      - name: Live tests
+        working-directory: ${{ env.WORKDIR }}
+        run: python -m pytest tests/vlc -q -rfs
+
+  lint:
+    name: ruff + mypy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install
+        working-directory: ${{ env.WORKDIR }}
+        run: python -m pip install -e ".[dev]"
+      - name: ruff
+        working-directory: ${{ env.WORKDIR }}
+        run: ruff check src tests packaging
+      - name: mypy (as on Linux)
+        working-directory: ${{ env.WORKDIR }}
+        run: mypy --platform linux
+      - name: mypy (as on Windows)
+        working-directory: ${{ env.WORKDIR }}
+        run: mypy --platform win32
