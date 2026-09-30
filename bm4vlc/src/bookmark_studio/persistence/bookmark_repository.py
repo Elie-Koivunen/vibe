@@ -165,17 +165,17 @@ class BookmarkRepository:
     def rename_legacy_default_names(self) -> int:
         """One-time backfill: gives every bookmark still carrying the old flat "New
         bookmark" default (created before default_bookmark_name() existed) a fresh
-        bookmark-<date>-<random> name instead (new bookmarks get one already; this
-        covers the ones created earlier). Idempotent and cheap: after the first run,
-        no row will match.
+        <date>-<random>-<start>[-<end>] name instead (new bookmarks get one already;
+        this covers the ones created earlier). Idempotent and cheap: after the first
+        run, no row will match.
         Returns the number of rows renamed.
         """
         rows = self._conn.execute(
-            "SELECT id FROM bookmarks WHERE name = ?", (LEGACY_DEFAULT_NAME,)
+            "SELECT id, start_us, end_us FROM bookmarks WHERE name = ?", (LEGACY_DEFAULT_NAME,)
         ).fetchall()
-        for (bookmark_id,) in rows:
+        for bookmark_id, start_us, end_us in rows:
             self._conn.execute(
-                "UPDATE bookmarks SET name = ? WHERE id = ?", (default_bookmark_name(), bookmark_id)
+                "UPDATE bookmarks SET name = ? WHERE id = ?", (default_bookmark_name(start_us, end_us), bookmark_id)
             )
         if rows:
             self._conn.commit()

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import re
 import secrets
 import string
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from uuid import UUID
 
 from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
+from bookmark_studio.domain.timecode import format_timecode
 
 
 class InvalidBookmarkRange(ValueError):
@@ -18,17 +20,46 @@ MIN_SEGMENT_DURATION_US = 50_000
 _NAME_SUFFIX_ALPHABET = string.ascii_lowercase + string.digits
 
 
-def default_bookmark_name() -> str:
-    """"bookmark-<date>-<6 alphanumeric random unique string>": distinguishable
-    default names (a fixed "New bookmark" would give every bookmark the same one).
-    secrets.choice
-    (not random) since this only needs to not collide within one person's bookmark
-    list, not be cryptographically unguessable -- but the module's already the right
-    tool and avoids seeding concerns.
-    """
-    date_part = datetime.now().strftime("%Y%m%d")
-    suffix = "".join(secrets.choice(_NAME_SUFFIX_ALPHABET) for _ in range(6))
-    return f"bookmark-{date_part}-{suffix}"
+_TIMECODE = r"\d{2,}:\d{2}:\d{2}\.\d{3}"
+_AUTO_NAME_RE = re.compile(rf"^(\d{{8}})-([a-z0-9]{{6}})-({_TIMECODE})(?:-({_TIMECODE}))?$")
+
+
+def default_bookmark_name(
+    start_us: int, end_us: int | None = None, *, created: datetime | None = None, suffix: str | None = None,
+) -> str:
+    """"<date>-<6 random characters>-<start>[-<end>]", e.g.
+    ``20260930-k3x9qa-00:01:23.456-00:01:45.000`` (a point bookmark has only a start).
+    The random part keeps names distinct when two bookmarks share a range; secrets
+    (not random) only because it needs no seeding."""
+    date_part = (created or datetime.now()).strftime("%Y%m%d")
+    suffix = suffix or "".join(secrets.choice(_NAME_SUFFIX_ALPHABET) for _ in range(6))
+    name = f"{date_part}-{suffix}-{format_timecode(start_us)}"
+    return name if end_us is None else f"{name}-{format_timecode(end_us)}"
+
+
+def is_automatic_name(name: str, start_us: int, end_us: int | None) -> bool:
+    """True if `name` is exactly the automatic name for this range (the user never
+    renamed the bookmark)."""
+    match = _AUTO_NAME_RE.match(name)
+    if match is None:
+        return False
+    _date, _suffix, start_text, end_text = match.groups()
+    expected_end = format_timecode(end_us) if end_us is not None else None
+    return start_text == format_timecode(start_us) and end_text == expected_end
+
+
+def with_range(bookmark: Bookmark, start_us: int, end_us: int | None) -> Bookmark:
+    """`bookmark` moved/resized to [start_us, end_us]. An automatic name follows the new
+    times (keeping its date and random part); a name the user typed stays as it is."""
+    name = bookmark.name
+    if is_automatic_name(name, bookmark.start_us, bookmark.end_us):
+        match = _AUTO_NAME_RE.match(name)
+        assert match is not None
+        date_part, suffix = match.group(1), match.group(2)
+        name = default_bookmark_name(
+            start_us, end_us, created=datetime.strptime(date_part, "%Y%m%d"), suffix=suffix
+        )
+    return replace(bookmark, start_us=start_us, end_us=end_us, name=name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +94,14 @@ class Bookmark:
     fade_out_ms: int = 0
 
     def __post_init__(self) -> None:
+        # Enum fields also accept their string values (a Qt combo box hands those back),
+        # so a Bookmark never carries a plain str where persistence needs `.value`.
+        for name, enum_type in (
+            ("scope", BookmarkScope), ("bookmark_type", BookmarkType), ("completion_action", CompletionAction),
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, enum_type):
+                object.__setattr__(self, name, enum_type(value))
         validate_bookmark_range(
             bookmark_type=self.bookmark_type,
             start_us=self.start_us,

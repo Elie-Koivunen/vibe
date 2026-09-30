@@ -5,7 +5,7 @@ from PySide6.QtCore import QLineF, QPointF, QRectF
 from PySide6.QtGui import QColor, QPainter, QPen, QTransform
 from PySide6.QtWidgets import QGraphicsItem
 
-from bookmark_studio.ui.transport import format_timecode
+from bookmark_studio.domain.timecode import format_timecode
 from bookmark_studio.ui.waveform.waveform_item import device_pixel_width, scene_x_to_time_us, time_us_to_scene_x
 
 RULER_HEIGHT = 24

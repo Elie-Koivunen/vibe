@@ -12,9 +12,12 @@ from uuid import UUID
 
 from PySide6.QtGui import QUndoCommand
 
-from bookmark_studio.domain.bookmark import Bookmark
+from bookmark_studio.domain.bookmark import Bookmark, with_range
 from bookmark_studio.domain.enums import CompletionAction
+from bookmark_studio.logging.setup import get_logger
 from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
+
+_log = get_logger("BOOKMARK")
 
 # Distinct per command *type* (spec #83): QUndoStack only attempts mergeWith() between
 # consecutive commands whose id() matches, and mergeWith() itself still checks that
@@ -25,33 +28,58 @@ _ID_LOOP = 3
 _ID_FIELDS = 4
 
 
-class CreateBookmarkCommand(QUndoCommand):
+class _SafeCommand(QUndoCommand):
+    """Base of every command. QUndoStack calls redo()/undo() from C++, and a Python
+    exception escaping from there leaves PySide6 in a broken state that crashes the
+    process a few calls later (seen with a bad value from a combo box). Errors are
+    logged instead, and the app keeps running."""
+
+    def redo(self) -> None:
+        try:
+            self._redo()
+        except Exception:  # noqa: BLE001 - must not propagate into Qt
+            _log.exception("%s failed", self.text())
+
+    def undo(self) -> None:
+        try:
+            self._undo()
+        except Exception:  # noqa: BLE001 - must not propagate into Qt
+            _log.exception("undo of %s failed", self.text())
+
+    def _redo(self) -> None:
+        raise NotImplementedError
+
+    def _undo(self) -> None:
+        raise NotImplementedError
+
+
+class CreateBookmarkCommand(_SafeCommand):
     def __init__(self, repository: BookmarkRepository, bookmark: Bookmark) -> None:
         super().__init__(f"Create bookmark '{bookmark.name}'")
         self._repository = repository
         self._bookmark = bookmark
 
-    def redo(self) -> None:
+    def _redo(self) -> None:
         self._repository.insert(self._bookmark)
 
-    def undo(self) -> None:
+    def _undo(self) -> None:
         self._repository.delete(self._bookmark.id)
 
 
-class DeleteBookmarkCommand(QUndoCommand):
+class DeleteBookmarkCommand(_SafeCommand):
     def __init__(self, repository: BookmarkRepository, bookmark: Bookmark) -> None:
         super().__init__(f"Delete bookmark '{bookmark.name}'")
         self._repository = repository
         self._bookmark = bookmark  # full snapshot, needed to undo (re-insert)
 
-    def redo(self) -> None:
+    def _redo(self) -> None:
         self._repository.delete(self._bookmark.id)
 
-    def undo(self) -> None:
+    def _undo(self) -> None:
         self._repository.insert(self._bookmark)
 
 
-class MoveBookmarkCommand(QUndoCommand):
+class MoveBookmarkCommand(_SafeCommand):
     """Shifts both start and end by the same delta, preserving duration (spec #49)."""
 
     def __init__(
@@ -78,20 +106,20 @@ class MoveBookmarkCommand(QUndoCommand):
         self._new = other._new
         return True
 
-    def redo(self) -> None:
+    def _redo(self) -> None:
         self._apply(self._new)
 
-    def undo(self) -> None:
+    def _undo(self) -> None:
         self._apply(self._old)
 
     def _apply(self, times: tuple[int, int | None]) -> None:
         bookmark = self._repository.get(self._bookmark_id)
         if bookmark is None:
             return
-        self._repository.update(replace(bookmark, start_us=times[0], end_us=times[1]))
+        self._repository.update(with_range(bookmark, times[0], times[1]))
 
 
-class ResizeBookmarkCommand(QUndoCommand):
+class ResizeBookmarkCommand(_SafeCommand):
     """Changes exactly one boundary (spec #50): pass handle='start' or 'end'."""
 
     def __init__(
@@ -124,10 +152,10 @@ class ResizeBookmarkCommand(QUndoCommand):
         self._new_value = other._new_value
         return True
 
-    def redo(self) -> None:
+    def _redo(self) -> None:
         self._apply(self._new_value)
 
-    def undo(self) -> None:
+    def _undo(self) -> None:
         self._apply(self._old_value)
 
     def _apply(self, value_us: int) -> None:
@@ -135,12 +163,12 @@ class ResizeBookmarkCommand(QUndoCommand):
         if bookmark is None:
             return
         if self._handle == "start":
-            self._repository.update(replace(bookmark, start_us=value_us))
+            self._repository.update(with_range(bookmark, value_us, bookmark.end_us))
         else:
-            self._repository.update(replace(bookmark, end_us=value_us))
+            self._repository.update(with_range(bookmark, bookmark.start_us, value_us))
 
 
-class RenameBookmarkCommand(QUndoCommand):
+class RenameBookmarkCommand(_SafeCommand):
     def __init__(self, repository: BookmarkRepository, bookmark_id: UUID, old_name: str, new_name: str) -> None:
         super().__init__(f"Rename bookmark to '{new_name}'")
         self._repository = repository
@@ -148,10 +176,10 @@ class RenameBookmarkCommand(QUndoCommand):
         self._old_name = old_name
         self._new_name = new_name
 
-    def redo(self) -> None:
+    def _redo(self) -> None:
         self._apply(self._new_name)
 
-    def undo(self) -> None:
+    def _undo(self) -> None:
         self._apply(self._old_name)
 
     def _apply(self, name: str) -> None:
@@ -161,7 +189,7 @@ class RenameBookmarkCommand(QUndoCommand):
         self._repository.update(replace(bookmark, name=name))
 
 
-class ChangeLoopCommand(QUndoCommand):
+class ChangeLoopCommand(_SafeCommand):
     def __init__(
         self,
         repository: BookmarkRepository,
@@ -176,10 +204,10 @@ class ChangeLoopCommand(QUndoCommand):
         self._old = old
         self._new = new
 
-    def redo(self) -> None:
+    def _redo(self) -> None:
         self._apply(self._new)
 
-    def undo(self) -> None:
+    def _undo(self) -> None:
         self._apply(self._old)
 
     def id(self) -> int:  # noqa: A003
@@ -211,7 +239,7 @@ class ChangeLoopCommand(QUndoCommand):
         )
 
 
-class EditBookmarkFieldsCommand(QUndoCommand):
+class EditBookmarkFieldsCommand(_SafeCommand):
     """Sets arbitrary Bookmark fields (e.g. tags, notes). `old`/`new` map field name ->
     value. Consecutive edits of the same fields on the same bookmark merge into one
     undo step (typing notes shouldn't create one step per commit)."""
@@ -239,10 +267,10 @@ class EditBookmarkFieldsCommand(QUndoCommand):
         self._new = dict(other._new)
         return True
 
-    def redo(self) -> None:
+    def _redo(self) -> None:
         self._apply(self._new)
 
-    def undo(self) -> None:
+    def _undo(self) -> None:
         self._apply(self._old)
 
     def _apply(self, values: dict[str, Any]) -> None:
@@ -252,7 +280,7 @@ class EditBookmarkFieldsCommand(QUndoCommand):
         self._repository.update(replace(bookmark, **values))
 
 
-class MoveBookmarkLaneCommand(QUndoCommand):
+class MoveBookmarkLaneCommand(_SafeCommand):
     def __init__(
         self, repository: BookmarkRepository, bookmark_id: UUID, old_lane_id: UUID | None, new_lane_id: UUID | None
     ) -> None:
@@ -262,10 +290,10 @@ class MoveBookmarkLaneCommand(QUndoCommand):
         self._old_lane_id = old_lane_id
         self._new_lane_id = new_lane_id
 
-    def redo(self) -> None:
+    def _redo(self) -> None:
         self._apply(self._new_lane_id)
 
-    def undo(self) -> None:
+    def _undo(self) -> None:
         self._apply(self._old_lane_id)
 
     def _apply(self, lane_id: UUID | None) -> None:

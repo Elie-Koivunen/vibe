@@ -302,7 +302,7 @@ def test_rename_legacy_default_names(conn: sqlite3.Connection) -> None:
 
     assert renamed_count == 1
     assert bookmark_repo.get(legacy.id).name != "New bookmark"
-    assert re.fullmatch(r"bookmark-\d{8}-[a-z0-9]{6}", bookmark_repo.get(legacy.id).name)
+    assert re.fullmatch(r"\d{8}-[a-z0-9]{6}-00:00:00\.000", bookmark_repo.get(legacy.id).name)
     assert bookmark_repo.get(already_named.id).name == "Chorus"  # untouched
 
     # Idempotent: a second run finds nothing left to rename.

@@ -15,7 +15,8 @@ from PySide6.QtWidgets import (
 from bookmark_studio.domain.bookmark import Bookmark
 from bookmark_studio.domain.enums import CompletionAction
 from bookmark_studio.domain.selection import Selection
-from bookmark_studio.ui.transport import TimecodeEdit, format_timecode, parse_timecode
+from bookmark_studio.domain.timecode import format_timecode, parse_timecode
+from bookmark_studio.ui.transport import TimecodeEdit
 
 COMPLETION_LABELS = {
     CompletionAction.CONTINUE: "Continue",
@@ -93,8 +94,10 @@ class BookmarkInspector(QWidget):
         form.addRow("Gap", self._gap_spin)
 
         self._completion_combo = QComboBox(self)
+        # Item data is the enum's string value: that is what Qt stores and hands back
+        # (currentData() returns a plain str), so it's converted back on the way out.
         for action in OFFERED_COMPLETION_ACTIONS:
-            self._completion_combo.addItem(COMPLETION_LABELS[action], action)
+            self._completion_combo.addItem(COMPLETION_LABELS[action], action.value)
         self._completion_combo.currentIndexChanged.connect(self._on_loop_settings_changed)
         form.addRow("After loop", self._completion_combo)
 
@@ -146,10 +149,10 @@ class BookmarkInspector(QWidget):
             self._loop_checkbox.setChecked(bookmark.loop_enabled)
             self._repeat_spin.setValue(bookmark.repeat_count or 0)
             self._gap_spin.setValue(bookmark.loop_gap_ms)
-            index = self._completion_combo.findData(bookmark.completion_action)
+            index = self._completion_combo.findData(bookmark.completion_action.value)
             if index < 0:
                 self._completion_combo.addItem(COMPLETION_LABELS[bookmark.completion_action],
-                                               bookmark.completion_action)
+                                               bookmark.completion_action.value)
                 index = self._completion_combo.count() - 1
             self._completion_combo.setCurrentIndex(index)
             self._fade_in_spin.setValue(bookmark.fade_in_ms)
@@ -233,7 +236,7 @@ class BookmarkInspector(QWidget):
         if self._loading or self._bookmark is None:
             return
         repeat_count = self._repeat_spin.value() or None
-        action = self._completion_combo.currentData()
+        action = CompletionAction(self._completion_combo.currentData())
         new = (
             self._loop_checkbox.isChecked(), repeat_count, self._gap_spin.value(), action,
             self._fade_in_spin.value(), self._fade_out_spin.value(),

@@ -18,8 +18,8 @@ from PySide6.QtWidgets import (
 )
 
 from bookmark_studio.domain.bookmark import Bookmark
+from bookmark_studio.domain.timecode import format_timecode
 from bookmark_studio.ui.qt_helpers import top_level_rows
-from bookmark_studio.ui.transport import format_timecode
 
 # The list spans every song of the playlist, so "Song" says which track a bookmark
 # belongs to. Loop/Gap/Fade In/Fade Out are editable in place (dropdowns).

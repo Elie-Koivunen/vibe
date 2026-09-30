@@ -410,7 +410,7 @@ class MainWindow(QMainWindow):
 
     def _on_selection_changed(self, selection: object) -> None:
         from bookmark_studio.domain.selection import Selection
-        from bookmark_studio.ui.transport import format_timecode
+        from bookmark_studio.domain.timecode import format_timecode
 
         if isinstance(selection, Selection):
             self._selection_label.setText(f"Selection ({format_timecode(selection.duration_us)})")
@@ -433,7 +433,7 @@ class MainWindow(QMainWindow):
         continuously during the drag, unlike
         _on_selection_changed (which only fires once the drag settles)."""
         from bookmark_studio.domain.selection import Selection
-        from bookmark_studio.ui.transport import format_timecode
+        from bookmark_studio.domain.timecode import format_timecode
 
         self._selection_start_label.setText(format_timecode(start_us))
         self._selection_end_label.setText(format_timecode(end_us))
@@ -456,7 +456,7 @@ class MainWindow(QMainWindow):
             scope=BookmarkScope.PLAYLIST_MEDIA if self._current_playlist_id else BookmarkScope.GLOBAL_MEDIA,
             lane_id=None,
             bookmark_type=BookmarkType.SEGMENT,
-            name=default_bookmark_name(),
+            name=default_bookmark_name(selection.start_us, selection.end_us),
             start_us=selection.start_us,
             end_us=selection.end_us,
             # New bookmarks loop forever by default (repeat_count=None means "forever").
@@ -504,7 +504,7 @@ class MainWindow(QMainWindow):
             scope=BookmarkScope.PLAYLIST_MEDIA if self._current_playlist_id else BookmarkScope.GLOBAL_MEDIA,
             lane_id=None,
             bookmark_type=BookmarkType.POINT,
-            name=default_bookmark_name(),
+            name=default_bookmark_name(time_us),
             start_us=time_us,
             end_us=None,
             loop_enabled=False,
