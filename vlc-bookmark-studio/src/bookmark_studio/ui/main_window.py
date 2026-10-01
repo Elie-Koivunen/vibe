@@ -32,9 +32,11 @@ from bookmark_studio.domain.bookmark import Bookmark, default_bookmark_name
 from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
 from bookmark_studio.domain.equalizer import EqualizerSettings
 from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
+from bookmark_studio.persistence.tag_repository import TagRepository
 from bookmark_studio.ui.bookmark_panel import BookmarkPanel
 from bookmark_studio.ui.branding import APP_NAME, app_icon, logo_pixmap
 from bookmark_studio.ui.deck_fader import VolumeStrip, level_to_percent
+from bookmark_studio.ui.dialogs.tag_catalog_dialog import TagCatalogDialog
 from bookmark_studio.ui.inspector import BookmarkInspector
 from bookmark_studio.ui.playlist_panel import PlaylistPanel
 from bookmark_studio.ui.transport import TransportBar
@@ -78,6 +80,10 @@ class MainWindow(QMainWindow):
     playlist_refresh_requested = Signal()  # Playlist > Refresh
     volume_requested = Signal(int)  # the volume fader moved (0-512, 256 = 100 %)
     equalizer_requested = Signal(object)  # EqualizerSettings, from the Volume & EQ tab
+    volume_max_requested = Signal()  # Max: up to 100 % over its ramp time
+    volume_mute_requested = Signal()  # Mute: down to silence over its ramp time
+    volume_reset_requested = Signal()  # Reset: back to the volume from before, at once
+    volume_ramp_times_changed = Signal(int, int)  # Max ms, Mute ms
     quit_requested = Signal()  # Quit button / File > Quit / Ctrl+Q
 
     # Player controls
@@ -140,6 +146,7 @@ class MainWindow(QMainWindow):
         self._build_layout()
         self._build_shortcuts()
         self._wire_signals()
+        self.refresh_tag_catalog()
         self._fit_minimum_size()
 
     def _fit_minimum_size(self) -> None:
@@ -161,14 +168,15 @@ class MainWindow(QMainWindow):
     # -- layout --
 
     def _build_selection_bar(self) -> None:
-        """The selection readout, under the waveform: where a drag-selection starts and
-        ends and how long it is. Read-only -- it follows the selection while it is
-        dragged or resized (see SelectionItem's handles); saved bookmarks are edited in
-        the list and the Bookmark tab."""
-        self._selection_bar = QWidget(self)
-        layout = QHBoxLayout(self._selection_bar)
-        layout.setContentsMargins(8, 2, 8, 2)
-        layout.setSpacing(8)
+        """The selection readout, at the top of the tool column beside the waveform: where
+        a drag-selection starts and ends and how long it is. Read-only -- it follows the
+        selection while it is dragged or resized (see SelectionItem's handles); saved
+        bookmarks are edited in the list and the Bookmark tab."""
+        self._selection_bar = QFrame(self)
+        self._selection_bar.setFrameShape(QFrame.Shape.StyledPanel)
+        layout = QVBoxLayout(self._selection_bar)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(1)
         self._selection_bar.setToolTip(
             "Drag on the waveform to select; [ and ] set the start and end at the playhead"
         )
@@ -176,14 +184,17 @@ class MainWindow(QMainWindow):
         self._selection_label = QLabel("No selection", self)
         self._selection_label.setStyleSheet("font-weight: 600;")
         layout.addWidget(self._selection_label)
+        start_row = QHBoxLayout()
+        start_row.setSpacing(4)
         self._selection_start_label = QLabel("--:--:--.---", self)
-        layout.addWidget(self._selection_start_label)
-        layout.addWidget(QLabel("→", self))
+        start_row.addWidget(self._selection_start_label)
+        start_row.addWidget(QLabel("→", self))
+        start_row.addStretch(1)
+        layout.addLayout(start_row)
         self._selection_end_label = QLabel("--:--:--.---", self)
         layout.addWidget(self._selection_end_label)
         self._selection_duration_label = QLabel("", self)
         layout.addWidget(self._selection_duration_label)
-        layout.addStretch(1)
 
     def _build_tool_column(self) -> None:
         """View, bookmark and selection buttons in a column beside the waveform, grouped
@@ -205,6 +216,8 @@ class MainWindow(QMainWindow):
             widget.setToolTip(tooltip)
             widget.clicked.connect(slot)
             return widget
+
+        layout.addWidget(self._selection_bar)
 
         # Visible zoom buttons: Ctrl+wheel/Ctrl+0 (spec #84) alone are too easy to miss.
         heading("VIEW")
@@ -252,7 +265,8 @@ class MainWindow(QMainWindow):
             button.setEnabled(enabled)
 
     def _build_layout(self) -> None:
-        # The deck, top to bottom: transport, waveform with its tool column, selection.
+        # The deck: the transport above the waveform, the tool column (selection readout,
+        # view, bookmark and selection buttons) beside it.
         deck = QWidget(self)
         deck_layout = QVBoxLayout(deck)
         deck_layout.setContentsMargins(0, 0, 0, 0)
@@ -263,7 +277,6 @@ class MainWindow(QMainWindow):
         waveform_row.addWidget(self._waveform_view, 1)
         waveform_row.addWidget(_scrolling(self._tool_column, vertical_only=True))
         deck_layout.addLayout(waveform_row, 1)
-        deck_layout.addWidget(self._selection_bar)
 
         top_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         top_splitter.addWidget(self._playlist_panel)
@@ -417,12 +430,17 @@ class MainWindow(QMainWindow):
         # silently discarded.
         self._inspector.tags_committed.connect(self._on_tags_committed)
         self._inspector.notes_committed.connect(self._on_notes_committed)
+        self._inspector.edit_tags_requested.connect(self.edit_tags)
 
         self._playlist_panel.launch_vlc_requested.connect(self.launch_vlc_requested.emit)
         self._playlist_panel.quit_requested.connect(self.quit_requested.emit)
         self._volume.volume_changed.connect(self.volume_requested.emit)
         self._volume.volume_changed.connect(lambda level: self._transport.set_volume_percent(level_to_percent(level)))
         self._volume_eq.equalizer_changed.connect(self.equalizer_requested.emit)
+        self._volume_eq.max_requested.connect(self.volume_max_requested.emit)
+        self._volume_eq.mute_requested.connect(self.volume_mute_requested.emit)
+        self._volume_eq.reset_requested.connect(self.volume_reset_requested.emit)
+        self._volume_eq.ramp_times_changed.connect(self.volume_ramp_times_changed.emit)
         self._transport.volume_clicked.connect(self._on_volume_readout_clicked)
         self._playlist_panel.item_selected.connect(self.playlist_item_selected.emit)
         self._playlist_panel.item_double_clicked.connect(self.playlist_item_double_clicked.emit)
@@ -466,6 +484,48 @@ class MainWindow(QMainWindow):
         self._volume_eq.set_band_frequencies(band_hz)
         self._volume_eq.set_equalizer_supported(supported, note)
 
+    def show_volume_ramp_times(self, max_ms: int, mute_ms: int) -> None:
+        """Saved Max/Mute ramp times (no volume_ramp_times_changed)."""
+        self._volume_eq.set_ramp_times(max_ms, mute_ms)
+
+    def volume_ramp_times(self) -> tuple[int, int]:
+        return self._volume_eq.ramp_times()
+
+    def set_volume_reset_level(self, level: int | None) -> None:
+        """What Reset would restore (0-512), or None to disable it."""
+        self._volume_eq.set_reset_level(level)
+
+    # -- tags --
+
+    def refresh_tag_catalog(self) -> None:
+        """Re-reads the tag list (after the Edit tags window, or a sync)."""
+        self._inspector.set_tag_catalog(TagRepository(self._bookmark_repository.connection).names())
+
+    def edit_tags(self) -> bool:
+        """Opens the Edit tags window. True if anything changed; then every view that
+        shows tags is refreshed (a rename or removal touches bookmarks of any song)."""
+        current = self._current_inspected_bookmark()
+        dialog = TagCatalogDialog(
+            TagRepository(self._bookmark_repository.connection), self,
+            selected=current.tags[0] if current is not None and current.tags else None,
+        )
+        dialog.exec()
+        self.refresh_tag_catalog()
+        if dialog.changed:
+            self._after_tag_catalog_change()
+        return dialog.changed
+
+    def _after_tag_catalog_change(self) -> None:
+        current = self._current_inspected_bookmark()
+        if current is not None:
+            updated = self._bookmark_repository.get(current.id)
+            if updated is None:
+                self._clear_inspector()
+            else:
+                self._load_bookmark_into_inspector(updated)
+        self._refresh_bookmarks()
+        self.bookmarks_changed.emit()  # the cross-song list too
+
     # -- session state --
 
     def commit_pending_edits(self) -> None:
@@ -477,8 +537,12 @@ class MainWindow(QMainWindow):
         for name, splitter in self._splitters.items():
             settings.set_splitter_state(name, splitter.saveState())
         settings.set_panel_tab("side", self._side_tabs.currentIndex())
+        settings.set_header_state("bookmarks", self._bookmark_panel.header_state())
 
     def restore_layout(self, settings) -> None:  # noqa: ANN001
+        # The final minimum first: a saved size below it would otherwise be widened after
+        # the panels were sized, and they would not come back as saved.
+        self._fit_minimum_size()
         geometry = settings.window_geometry()
         if isinstance(geometry, QByteArray) and not geometry.isEmpty():
             self.restoreGeometry(geometry)
@@ -489,6 +553,9 @@ class MainWindow(QMainWindow):
         tab = settings.panel_tab("side")
         if 0 <= tab < self._side_tabs.count():
             self._side_tabs.setCurrentIndex(tab)
+        columns = settings.header_state("bookmarks")
+        if isinstance(columns, QByteArray) and not columns.isEmpty():
+            self._bookmark_panel.restore_header_state(columns)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
         # Closing the window is quitting too: keep what is being typed.
@@ -608,7 +675,7 @@ class MainWindow(QMainWindow):
 
         self._selection_start_label.setText(format_timecode(start_us))
         self._selection_end_label.setText(format_timecode(end_us))
-        self._selection_duration_label.setText(f"   length {format_timecode(max(0, end_us - start_us))}")
+        self._selection_duration_label.setText(f"length {format_timecode(max(0, end_us - start_us))}")
 
     def _on_bookmark_now_clicked(self) -> None:
         if self._waveform_scene.selection() is not None:
@@ -627,7 +694,7 @@ class MainWindow(QMainWindow):
             scope=BookmarkScope.PLAYLIST_MEDIA if self._current_playlist_id else BookmarkScope.GLOBAL_MEDIA,
             lane_id=None,
             bookmark_type=BookmarkType.SEGMENT,
-            name=default_bookmark_name(selection.start_us, selection.end_us),
+            name=default_bookmark_name(),
             start_us=selection.start_us,
             end_us=selection.end_us,
             # New bookmarks loop forever by default (repeat_count=None means "forever").
@@ -675,7 +742,7 @@ class MainWindow(QMainWindow):
             scope=BookmarkScope.PLAYLIST_MEDIA if self._current_playlist_id else BookmarkScope.GLOBAL_MEDIA,
             lane_id=None,
             bookmark_type=BookmarkType.POINT,
-            name=default_bookmark_name(time_us),
+            name=default_bookmark_name(),
             start_us=time_us,
             end_us=None,
             loop_enabled=False,
@@ -1010,6 +1077,7 @@ class MainWindow(QMainWindow):
         return ProjectData(
             playlists=playlists, media=media, bookmarks=bookmarks, lanes=lanes,
             playlist_items=items, playlist_signatures=signatures,
+            tag_state=TagRepository(conn).export_state(),
         )
 
     def _on_export_project(self) -> None:

@@ -24,22 +24,29 @@ _TIMECODE = r"\d{2,}:\d{2}:\d{2}\.\d{3}"
 _AUTO_NAME_RE = re.compile(rf"^(\d{{8}})-([a-z0-9]{{6}})-({_TIMECODE})(?:-({_TIMECODE}))?$")
 
 
-def default_bookmark_name(
+def default_bookmark_name(*, suffix: str | None = None) -> str:
+    """A new bookmark's name: 6 random characters, e.g. ``k3x9qa`` (0.7.0). The times
+    are in the list's Start/End columns; the random string tells bookmarks apart.
+    secrets (not random) only because it needs no seeding."""
+    return suffix or "".join(secrets.choice(_NAME_SUFFIX_ALPHABET) for _ in range(6))
+
+
+def dated_bookmark_name(
     start_us: int, end_us: int | None = None, *, created: datetime | None = None, suffix: str | None = None,
 ) -> str:
-    """"<date>-<6 random characters>-<start>[-<end>]", e.g.
-    ``20260930-k3x9qa-00:01:23.456-00:01:45.000`` (a point bookmark has only a start).
-    The random part keeps names distinct when two bookmarks share a range; secrets
-    (not random) only because it needs no seeding."""
+    """The automatic name of 0.4.0-0.6.0: "<date>-<6 random characters>-<start>[-<end>]",
+    e.g. ``20260930-k3x9qa-00:01:23.456-00:01:45.000`` (a point bookmark has only a
+    start). No longer given to new bookmarks; existing ones keep it and it still follows
+    their moves (with_range)."""
     date_part = (created or datetime.now()).strftime("%Y%m%d")
-    suffix = suffix or "".join(secrets.choice(_NAME_SUFFIX_ALPHABET) for _ in range(6))
+    suffix = suffix or default_bookmark_name()
     name = f"{date_part}-{suffix}-{format_timecode(start_us)}"
     return name if end_us is None else f"{name}-{format_timecode(end_us)}"
 
 
 def is_automatic_name(name: str, start_us: int, end_us: int | None) -> bool:
-    """True if `name` is exactly the automatic name for this range (the user never
-    renamed the bookmark)."""
+    """True if `name` is exactly the dated automatic name for this range (the user never
+    renamed the bookmark). A plain random name has no times in it to keep up to date."""
     match = _AUTO_NAME_RE.match(name)
     if match is None:
         return False
@@ -49,14 +56,14 @@ def is_automatic_name(name: str, start_us: int, end_us: int | None) -> bool:
 
 
 def with_range(bookmark: Bookmark, start_us: int, end_us: int | None) -> Bookmark:
-    """`bookmark` moved/resized to [start_us, end_us]. An automatic name follows the new
-    times (keeping its date and random part); a name the user typed stays as it is."""
+    """`bookmark` moved/resized to [start_us, end_us]. A dated automatic name follows the
+    new times (keeping its date and random part); any other name stays as it is."""
     name = bookmark.name
     if is_automatic_name(name, bookmark.start_us, bookmark.end_us):
         match = _AUTO_NAME_RE.match(name)
         assert match is not None
         date_part, suffix = match.group(1), match.group(2)
-        name = default_bookmark_name(
+        name = dated_bookmark_name(
             start_us, end_us, created=datetime.strptime(date_part, "%Y%m%d"), suffix=suffix
         )
     return replace(bookmark, start_us=start_us, end_us=end_us, name=name)

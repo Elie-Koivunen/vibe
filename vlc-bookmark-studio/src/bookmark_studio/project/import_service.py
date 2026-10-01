@@ -36,6 +36,7 @@ from bookmark_studio.domain.bookmark import Bookmark
 from bookmark_studio.domain.lane import Lane
 from bookmark_studio.domain.media import Media
 from bookmark_studio.domain.playlist import Playlist
+from bookmark_studio.persistence.tag_repository import TagRepository
 from bookmark_studio.playlist.signatures import strict_signature
 from bookmark_studio.project.schema import (
     bookmark_from_dict,
@@ -57,6 +58,8 @@ class ImportPlan:
     # Sync metadata (sync.json): when each bookmark last changed, and deletions.
     bookmark_updated_at: dict[UUID, str] = field(default_factory=dict)
     tombstones: dict[UUID, str] = field(default_factory=dict)
+    # tags.json (0.7.0): the tag catalog and its renames/removals.
+    tag_state: dict[str, Any] | None = None
 
 
 @dataclass
@@ -88,6 +91,7 @@ def read_import_plan(path: Path) -> ImportPlan:
         items_raw = _optional_json(archive, "playlist_items.json", [])
         signatures_raw = _optional_json(archive, "playlist_signatures.json", [])
         sync_raw = _optional_json(archive, "sync.json", {})
+        tags_raw = _optional_json(archive, "tags.json", None)
 
     return ImportPlan(
         playlists=[playlist_from_dict(entry) for entry in playlists_raw],
@@ -100,6 +104,7 @@ def read_import_plan(path: Path) -> ImportPlan:
         playlist_signatures=[(UUID(entry["playlist_id"]), str(entry["signature"])) for entry in signatures_raw],
         bookmark_updated_at={UUID(k): str(v) for k, v in (sync_raw.get("bookmark_updated_at") or {}).items()},
         tombstones={UUID(k): str(v) for k, v in (sync_raw.get("tombstones") or {}).items()},
+        tag_state=tags_raw if isinstance(tags_raw, dict) else None,
     )
 
 
@@ -224,6 +229,11 @@ def apply_import_plan(conn: sqlite3.Connection, plan: ImportPlan, *, mode: str =
     stats = ImportStats()
     now = datetime.now(timezone.utc).isoformat()
     with conn:
+        # The other side's tag renames/removals first, so the bookmarks below are stored
+        # with current tag names (stale ones are mapped or dropped by canonical()).
+        tags = TagRepository(conn)
+        if plan.tag_state:
+            tags.merge_state(plan.tag_state)
         media_map = _map_media(conn, plan, now)
         playlist_map = _map_playlists(conn, plan, now, media_map, update_existing=not sync)
 
@@ -303,7 +313,7 @@ def apply_import_plan(conn: sqlite3.Connection, plan: ImportPlan, *, mode: str =
             conn.execute("DELETE FROM bookmark_tags WHERE bookmark_id = ?", (str(bookmark.id),))
             conn.executemany(
                 "INSERT INTO bookmark_tags (bookmark_id, tag) VALUES (?, ?)",
-                [(str(bookmark.id), tag) for tag in bookmark.tags],
+                [(str(bookmark.id), tag) for tag in tags.canonical(bookmark.tags)],
             )
             conn.execute("DELETE FROM bookmark_tombstones WHERE bookmark_id = ?", (str(bookmark.id),))
             stats.bookmarks_written += 1

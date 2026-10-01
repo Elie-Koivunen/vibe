@@ -1,4 +1,9 @@
-"""The "Volume & EQ" tab: the DJ volume fader and a 10-band equalizer with a preamp.
+"""The "Volume & EQ" tab: the DJ volume fader, Max / Reset / Mute beside it, and a 10-band
+equalizer with a preamp.
+
+Max raises the volume to 100 % and Mute lowers it to silence, each over its own time
+(while something plays; at once otherwise). Reset goes straight back to the volume from
+before. The ramps themselves run in Application.
 
 The equalizer faders are painted like the volume fader (dark strip, lit slot, metal cap)
 but lit from their neutral mark: 0 dB for a band, +12 dB for the preamp (VLC's neutral
@@ -20,6 +25,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -34,9 +40,10 @@ from bookmark_studio.domain.equalizer import (
     EqualizerSettings,
     band_label,
 )
-from bookmark_studio.ui.deck_fader import _LIT, _PANEL, _SCALE, _SLOT, _UNITY, VolumeStrip
+from bookmark_studio.ui.deck_fader import _LIT, _PANEL, _SCALE, _SLOT, _UNITY, VolumeStrip, level_to_percent
 
 CUSTOM_PRESET = "Custom"
+DEFAULT_RAMP_MS = 1500  # Max and Mute
 _STEPS_PER_DB = 10  # the slider counts tenths of a dB
 _CAP_W = 22
 _CAP_H = 12
@@ -189,6 +196,10 @@ class VolumeEqPanel(QWidget):
 
     volume_changed = Signal(int)
     equalizer_changed = Signal(object)  # EqualizerSettings
+    max_requested = Signal()
+    mute_requested = Signal()
+    reset_requested = Signal()
+    ramp_times_changed = Signal(int, int)  # Max ms, Mute ms
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -203,6 +214,7 @@ class VolumeEqPanel(QWidget):
         self.volume_strip.setToolTip("Player volume")
         self.volume_strip.volume_changed.connect(self.volume_changed.emit)
         layout.addWidget(self.volume_strip)
+        layout.addWidget(self._build_ramp_column())
 
         divider = QFrame(self)
         divider.setFrameShape(QFrame.Shape.VLine)
@@ -269,6 +281,70 @@ class VolumeEqPanel(QWidget):
 
         self.set_band_frequencies(VLC_BANDS_HZ)
         self._show(self._settings)
+
+    def _build_ramp_column(self) -> QWidget:
+        """Beside the fader: Max (with its ramp time) at the top, Reset in the middle,
+        Mute (with its ramp time) at the bottom. The times work like a bookmark's fades:
+        milliseconds, 0 = at once."""
+        column = QWidget(self)
+        column.setFixedWidth(96)
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        def ramp_spin(tooltip: str) -> QSpinBox:
+            spin = QSpinBox(column)
+            spin.setRange(0, 60_000)
+            spin.setSingleStep(250)
+            spin.setSuffix(" ms")
+            spin.setSpecialValueText("At once")
+            spin.setValue(DEFAULT_RAMP_MS)
+            spin.setToolTip(tooltip)
+            spin.valueChanged.connect(lambda _value: self.ramp_times_changed.emit(*self.ramp_times()))
+            return spin
+
+        self._max_button = QPushButton("Max", column)
+        self._max_button.setToolTip("Raise the volume to 100 % over the time below")
+        self._max_button.clicked.connect(self.max_requested.emit)
+        self._max_ms = ramp_spin("How long Max takes to raise the volume")
+        self._volume_reset_button = QPushButton("Reset", column)
+        self._volume_reset_button.setToolTip("Back at once to the volume from before Max or Mute")
+        self._volume_reset_button.clicked.connect(self.reset_requested.emit)
+        self._volume_reset_button.setEnabled(False)
+        self._mute_ms = ramp_spin("How long Mute takes to lower the volume (while something plays)")
+        self._mute_button = QPushButton("Mute", column)
+        self._mute_button.setToolTip("Lower the volume to silence over the time above")
+        self._mute_button.clicked.connect(self.mute_requested.emit)
+
+        layout.addSpacing(18)  # level with the fader's top
+        layout.addWidget(self._max_button)
+        layout.addWidget(self._max_ms)
+        layout.addStretch(1)
+        layout.addWidget(self._volume_reset_button)
+        layout.addStretch(1)
+        layout.addWidget(self._mute_ms)
+        layout.addWidget(self._mute_button)
+        layout.addSpacing(22)  # level with the fader's bottom, above its readout
+        return column
+
+    def ramp_times(self) -> tuple[int, int]:
+        """(Max, Mute) ramp times in ms."""
+        return self._max_ms.value(), self._mute_ms.value()
+
+    def set_ramp_times(self, max_ms: int, mute_ms: int) -> None:
+        """Saved ramp times; no ramp_times_changed."""
+        for spin, value in ((self._max_ms, max_ms), (self._mute_ms, mute_ms)):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+
+    def set_reset_level(self, level: int | None) -> None:
+        """The volume Reset would go back to (0-512), or None: nothing to reset."""
+        self._volume_reset_button.setEnabled(level is not None)
+        if level is None:
+            self._volume_reset_button.setToolTip("Back at once to the volume from before Max or Mute")
+        else:
+            self._volume_reset_button.setToolTip(f"Back at once to {level_to_percent(level)} %")
 
     @staticmethod
     def _value_label() -> QLabel:

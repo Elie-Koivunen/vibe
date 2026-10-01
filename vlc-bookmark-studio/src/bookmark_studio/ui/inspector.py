@@ -1,4 +1,6 @@
-"""Bookmark Inspector: name/start/end/loop/repeat/gap/lane/tags/notes editor (spec #42)."""
+"""Bookmark Inspector -- the "Bookmark" tab: name, start/end, loop settings, fades, tags and
+notes (spec #42). Loop/Repeat/After loop share a row, so do Gap/Fade in/Fade out; tags are
+picked from the tag list (TagPicker)."""
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
@@ -6,6 +8,8 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFormLayout,
+    QHBoxLayout,
+    QLabel,
     QLineEdit,
     QPlainTextEdit,
     QSpinBox,
@@ -16,6 +20,7 @@ from bookmark_studio.domain.bookmark import Bookmark
 from bookmark_studio.domain.enums import CompletionAction
 from bookmark_studio.domain.selection import Selection
 from bookmark_studio.domain.timecode import format_timecode, parse_timecode
+from bookmark_studio.ui.tag_picker import TagPicker
 from bookmark_studio.ui.transport import TimecodeEdit
 
 COMPLETION_LABELS = {
@@ -45,6 +50,23 @@ class _NotesEdit(QPlainTextEdit):
         self.editingFinished.emit()
 
 
+def _row(parent: QWidget, *parts: object) -> QWidget:
+    """Several fields on one form row; strings become their labels."""
+    row = QWidget(parent)
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(6)
+    for part in parts:
+        if isinstance(part, str):
+            label = QLabel(part, row)
+            layout.addSpacing(6)
+            layout.addWidget(label)
+        else:
+            layout.addWidget(part)  # type: ignore[arg-type]
+    layout.addStretch(1)
+    return row
+
+
 class BookmarkInspector(QWidget):
     name_committed = Signal(str)
     # object, not int -- see TransportBar.bookmark_start_committed's comment: a plain
@@ -56,6 +78,7 @@ class BookmarkInspector(QWidget):
     loop_settings_committed = Signal(bool, object, int, object, int, int)
     tags_committed = Signal(tuple)
     notes_committed = Signal(object)  # str | None
+    edit_tags_requested = Signal()  # "Edit..." beside the tags: open the tag list window
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -77,21 +100,15 @@ class BookmarkInspector(QWidget):
         self._end_edit.editingFinished.connect(self._on_end_committed)
         form.addRow("End", self._end_edit)
 
+        # One row: Loop, Repeat, After loop.
         self._loop_checkbox = QCheckBox(self)
+        self._loop_checkbox.setToolTip("Loop the bookmark when it plays")
         self._loop_checkbox.toggled.connect(self._on_loop_settings_changed)
-        form.addRow("Loop", self._loop_checkbox)
 
         self._repeat_spin = QSpinBox(self)
         self._repeat_spin.setRange(0, 999)  # 0 means "Forever"
         self._repeat_spin.setSpecialValueText("Forever")
         self._repeat_spin.valueChanged.connect(self._on_loop_settings_changed)
-        form.addRow("Repeat", self._repeat_spin)
-
-        self._gap_spin = QSpinBox(self)
-        self._gap_spin.setRange(0, 60_000)
-        self._gap_spin.setSuffix(" ms")
-        self._gap_spin.valueChanged.connect(self._on_loop_settings_changed)
-        form.addRow("Gap", self._gap_spin)
 
         self._completion_combo = QComboBox(self)
         # Item data is the enum's string value: that is what Qt stores and hands back
@@ -99,26 +116,33 @@ class BookmarkInspector(QWidget):
         for action in OFFERED_COMPLETION_ACTIONS:
             self._completion_combo.addItem(COMPLETION_LABELS[action], action.value)
         self._completion_combo.currentIndexChanged.connect(self._on_loop_settings_changed)
-        form.addRow("After loop", self._completion_combo)
+        form.addRow("Loop", _row(self, self._loop_checkbox, "Repeat", self._repeat_spin,
+                                 "After loop", self._completion_combo))
 
-        # Fades: 0 disables, the same "0 means off" convention as Gap above.
+        # The row below: Gap, Fade in, Fade out. Fades: 0 disables, like Gap.
+        self._gap_spin = QSpinBox(self)
+        self._gap_spin.setRange(0, 60_000)
+        self._gap_spin.setSuffix(" ms")
+        self._gap_spin.valueChanged.connect(self._on_loop_settings_changed)
+
         self._fade_in_spin = QSpinBox(self)
         self._fade_in_spin.setRange(0, 60_000)
         self._fade_in_spin.setSuffix(" ms")
         self._fade_in_spin.setSpecialValueText("Off")
         self._fade_in_spin.valueChanged.connect(self._on_loop_settings_changed)
-        form.addRow("Fade in", self._fade_in_spin)
 
         self._fade_out_spin = QSpinBox(self)
         self._fade_out_spin.setRange(0, 60_000)
         self._fade_out_spin.setSuffix(" ms")
         self._fade_out_spin.setSpecialValueText("Off")
         self._fade_out_spin.valueChanged.connect(self._on_loop_settings_changed)
-        form.addRow("Fade out", self._fade_out_spin)
+        form.addRow("Gap", _row(self, self._gap_spin, "Fade in", self._fade_in_spin, "Fade out", self._fade_out_spin))
 
-        self._tags_edit = QLineEdit(self)
-        self._tags_edit.editingFinished.connect(self._on_tags_committed)
-        form.addRow("Tags", self._tags_edit)
+        # Picked from the tag list, several at once; committed when the list closes.
+        self._tags_picker = TagPicker(self)
+        self._tags_picker.tags_changed.connect(self._on_tags_committed)
+        self._tags_picker.edit_catalog_requested.connect(self.edit_tags_requested.emit)
+        form.addRow("Tags", self._tags_picker)
 
         self._notes_edit = _NotesEdit(self)
         self._notes_edit.editingFinished.connect(self._on_notes_committed)
@@ -128,6 +152,10 @@ class BookmarkInspector(QWidget):
 
     def current_bookmark(self) -> Bookmark | None:
         return self._bookmark
+
+    def set_tag_catalog(self, names: list[str]) -> None:
+        """The tags to offer (TagRepository.names())."""
+        self._tags_picker.set_catalog(names)
 
     def set_snapshot(self, bookmark: Bookmark | None) -> None:
         """Updates the inspected bookmark's stored values WITHOUT touching the widgets.
@@ -157,7 +185,7 @@ class BookmarkInspector(QWidget):
             self._completion_combo.setCurrentIndex(index)
             self._fade_in_spin.setValue(bookmark.fade_in_ms)
             self._fade_out_spin.setValue(bookmark.fade_out_ms)
-            self._tags_edit.setText(", ".join(bookmark.tags))
+            self._tags_picker.set_tags(bookmark.tags)
             self._notes_edit.setPlainText(bookmark.notes or "")
         finally:
             self._loading = False
@@ -167,8 +195,9 @@ class BookmarkInspector(QWidget):
         self._loading = True
         try:
             self._bookmark = None
-            for widget in (self._name_edit, self._start_edit, self._end_edit, self._tags_edit):
+            for widget in (self._name_edit, self._start_edit, self._end_edit):
                 widget.clear()
+            self._tags_picker.set_tags(())
             self._notes_edit.clear()
         finally:
             self._loading = False
@@ -196,13 +225,13 @@ class BookmarkInspector(QWidget):
             self._loading = False
 
     def commit_pending(self) -> None:
-        """Saves text still being typed (name, times, tags, notes) -- before quitting."""
+        """Saves text still being typed (name, times, notes) -- before quitting. (Tags are
+        saved as soon as their list closes.)"""
         if self._bookmark is None or self._loading:
             return
         self._on_name_committed()
         self._on_start_committed()
         self._on_end_committed()
-        self._on_tags_committed()
         self._on_notes_committed()
 
     def _flush_notes(self) -> None:
@@ -259,11 +288,11 @@ class BookmarkInspector(QWidget):
         if new != old:
             self.loop_settings_committed.emit(*new)
 
-    def _on_tags_committed(self) -> None:
+    def _on_tags_committed(self, picked: tuple[str, ...]) -> None:
         if self._loading or self._bookmark is None:
             return
-        tags = tuple(dict.fromkeys(t.strip() for t in self._tags_edit.text().split(",") if t.strip()))
-        if tuple(sorted(tags)) != tuple(sorted(self._bookmark.tags)):
+        tags = tuple(dict.fromkeys(t.strip() for t in picked if t.strip()))
+        if tuple(sorted(t.casefold() for t in tags)) != tuple(sorted(t.casefold() for t in self._bookmark.tags)):
             self.tags_committed.emit(tags)
 
     def _on_notes_committed(self) -> None:

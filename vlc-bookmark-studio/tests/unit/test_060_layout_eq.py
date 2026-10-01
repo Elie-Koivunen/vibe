@@ -42,7 +42,9 @@ def _ini_settings(tmp_path: Path) -> SettingsService:
 # -- the layout --
 
 
-def test_transport_sits_above_the_waveform_and_the_selection_below_it(qtbot, tmp_path) -> None:
+def test_transport_sits_above_the_waveform_and_the_selection_beside_it(qtbot, tmp_path) -> None:
+    """0.6.0 put the selection readout under the waveform; 0.7.0 moved it to the top of
+    the tool column, above the View group, so the waveform has the full height."""
     app = _make_app(qtbot, tmp_path)
     window = app.window
     window.resize(1400, 900)
@@ -51,9 +53,9 @@ def test_transport_sits_above_the_waveform_and_the_selection_below_it(qtbot, tmp
     transport, view, selection = window._transport, window._waveform_view, window._selection_bar
     view_top = _top_left(view, window).y()
     assert _top_left(transport, window).y() + transport.height() <= view_top
-    assert _top_left(selection, window).y() >= view_top + view.height()
-    # the selection readout spans the waveform's own column
-    assert abs(_top_left(selection, window).x() - _top_left(view, window).x()) < 12
+    assert _top_left(selection, window).x() >= _top_left(view, window).x() + view.width()
+    assert _top_left(selection, window).y() + selection.height() <= _top_left(window._zoom_fit_button, window).y()
+    assert view_top <= _top_left(selection, window).y() < view_top + 40  # at the top of the column
 
 
 def test_view_bookmark_and_selection_buttons_stand_beside_the_waveform(qtbot, tmp_path) -> None:

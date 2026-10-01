@@ -1,16 +1,19 @@
-"""Bookmark list panel beneath the waveform (spec #7)."""
+"""Bookmark list panel beneath the waveform (spec #7): the list in a "Bookmarks" tab, and
+its Play/Loop/Delete/Move buttons stacked beside it (towards the Bookmark tab)."""
 from __future__ import annotations
 
 from uuid import UUID
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QByteArray, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QPushButton,
     QStyledItemDelegate,
+    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -22,8 +25,12 @@ from bookmark_studio.domain.timecode import format_timecode
 from bookmark_studio.ui.qt_helpers import top_level_rows
 
 # The list spans every song of the playlist, so "Song" says which track a bookmark
-# belongs to. Loop/Gap/Fade In/Fade Out are editable in place (dropdowns).
-COLUMNS = ["Song", "Name", "Start", "End", "Loop", "Gap", "Fade In", "Fade Out"]
+# belongs to. Loop/Gap/Fade In/Fade Out are editable in place (dropdowns). Tags came in
+# 0.7.0: added last, so every other column keeps its number, and shown before Name. The
+# user can drag columns into any order; MainWindow saves the header's state.
+COLUMNS = ["Song", "Name", "Start", "End", "Loop", "Gap", "Fade In", "Fade Out", "Tags"]
+TAGS_COLUMN = COLUMNS.index("Tags")
+DEFAULT_ORDER = ["Song", "Tags", "Name", "Start", "End", "Loop", "Gap", "Fade In", "Fade Out"]
 USER_ROLE = 32
 LOOP_COLUMN = COLUMNS.index("Loop")
 GAP_COLUMN = COLUMNS.index("Gap")
@@ -135,48 +142,55 @@ class BookmarkPanel(QWidget):
         self._bookmark_order: list[Bookmark] = []
         self._shown_names: dict[UUID, str] = {}
         self._restoring = False
-        layout = QVBoxLayout(self)
+        # Columns fit their contents until the user (or a saved layout) sizes them.
+        self._fitting = False
+        self._user_sized_columns = False
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
 
-        toolbar = QHBoxLayout()
+        self._tabs = QTabWidget(self)
+        self._tabs.setDocumentMode(True)
+        layout.addWidget(self._tabs, 1)
+
+        # The buttons, stacked between this list and the Bookmark / Volume & EQ tabs.
+        self.action_column = QFrame(self)
+        actions = QVBoxLayout(self.action_column)
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(4)
+        layout.addWidget(self.action_column)
+
+        def button(text: str, tooltip: str) -> QPushButton:
+            widget = QPushButton(text, self.action_column)
+            widget.setToolTip(tooltip)
+            actions.addWidget(widget)
+            return widget
+
         # Plays a saved bookmark row -- unlike the transport bar (the player's playlist)
         # and Play/Loop Selection (a fresh drag-selection on the waveform). Play/Loop
         # act on one bookmark, so they are enabled only for a single selected row.
-        self._play_bookmark_button = QPushButton("Play Bookmark", self)
-        self._play_bookmark_button.setToolTip("Seek VLC to the selected bookmark and play")
+        self._play_bookmark_button = button("Play", "Seek to the selected bookmark and play (double-click a row)")
         self._play_bookmark_button.clicked.connect(self._on_play_bookmark_clicked)
-        toolbar.addWidget(self._play_bookmark_button)
-
-        self._loop_bookmark_button = QPushButton("Loop Bookmark", self)
-        self._loop_bookmark_button.setToolTip("Loop the selected bookmark using its own saved loop settings")
+        self._loop_bookmark_button = button("Loop", "Loop the selected bookmark using its own saved loop settings")
         self._loop_bookmark_button.clicked.connect(self._on_loop_bookmark_clicked)
-        toolbar.addWidget(self._loop_bookmark_button)
-
         # Deletes every selected row (the Delete key and Bookmark menu do the same).
-        self._delete_bookmark_button = QPushButton("Delete Bookmark", self)
-        self._delete_bookmark_button.setToolTip("Delete every selected bookmark")
+        self._delete_bookmark_button = button("Delete", "Delete every selected bookmark (Delete)")
         self._delete_bookmark_button.clicked.connect(self._on_delete_bookmark_clicked)
-        toolbar.addWidget(self._delete_bookmark_button)
-
         # Manual order (drag and drop does the same, see below).
-        self._move_up_button = QPushButton("Move Up", self)
-        self._move_up_button.setToolTip("Move every selected bookmark up in this list")
+        self._move_up_button = button("Move up", "Move every selected bookmark up in this list")
         self._move_up_button.clicked.connect(lambda: self._move_selected(-1))
-        toolbar.addWidget(self._move_up_button)
-
-        self._move_down_button = QPushButton("Move Down", self)
-        self._move_down_button.setToolTip("Move every selected bookmark down in this list")
+        self._move_down_button = button("Move down", "Move every selected bookmark down in this list")
         self._move_down_button.clicked.connect(lambda: self._move_selected(1))
-        toolbar.addWidget(self._move_down_button)
-
-        toolbar.addStretch(1)
+        actions.addSpacing(10)
         # Same as File > Export Project, where it is easy to miss.
-        self._export_button = QPushButton("Save Bookmarks...", self)
-        self._export_button.setToolTip("Export this playlist's bookmarks to a .vlcbmk file")
+        self._export_button = button("Save...", "Save this playlist's bookmarks to a .vlcbmk file")
         self._export_button.clicked.connect(self.export_requested.emit)
-        toolbar.addWidget(self._export_button)
-        layout.addLayout(toolbar)
+        actions.addStretch(1)
 
         self._tree = QTreeWidget(self)
+        self._tabs.addTab(self._tree, "Bookmarks")
+        # Level with the tab pages, below the tab bars.
+        actions.setContentsMargins(0, self._tabs.tabBar().sizeHint().height() + 2, 0, 0)
         self._tree.setColumnCount(len(COLUMNS))
         self._tree.setHeaderLabels(COLUMNS)
         # Ctrl/Shift-click or a rubber-band drag selects several rows.
@@ -185,6 +199,8 @@ class BookmarkPanel(QWidget):
         header = self._tree.header()
         header.setSectionsMovable(True)
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self._apply_default_order()
+        header.sectionResized.connect(self._on_section_resized)
         # Rows are reordered by dragging; InternalMove moves the whole selection together.
         self._tree.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self._tree.setDragEnabled(True)
@@ -213,9 +229,31 @@ class BookmarkPanel(QWidget):
             )
         )
         self._tree.itemChanged.connect(self._on_item_changed)
-        layout.addWidget(self._tree)
 
         self._set_playback_buttons_enabled(0, allow_loop=False)
+
+    # -- column layout --
+
+    def _apply_default_order(self) -> None:
+        header = self._tree.header()
+        for visual, name in enumerate(DEFAULT_ORDER):
+            header.moveSection(header.visualIndex(COLUMNS.index(name)), visual)
+
+    def _on_section_resized(self, *_args) -> None:
+        if not self._fitting:
+            self._user_sized_columns = True
+
+    def header_state(self) -> QByteArray:
+        """The columns' order and widths (saved with the window layout)."""
+        return self._tree.header().saveState()
+
+    def restore_header_state(self, state: QByteArray) -> bool:
+        header = self._tree.header()
+        if not header.restoreState(state) or header.count() != len(COLUMNS):
+            self._apply_default_order()
+            return False
+        self._user_sized_columns = True  # saved widths are not refitted
+        return True
 
     def _set_playback_buttons_enabled(self, selected_count: int, *, allow_loop: bool) -> None:
         self._play_bookmark_button.setEnabled(selected_count == 1)
@@ -359,6 +397,7 @@ class BookmarkPanel(QWidget):
                         _ms_label(bookmark.loop_gap_ms),
                         _ms_label(bookmark.fade_in_ms),
                         _ms_label(bookmark.fade_out_ms),
+                        ", ".join(bookmark.tags),
                     ]
                 )
                 row.setData(0, USER_ROLE, bookmark.id)
@@ -366,11 +405,15 @@ class BookmarkPanel(QWidget):
                 # editors at all -- QTreeWidgetItem isn't editable by default.
                 row.setFlags(row.flags() | Qt.ItemFlag.ItemIsEditable)
                 self._tree.addTopLevelItem(row)
-            # Columns fit their contents only when the rows changed, so a width the user
-            # set survives ordinary refreshes.
-            if refit_columns:
-                for column in range(len(COLUMNS)):
-                    self._tree.resizeColumnToContents(column)
+            # Columns fit their contents only when the rows changed, and only until the
+            # user sizes one (or a saved layout is restored): their widths stay.
+            if refit_columns and not self._user_sized_columns:
+                self._fitting = True
+                try:
+                    for column in range(len(COLUMNS)):
+                        self._tree.resizeColumnToContents(column)
+                finally:
+                    self._fitting = False
             if previously_selected:
                 self.select_bookmarks(previously_selected)
             self._tree.verticalScrollBar().setValue(scroll_value)

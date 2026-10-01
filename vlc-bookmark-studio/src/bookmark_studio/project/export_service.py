@@ -6,6 +6,7 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 from bookmark_studio import __version__
@@ -40,6 +41,9 @@ class ProjectData:
     bookmark_updated_at: dict[UUID, str] = field(default_factory=dict)
     tombstones: dict[UUID, str] = field(default_factory=dict)
     machine_id: str | None = None
+    # tags.json (0.7.0): the tag catalog and its renames/removals (TagRepository.export_state).
+    # Older versions ignore the file; their bookmarks still carry the tag names.
+    tag_state: dict[str, Any] | None = None
 
 
 def export_project(path: Path, data: ProjectData) -> None:
@@ -77,6 +81,8 @@ def export_project(path: Path, data: ProjectData) -> None:
             json.dumps([{"playlist_id": str(pid), "signature": sig} for pid, sig in data.playlist_signatures],
                        indent=2),
         )
+        if data.tag_state is not None:
+            archive.writestr("tags.json", json.dumps(data.tag_state, indent=2))
         if data.machine_id is not None:
             archive.writestr(
                 "sync.json",

@@ -8,6 +8,7 @@ from uuid import UUID
 
 from bookmark_studio.domain.bookmark import Bookmark, default_bookmark_name
 from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
+from bookmark_studio.persistence.tag_repository import TagRepository
 
 LEGACY_DEFAULT_NAME = "New bookmark"
 
@@ -165,7 +166,7 @@ class BookmarkRepository:
     def rename_legacy_default_names(self) -> int:
         """One-time backfill: gives every bookmark still carrying the old flat "New
         bookmark" default (created before default_bookmark_name() existed) a fresh
-        <date>-<random>-<start>[-<end>] name instead (new bookmarks get one already;
+        random name instead (new bookmarks get one already;
         this covers the ones created earlier). Idempotent and cheap: after the first
         run, no row will match.
         Returns the number of rows renamed.
@@ -173,9 +174,9 @@ class BookmarkRepository:
         rows = self._conn.execute(
             "SELECT id, start_us, end_us FROM bookmarks WHERE name = ?", (LEGACY_DEFAULT_NAME,)
         ).fetchall()
-        for bookmark_id, start_us, end_us in rows:
+        for bookmark_id, _start_us, _end_us in rows:
             self._conn.execute(
-                "UPDATE bookmarks SET name = ? WHERE id = ?", (default_bookmark_name(start_us, end_us), bookmark_id)
+                "UPDATE bookmarks SET name = ? WHERE id = ?", (default_bookmark_name(), bookmark_id)
             )
         if rows:
             self._conn.commit()
@@ -201,6 +202,9 @@ class BookmarkRepository:
         return None
 
     def _set_tags(self, bookmark_id: UUID, tags: tuple[str, ...]) -> None:
+        # Through the tag catalog: a renamed or removed tag arriving here (e.g. undoing
+        # an edit made before the rename) is stored under its current name or dropped.
+        tags = TagRepository(self._conn).canonical(tags)
         self._conn.execute("DELETE FROM bookmark_tags WHERE bookmark_id = ?", (str(bookmark_id),))
         self._conn.executemany(
             "INSERT INTO bookmark_tags (bookmark_id, tag) VALUES (?, ?)",

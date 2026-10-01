@@ -8,16 +8,15 @@ from bookmark_studio.domain.bookmark import InvalidBookmarkRange, default_bookma
 from bookmark_studio.domain.enums import BookmarkType
 
 
-def test_default_bookmark_name_is_date_random_start_end() -> None:
-    """<date>-<6 random characters>-<start>-<end>; a point bookmark has only a start."""
-    segment = default_bookmark_name(83_456_000, 105_000_000)
-    assert re.fullmatch(r"\d{8}-[a-z0-9]{6}-00:01:23\.456-00:01:45\.000", segment)
-    point = default_bookmark_name(83_456_000)
-    assert re.fullmatch(r"\d{8}-[a-z0-9]{6}-00:01:23\.456", point)
+def test_default_bookmark_name_is_the_random_string_only() -> None:
+    """0.7.0: 6 random characters, no date and no times (those are in the list's
+    Start/End columns). 0.4.0-0.6.0 names are dated_bookmark_name()'s."""
+    assert re.fullmatch(r"[a-z0-9]{6}", default_bookmark_name())
+    assert default_bookmark_name(suffix="k3x9qa") == "k3x9qa"
 
 
 def test_default_bookmark_name_is_unique_across_calls() -> None:
-    names = {default_bookmark_name(1_000_000, 2_000_000) for _ in range(50)}
+    names = {default_bookmark_name() for _ in range(50)}
     assert len(names) == 50
 
 

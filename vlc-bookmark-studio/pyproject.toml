@@ -1,6 +1,6 @@
 [project]
 name = "vlc-bookmark-studio"
-version = "0.6.0"
+version = "0.7.0"
 description = "VLC Bookmark Studio — playlist-aware visual bookmarking and looping for VLC Media Player"
 readme = "README.md"
 # Tested on 3.10-3.13 (Linux/WSL) and 3.12 (Windows); see .github/workflows/vlc-bookmark-studio-tests.yml.

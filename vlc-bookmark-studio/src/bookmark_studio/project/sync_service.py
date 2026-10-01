@@ -29,6 +29,7 @@ from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
 from bookmark_studio.persistence.lane_repository import LaneRepository
 from bookmark_studio.persistence.media_repository import MediaRepository
 from bookmark_studio.persistence.playlist_repository import PlaylistRepository
+from bookmark_studio.persistence.tag_repository import TagRepository
 from bookmark_studio.project.export_service import ProjectData, export_project
 from bookmark_studio.project.import_service import ImportStats, apply_import_plan, read_import_plan
 from bookmark_studio.project.schema import bookmark_to_dict, lane_to_dict, media_to_dict, playlist_to_dict
@@ -102,6 +103,7 @@ class SyncService:
             bookmark_updated_at={UUID(k): v for k, v in bookmarks_repo.updated_at_by_id().items()},
             tombstones={UUID(k): v for k, v in bookmarks_repo.tombstones().items()},
             machine_id=self.machine_id,
+            tag_state=TagRepository(self._conn).export_state(),
         )
 
     @staticmethod
@@ -115,6 +117,7 @@ class SyncService:
             "signatures": sorted([str(p), s] for p, s in data.playlist_signatures),
             "updated": sorted((str(k), v) for k, v in data.bookmark_updated_at.items()),
             "tombstones": sorted((str(k), v) for k, v in data.tombstones.items()),
+            "tags": data.tag_state,
         }
         return hashlib.sha256(json.dumps(content, sort_keys=True, default=str).encode()).hexdigest()
 

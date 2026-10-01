@@ -4,6 +4,49 @@ All notable changes to VLC Bookmark Studio (called bm4vlc up to 0.3.1). Previous
 versions are kept in [`archive/`](archive/) and tagged in git
 (`vlc-bookmark-studio-v<version>`; `bm4vlc-v<version>` up to 0.3.1).
 
+## 0.7.0 — 2026-10-01
+
+### New
+
+- **Tags from a list:** the Bookmark tab's Tags field is a drop list of ready-made tags
+  (intro, build-up, drop, peak, breakdown, outro, game start, game end, plus every tag
+  already in use), several at once by ticking them. **Edit...** opens the tag list
+  window: add, rename, remove and reorder, with how many bookmarks use each tag.
+  - Renaming or removing a tag changes every bookmark that has it, of every song and
+    playlist; renaming into an existing tag merges the two. The window asks first.
+  - No stale tag can come back: the app remembers renames and removals, and every tag
+    written to a bookmark goes through them -- undoing an edit made before the rename,
+    folder sync from a machine that hasn't seen it yet, an old project file. A tag the
+    list doesn't know (from an import) joins the list rather than being hidden.
+  - The tag list and its renames/removals travel in sync and project files
+    (`tags.json`; older versions ignore it). The most recent decision about a tag wins.
+- **Tags column** in the bookmark list, shown before Name.
+- **Max / Reset / Mute** in the Volume & EQ tab, between the fader and the equalizer:
+  Max raises the volume to 100 % and Mute lowers it to silence over their own times
+  (ms, adjustable like fades, remembered), while something plays; Reset goes straight
+  back to the level from before. Moving the fader takes over from a running Max/Mute.
+
+### Changed
+
+- **New bookmarks are named with just the random string**, e.g. `k3x9qa` -- no date and
+  no times (those are in the Start/End columns). Existing names stay; dated names from
+  0.4.0-0.6.0 still follow their bookmark's moves.
+- **The bookmark list is in its own "Bookmarks" tab**, and its buttons (Play, Loop,
+  Delete, Move up, Move down, Save...) are stacked between it and the Bookmark /
+  Volume & EQ tabs.
+- **Columns of the bookmark list can be dragged into any order**; the order and widths
+  are kept with the window layout.
+- **The Bookmark tab is more compact:** Loop, Repeat and After loop share a row, and so
+  do Gap, Fade in and Fade out.
+- **The selection readout moved** from under the waveform to the top of the column
+  beside it, above View; the waveform has the full height.
+
+### Fixed
+
+- (Found while testing 0.7.0, before release.) The volume Reset button and the
+  equalizer's Flat button shared an internal name, so Reset's enabled state was applied
+  to Flat.
+
 ## 0.6.0 — 2026-09-30
 
 ### Changed: the window's layout

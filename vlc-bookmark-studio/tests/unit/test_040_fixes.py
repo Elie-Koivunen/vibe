@@ -12,7 +12,7 @@ import pytest
 from PySide6.QtGui import QUndoStack
 
 from bookmark_studio.app.commands import ChangeLoopCommand, MoveBookmarkCommand, ResizeBookmarkCommand
-from bookmark_studio.domain.bookmark import Bookmark, default_bookmark_name, is_automatic_name, with_range
+from bookmark_studio.domain.bookmark import Bookmark, dated_bookmark_name, is_automatic_name, with_range
 from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
 from bookmark_studio.domain.media import Media
 from bookmark_studio.domain.playlist import Playlist
@@ -44,7 +44,7 @@ def _segment(media_id, name=None, start_us=1_000_000, end_us=3_000_000, **overri
     values = dict(
         id=uuid4(), playlist_id=None, media_id=media_id, scope=BookmarkScope.GLOBAL_MEDIA, lane_id=None,
         bookmark_type=BookmarkType.SEGMENT if end_us is not None else BookmarkType.POINT,
-        name=name or default_bookmark_name(start_us, end_us, created=CREATED, suffix="k3x9qa"),
+        name=name or dated_bookmark_name(start_us, end_us, created=CREATED, suffix="k3x9qa"),
         start_us=start_us, end_us=end_us, loop_enabled=end_us is not None, repeat_count=None, loop_gap_ms=0,
         completion_action=CompletionAction.CONTINUE,
     )
@@ -155,11 +155,11 @@ def test_a_failing_command_is_logged_not_raised_into_qt(repo, caplog) -> None:
     assert repo.get(bookmark.id).fade_in_ms == 200
 
 
-# -- names: <date>-<random>-<start>[-<end>] --
+# -- names: <date>-<random>-<start>[-<end>] (0.4.0-0.6.0; existing ones still follow moves) --
 
 
 def test_automatic_name_is_recognised_only_for_its_own_range() -> None:
-    name = default_bookmark_name(1_000_000, 3_000_000, created=CREATED, suffix="k3x9qa")
+    name = dated_bookmark_name(1_000_000, 3_000_000, created=CREATED, suffix="k3x9qa")
     assert name == "20260930-k3x9qa-00:00:01.000-00:00:03.000"
     assert is_automatic_name(name, 1_000_000, 3_000_000)
     assert not is_automatic_name(name, 1_000_000, 4_000_000)
@@ -215,7 +215,8 @@ def test_resizing_either_edge_updates_the_matching_part(repo) -> None:
     assert repo.get(auto.id).name == "20260930-k3x9qa-00:00:00.500-00:01:01.000"
 
 
-def test_a_new_bookmark_from_the_selection_is_named_after_its_range(qtbot) -> None:
+def test_a_new_bookmark_from_the_selection_gets_a_random_name(qtbot) -> None:
+    """0.4.0-0.6.0 named it <date>-<random>-<start>-<end>; since 0.7.0 only the random part."""
     from bookmark_studio.domain.selection import Selection
 
     conn = sqlite3.connect(":memory:")
@@ -229,7 +230,7 @@ def test_a_new_bookmark_from_the_selection_is_named_after_its_range(qtbot) -> No
     window._waveform_scene.set_selection(Selection(start_us=83_456_000, end_us=105_000_000))
     window._bookmark_selection_button.click()
     (created,) = repo.list_global_for_media(media.id)
-    assert re.fullmatch(r"\d{8}-[a-z0-9]{6}-00:01:23\.456-00:01:45\.000", created.name)
+    assert re.fullmatch(r"[a-z0-9]{6}", created.name)
 
 
 # -- rebrand (bm4vlc -> VLC Bookmark Studio): what existed before keeps working --

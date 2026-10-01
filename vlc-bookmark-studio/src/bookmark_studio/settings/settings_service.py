@@ -13,6 +13,7 @@ APPLICATION = "VLCBookmarkStudio"
 _LEGACY_LOCATION = ("BookmarkStudio", "VLCBookmarkStudio")
 
 DEFAULT_BRIDGE_PORT = 43119
+DEFAULT_RAMP_MS = 1500  # Max / Mute (Volume & EQ tab)
 
 
 def _bytes_or_none(value: object) -> QByteArray | None:
@@ -59,6 +60,13 @@ class SettingsService:
     def set_splitter_state(self, name: str, state: QByteArray) -> None:
         self._settings.setValue(f"splitters/{name}", state)
 
+    def header_state(self, name: str) -> QByteArray | None:
+        """A list's column order and widths (QHeaderView.saveState)."""
+        return _bytes_or_none(self._settings.value(f"headers/{name}"))
+
+    def set_header_state(self, name: str, state: QByteArray) -> None:
+        self._settings.setValue(f"headers/{name}", state)
+
     def panel_tab(self, name: str) -> int:
         """The tab last shown in a tabbed panel (0 if none was saved)."""
         try:
@@ -70,6 +78,18 @@ class SettingsService:
         self._settings.setValue(f"tabs/{name}", int(index))
 
     # -- player --
+
+    def volume_ramp_ms(self, kind: str) -> int:
+        """How long "max" or "mute" (Volume & EQ tab) takes to move the volume."""
+        try:
+            return max(0, min(60_000, int(str(self._settings.value(f"volume/{kind}_ms", DEFAULT_RAMP_MS)))))
+        except ValueError:
+            return DEFAULT_RAMP_MS
+
+    def set_volume_ramp_ms(self, kind: str, value_ms: int) -> None:
+        if kind not in ("max", "mute"):
+            raise ValueError(f"unknown volume ramp {kind!r}")
+        self._settings.setValue(f"volume/{kind}_ms", int(value_ms))
 
     def equalizer(self) -> EqualizerSettings:
         """The equalizer the user set up (the player's, not a bookmark's); off by default."""

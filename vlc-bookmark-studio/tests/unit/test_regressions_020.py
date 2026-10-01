@@ -335,8 +335,8 @@ def test_tags_and_notes_are_saved_and_undoable(make_app, qtbot, tmp_path) -> Non
     app._bookmark_repository.insert(bookmark)
     app.window._on_bookmark_activated(bookmark.id)
     inspector = app.window._inspector
-    inspector._tags_edit.setText("verse, practice, verse")
-    inspector._tags_edit.editingFinished.emit()
+    # 0.7.0: tags are picked from the tag list; the picker hands over its choice.
+    inspector._tags_picker.tags_changed.emit(("verse", "practice", "verse"))
     inspector._notes_edit.setPlainText("watch the tempo")
     inspector._notes_edit.editingFinished.emit()
     saved = app._bookmark_repository.get(bookmark.id)

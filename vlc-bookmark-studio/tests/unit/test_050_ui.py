@@ -281,7 +281,11 @@ def test_quit_is_in_the_file_menu_on_ctrl_q_and_next_to_launch_vlc(qtbot, tmp_pa
 def test_window_layout_is_saved_on_quit_and_restored_on_the_next_start(qtbot, tmp_path) -> None:
     settings = SettingsService(QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat))
     first = _make_app(qtbot, tmp_path, settings=settings, quit_app=lambda: None)
+    # Let the window settle first: its minimum size follows the panels' needs (0.6.0),
+    # which can widen it a moment after it opens -- and the splitters with it.
+    QApplication.processEvents()
     first.window._splitters["bottom"].setSizes([300, 900])
+    QApplication.processEvents()
     saved_sizes = first.window._splitters["bottom"].sizes()
     first.quit()
     assert settings.window_geometry() == first.window.saveGeometry()
@@ -289,6 +293,7 @@ def test_window_layout_is_saved_on_quit_and_restored_on_the_next_start(qtbot, tm
     second_dir = tmp_path / "second"
     second_dir.mkdir()
     second = _make_app(qtbot, second_dir, settings=settings, quit_app=lambda: None)
+    QApplication.processEvents()
     assert second.window._splitters["bottom"].sizes() == saved_sizes
 
 

@@ -11,7 +11,7 @@ Runs on **Windows**, **Linux**, and **WSL (Ubuntu on Windows)**.
 
 ## Status
 
-Version 0.6.0. The core is implemented and tested: domain model, SQLite
+Version 0.7.0. The core is implemented and tested: domain model, SQLite
 persistence + migrations, media fingerprint/resolution, playlist
 recognition across sessions (similarity scoring over stored playlist
 order), the FFmpeg waveform pipeline (streamed, shown while it decodes), four
@@ -135,20 +135,46 @@ looping, the loop stops instead of resuming playback.
   stop, play/pause, next track, next bookmark) centred, the volume on the left and the
   position and song length on the right. Seeking by 5 seconds is on the Left/Right
   arrow keys (Playback menu).
-- **Beside the waveform:** View (Zoom −, Zoom +, Fit), Bookmark (Bookmark now,
-  Bookmark selection) and Selection (Play selection, Clear selection).
-- **Below the waveform:** the selection -- start, end and length -- while you drag
-  one out ([ and ] set its start and end at the playhead).
-- **Beside the bookmark list, two tabs:** **Bookmark** holds the selected bookmark's
-  settings (name, times, loop, fades, tags, notes); **Volume & EQ** the player's volume
-  and equalizer. Click the volume readout above the waveform to jump to it. The open
-  tab, the window size and the panel sizes come back on the next start.
+- **Beside the waveform:** at the top the selection -- start, end and length -- while
+  you drag one out ([ and ] set its start and end at the playhead); below it View
+  (Zoom −, Zoom +, Fit), Bookmark (Bookmark now, Bookmark selection) and Selection
+  (Play selection, Clear selection). The waveform has the full height.
+- **Below, left:** the **Bookmarks** tab -- every bookmark of the playlist. Drag a
+  column header to put the columns in another order; the order and widths are kept.
+- **Between the two:** Play, Loop, Delete, Move up, Move down and Save... for the
+  selected bookmarks.
+- **Below, right, two tabs:** **Bookmark** holds the selected bookmark's settings (name,
+  start, end; Loop, Repeat and After loop on one row; Gap, Fade in and Fade out on the
+  next; tags; notes); **Volume & EQ** the player's volume and equalizer. Click the
+  volume readout above the waveform to jump to it. The open tab, the window size and
+  the panel sizes come back on the next start.
+
+**Names:** a new bookmark is named with 6 random characters, e.g. `k3x9qa` (its times
+are in the Start and End columns). Bookmarks named before 0.7.0 keep their names.
+
+**Tags:** pick a bookmark's tags from a ready-made list (intro, build-up, drop, peak,
+breakdown, outro, game start, game end), several at once: open the Tags drop list in the
+Bookmark tab and tick them; the choice is saved when the list closes (undoable).
+**Edit...** opens the tag list window: add, rename, remove and reorder tags, with the
+number of bookmarks using each. Renaming a tag renames it on every bookmark, of every
+song and playlist (into an existing tag, the two merge); removing it takes it off them --
+the window asks first. The app remembers renames and removals, so an old name can't come
+back: undoing an older edit, a sync file from a machine that hasn't heard of the change
+yet, or an old project file all get the current name (or lose a removed tag). The tag
+list and its changes travel with folder sync and project files. The Tags column shows
+each bookmark's tags.
 
 **Volume:** the VOL fader works like a DJ mixer's channel fader (0–125 %, the amber
 mark is 100 %): drag it, click where it should go, scroll, or use the arrow keys (Page
 Up/Down: 10 %); a double-click returns to 100 %. It follows the player's volume,
 including fades. Playing or looping a bookmark raises a quieter (or muted) player to
 85 %; a louder setting is kept.
+
+Beside the fader: **Max** raises the volume to 100 % and **Mute** lowers it to silence,
+each over the time in its field (milliseconds, like a bookmark's fades; 0 = at once),
+while something plays -- a bookmark or a song; with nothing playing they act at once.
+**Reset** goes straight back to the volume from before Max or Mute. Moving the fader
+yourself stops a running Max or Mute. The two times are remembered.
 
 **Equalizer:** VLC's 10-band equalizer with a preamp and VLC's 18 presets (Flat, Rock,
 Club, Dance, ...), ±20 dB per band. Tick *Equalizer* to switch it on; while it is off

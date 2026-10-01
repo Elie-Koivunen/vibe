@@ -71,6 +71,10 @@ EXTERNAL_STOP_VOTES = 2
 _SYNC_INTERVAL_MS = 60_000
 # Playing a bookmark brings a quieter (or muted) player up to 85 % (VLC's 0-512 scale).
 BOOKMARK_PLAY_VOLUME = round(0.85 * 256)
+# The Volume & EQ tab's Max: VLC's normal full volume (the fader goes to 125 %, which can
+# distort). Its ramp steps every 40 ms.
+MAX_BUTTON_VOLUME = 256
+_VOLUME_RAMP_STEP_MS = 40
 
 
 class Application(QObject):
@@ -151,6 +155,17 @@ class Application(QObject):
         self._equalizer = settings.equalizer() if settings is not None else EqualizerSettings()
         self.window.show_equalizer(self._equalizer)
         self._show_equalizer_support(adapter)
+        # Max / Mute ramps and what Reset goes back to.
+        self._volume_ramp_ms = (
+            (settings.volume_ramp_ms("max"), settings.volume_ramp_ms("mute")) if settings is not None
+            else self.window.volume_ramp_times()
+        )
+        self.window.show_volume_ramp_times(*self._volume_ramp_ms)
+        self._volume_ramp: tuple[int, int, int, int] | None = None  # start, end, started_ns, duration_ns
+        self._volume_ramp_timer = QTimer(self)
+        self._volume_ramp_timer.setInterval(_VOLUME_RAMP_STEP_MS)
+        self._volume_ramp_timer.timeout.connect(self._on_volume_ramp_tick)
+        self._volume_reset_level: int | None = None
 
         self._current_media_id: UUID | None = None
         self._current_vlc_item_id: int | None = None  # the song on screen
@@ -201,6 +216,7 @@ class Application(QObject):
         self._stopped = True
         self._save_window_layout()
         self._sync_timer.stop()
+        self._stop_volume_ramp()
         self._loop_controller.stop(restore_volume=True)  # undo a fade's volume change
         self.session.stop(drain_timeout_s=1.5)
         self._waveform_orchestrator.cancel_all()
@@ -243,7 +259,11 @@ class Application(QObject):
         w.project_imported.connect(self._on_project_imported)
         w.playlist_refresh_requested.connect(self._force_playlist_refresh)
         w.sync_requested.connect(self._on_sync_requested)
-        w.volume_requested.connect(self._set_player_volume)
+        w.volume_requested.connect(self._on_user_volume)
+        w.volume_max_requested.connect(self._on_volume_max_requested)
+        w.volume_mute_requested.connect(self._on_volume_mute_requested)
+        w.volume_reset_requested.connect(self._on_volume_reset_requested)
+        w.volume_ramp_times_changed.connect(self._on_volume_ramp_times_changed)
         w.equalizer_requested.connect(self._set_equalizer)
         w.quit_requested.connect(self.quit)
 
@@ -315,11 +335,79 @@ class Application(QObject):
         if connected and self._equalizer.enabled:
             self._apply_equalizer()
 
+    def _on_user_volume(self, level: int) -> None:
+        """The fader: the user takes over from a Max/Mute ramp, and the level they chose
+        is the one to keep (nothing for Reset to go back to)."""
+        self._stop_volume_ramp()
+        self._set_volume_reset_level(None)
+        self._set_player_volume(level)
+
+    # -- Max / Mute / Reset (Volume & EQ tab) --
+
+    def _on_volume_max_requested(self) -> None:
+        if self._loop_controller.target_volume >= MAX_BUTTON_VOLUME:
+            return  # already at (or above) 100 %
+        self._ramp_volume_to(MAX_BUTTON_VOLUME, self._volume_ramp_ms[0])
+
+    def _on_volume_mute_requested(self) -> None:
+        self._ramp_volume_to(0, self._volume_ramp_ms[1])
+
+    def _on_volume_reset_requested(self) -> None:
+        level = self._volume_reset_level
+        if level is None:
+            return
+        self._stop_volume_ramp()
+        self._set_volume_reset_level(None)
+        self._apply_volume_step(level)
+
+    def _on_volume_ramp_times_changed(self, max_ms: int, mute_ms: int) -> None:
+        self._volume_ramp_ms = (max_ms, mute_ms)
+        if self._settings is not None:
+            self._settings.set_volume_ramp_ms("max", max_ms)
+            self._settings.set_volume_ramp_ms("mute", mute_ms)
+
+    def _ramp_volume_to(self, level: int, duration_ms: int) -> None:
+        """Moves the user's volume to `level` over `duration_ms` while something plays (a
+        bookmark or a song); at once when nothing does or the time is 0. Reset remembers
+        the level from before the first Max/Mute."""
+        start = self._loop_controller.target_volume
+        if self._volume_reset_level is None:
+            self._set_volume_reset_level(start)
+        self._stop_volume_ramp()
+        if duration_ms <= 0 or self._last_playback_state != "playing" or start == level:
+            self._apply_volume_step(level)
+            return
+        self._volume_ramp = (start, level, time.monotonic_ns(), duration_ms * 1_000_000)
+        self._volume_ramp_timer.start()
+
+    def _on_volume_ramp_tick(self) -> None:
+        if self._volume_ramp is None:
+            self._volume_ramp_timer.stop()
+            return
+        start, end, started_ns, duration_ns = self._volume_ramp
+        fraction = min(1.0, (time.monotonic_ns() - started_ns) / duration_ns)
+        self._apply_volume_step(round(start + (end - start) * fraction))
+        if fraction >= 1.0:
+            self._stop_volume_ramp()
+
+    def _stop_volume_ramp(self) -> None:
+        self._volume_ramp = None
+        self._volume_ramp_timer.stop()
+
+    def _apply_volume_step(self, level: int) -> None:
+        self._set_player_volume(level)  # fades ramp to/from it; writes are coalesced
+        self.window.show_volume(level)
+
+    def _set_volume_reset_level(self, level: int | None) -> None:
+        self._volume_reset_level = level
+        self.window.set_volume_reset_level(level)
+
     def _raise_volume_for_bookmark(self, *, fades_in: bool = False) -> None:
         """Playing a bookmark brings a quieter (or muted) player up to 85 %; a louder
         setting is kept. With a fade-in, the fade itself ramps up to that level."""
         if self._loop_controller.target_volume >= BOOKMARK_PLAY_VOLUME:
             return
+        self._stop_volume_ramp()  # e.g. a Mute still fading out
         self._set_player_volume(BOOKMARK_PLAY_VOLUME, write=not fades_in)
         self.window.show_volume(BOOKMARK_PLAY_VOLUME)
 
@@ -815,6 +903,7 @@ class Application(QObject):
         except Exception:  # noqa: BLE001 - a broken sync folder must not break the app
             self._log.exception("sync failed")
             return
+        self.window.refresh_tag_catalog()  # another machine may have edited the tag list
         if changed:
             self._on_project_imported()
             self._refresh_bookmark_views()
