@@ -13,6 +13,7 @@ the previous version is kept here unchanged.
 | [`v0.5.0/`](v0.5.0/) | 0.5.0 | `vlc-bookmark-studio-0.5.0.zip`: the `vlc-bookmark-studio/` folder at tag `vlc-bookmark-studio-v0.5.0` (commit `ed02c85`), without `archive/`. | `vlc-bookmark-studio-v0.5.0` |
 | [`v0.5.1/`](v0.5.1/) | 0.5.1 | `vlc-bookmark-studio-0.5.1.zip`: the `vlc-bookmark-studio/` folder at tag `vlc-bookmark-studio-v0.5.1` (commit `21fafb5`), without `archive/`. The last layout with the selection bar on top and the volume fader beside the waveform. | `vlc-bookmark-studio-v0.5.1` |
 | [`v0.6.0/`](v0.6.0/) | 0.6.0 | `vlc-bookmark-studio-0.6.0.zip`: the `vlc-bookmark-studio/` folder at tag `vlc-bookmark-studio-v0.6.0` (commit `632fa7a`), without `archive/`. The last version with dated bookmark names (`<date>-<random>-<start>-<end>`) and free-text tags. | `vlc-bookmark-studio-v0.6.0` |
+| [`v0.7.0/`](v0.7.0/) | 0.7.0 | `vlc-bookmark-studio-0.7.0.zip`: the `vlc-bookmark-studio/` folder at tag `vlc-bookmark-studio-v0.7.0` (commit `fe2a82a`), without `archive/`. The last version with an instant volume Reset, instant equalizer preset changes and no Apply button for new bookmarks. | `vlc-bookmark-studio-v0.7.0` |
 
 Every version is also tagged in git (`git tag -l "bm4vlc-v*" "vlc-bookmark-studio-v*"`), so
 `git checkout bm4vlc-v0.2.0 -- bm4vlc/` restores 0.2.0 as it was (under its old folder name).
