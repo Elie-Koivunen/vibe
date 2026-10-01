@@ -102,7 +102,8 @@ def test_selection_row_shows_start_end_and_length(qtbot, tmp_path) -> None:
 def test_bookmark_settings_and_volume_eq_are_two_tabs(qtbot, tmp_path) -> None:
     app = _make_app(qtbot, tmp_path)
     tabs = app.window._side_tabs
-    assert [tabs.tabText(i).replace("&&", "&") for i in range(tabs.count())] == ["Bookmark", "Volume & EQ"]
+    # (0.8.0 renamed "Bookmark" to "Bookmark settings")
+    assert [tabs.tabText(i).replace("&&", "&") for i in range(tabs.count())] == ["Bookmark settings", "Volume & EQ"]
     assert tabs.widget(0).widget() is app.window._inspector
     assert tabs.widget(1).widget() is app.window._volume_eq
     assert app.window._volume is app.window._volume_eq.volume_strip  # the fader moved into the tab
@@ -147,10 +148,12 @@ def test_at_the_smallest_window_size_nothing_overlaps(qtbot, tmp_path) -> None:
     window.show()
     qtbot.waitExposed(window)
     window.resize(100, 100)  # as small as it gets
-    QApplication.processEvents()
+    # A widget polished late can raise what the panels need once more; the window follows
+    # on the next layout pass, so let it settle rather than look after a single one.
+    qtbot.waitUntil(lambda: window.width() >= window.centralWidget().minimumSizeHint().width()
+                    and window._transport.width() >= window._transport.minimumSizeHint().width(), timeout=3000)
     minimum = window.minimumSize()
     assert minimum.width() >= 900 and minimum.height() >= 600
-    assert window.width() >= window.centralWidget().minimumSizeHint().width()
     bar = window._transport
     buttons = [bar.previous_bookmark_button, bar.previous_track_button, bar.stop_button,
                bar.play_pause_button, bar.next_track_button, bar.next_bookmark_button]
@@ -159,11 +162,23 @@ def test_at_the_smallest_window_size_nothing_overlaps(qtbot, tmp_path) -> None:
     assert _top_left(bar.volume_button, window).x() + bar.volume_button.width() <= edges[0][0]
     assert edges[-1][1] <= _top_left(bar._position_label, window).x()
     # a long playlist name is cut off in the header; it doesn't widen the window
-    before = window.minimumWidth()
+    before = _settled_minimum_width(qtbot, window)
     window._context_names = ("A playlist with a very long name " * 12, "a song")
     window._show_breadcrumb(0)
-    QApplication.processEvents()
-    assert window.minimumWidth() == before
+    assert _settled_minimum_width(qtbot, window) == before
+
+
+def _settled_minimum_width(qtbot, window) -> int:
+    """The window's minimum width once it stops changing (it follows the panels' needs
+    over a few layout passes)."""
+    last = window.minimumWidth()
+    for _ in range(40):
+        qtbot.wait(50)
+        current = window.minimumWidth()
+        if current == last:
+            return current
+        last = current
+    return last
 
 
 def test_ruler_labels_use_the_themes_text_colour(qtbot) -> None:
@@ -233,6 +248,7 @@ def test_equalizer_settings_survive_a_restart_and_a_hand_edit(tmp_path) -> None:
 def test_eq_panel_switches_on_picks_presets_and_goes_custom(qtbot) -> None:
     panel = VolumeEqPanel()
     qtbot.addWidget(panel)
+    panel.set_glide_ms(0)  # presets at once here (0.8.0 glides to them; see test_080_*)
     seen: list[EqualizerSettings] = []
     panel.equalizer_changed.connect(seen.append)
     assert not panel._bands[0].isEnabled() and not panel._preset_combo.isEnabled()  # off: greyed out

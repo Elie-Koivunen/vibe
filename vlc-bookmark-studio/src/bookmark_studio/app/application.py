@@ -17,6 +17,7 @@ from __future__ import annotations
 import sqlite3
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID
@@ -53,6 +54,7 @@ from bookmark_studio.playback.loop_controller import LoopController
 from bookmark_studio.playback.playback_clock import PlaybackClock
 from bookmark_studio.playback.status import PlaybackStatus, VlcPlaylistItem
 from bookmark_studio.settings.settings_service import SettingsService
+from bookmark_studio.ui.deck_fader import percent_to_level
 from bookmark_studio.ui.dialogs.vlc_launch_dialog import VlcLaunchChoice, VlcLaunchDialog
 from bookmark_studio.ui.main_window import MainWindow
 from bookmark_studio.waveform.pyramid import WaveformPyramid
@@ -74,6 +76,9 @@ BOOKMARK_PLAY_VOLUME = round(0.85 * 256)
 # The Volume & EQ tab's Max: VLC's normal full volume (the fader goes to 125 %, which can
 # distort). Its ramp steps every 40 ms.
 MAX_BUTTON_VOLUME = 256
+# A bookmark played without a loop counts as done once playback leaves it -- but not in
+# this first moment, when a status poll may still predate the seek.
+BOOKMARK_PLAYBACK_GRACE_S = 1.0
 _VOLUME_RAMP_STEP_MS = 40
 
 
@@ -146,7 +151,7 @@ class Application(QObject):
         self._loop_controller = LoopController(adapter, self._clock, executor=self.session.commands)
         self._loop_controller.bookmark_navigation_requested.connect(self._on_loop_navigation_requested)
         self._loop_controller.loop_completed.connect(self._on_loop_completed)
-        self._loop_controller.loop_failed.connect(lambda msg: self._log.info("loop stopped: %s", msg))
+        self._loop_controller.loop_failed.connect(self._on_loop_failed)
         self._loop_controller.loop_started.connect(lambda _spec: self._note_loop_segment_started())
         self._loop_controller.iteration_changed.connect(lambda _remaining: self._note_loop_segment_started())
 
@@ -165,14 +170,28 @@ class Application(QObject):
         self._volume_ramp_timer = QTimer(self)
         self._volume_ramp_timer.setInterval(_VOLUME_RAMP_STEP_MS)
         self._volume_ramp_timer.timeout.connect(self._on_volume_ramp_tick)
-        self._volume_reset_level: int | None = None
+        # Normalize / Reset levels (percent; the Volume & EQ tab's fields).
+        self._volume_levels = (
+            (settings.volume_level_percent("normalize"), settings.volume_level_percent("reset"))
+            if settings is not None else self.window.volume_levels()
+        )
+        self.window.show_volume_levels(*self._volume_levels)
+        # Equalizer presets glide under the same rule as the volume ramps.
+        if settings is not None:
+            self.window.show_equalizer_glide_ms(settings.equalizer_glide_ms())
 
         self._current_media_id: UUID | None = None
         self._current_vlc_item_id: int | None = None  # the song on screen
         self._actually_playing_vlc_item_id: int | None = None  # the song the player is on
         self._last_playback_state = "stopped"
+        # Equalizer presets glide under the volume ramps' rule: while something plays.
+        self.window.set_equalizer_glide_condition(lambda: self._last_playback_state == "playing")
         self._selection_loop_active = False  # the waveform's own "Play" is looping a selection
         self._active_loop_bookmark_id: UUID | None = None
+        self._active_loop_was_enabled = False  # the playing bookmark's Loop when it started
+        # The bookmark playing (green) or played last (yellow) -- shown on its song, its
+        # waveform area and its list row. See _begin/_finish_bookmark_playback.
+        self._bookmark_playback: _BookmarkPlayback | None = None
         self._loop_item_id: int | None = None
         self._loop_segment_started = 0.0
         self._loop_last_time_us: int | None = None
@@ -263,7 +282,12 @@ class Application(QObject):
         w.volume_max_requested.connect(self._on_volume_max_requested)
         w.volume_mute_requested.connect(self._on_volume_mute_requested)
         w.volume_reset_requested.connect(self._on_volume_reset_requested)
+        w.volume_normalize_requested.connect(self._on_volume_normalize_requested)
+        w.volume_levels_changed.connect(self._on_volume_levels_changed)
         w.volume_ramp_times_changed.connect(self._on_volume_ramp_times_changed)
+        w.equalizer_glide_ms_changed.connect(
+            lambda value_ms: self._settings.set_equalizer_glide_ms(value_ms) if self._settings is not None else None
+        )
         w.equalizer_requested.connect(self._set_equalizer)
         w.quit_requested.connect(self.quit)
 
@@ -336,13 +360,11 @@ class Application(QObject):
             self._apply_equalizer()
 
     def _on_user_volume(self, level: int) -> None:
-        """The fader: the user takes over from a Max/Mute ramp, and the level they chose
-        is the one to keep (nothing for Reset to go back to)."""
+        """The fader: the user takes over from a running Max/Normalize/Reset/Mute."""
         self._stop_volume_ramp()
-        self._set_volume_reset_level(None)
         self._set_player_volume(level)
 
-    # -- Max / Mute / Reset (Volume & EQ tab) --
+    # -- Max / Normalize / Reset / Mute (Volume & EQ tab) --
 
     def _on_volume_max_requested(self) -> None:
         if self._loop_controller.target_volume >= MAX_BUTTON_VOLUME:
@@ -352,13 +374,24 @@ class Application(QObject):
     def _on_volume_mute_requested(self) -> None:
         self._ramp_volume_to(0, self._volume_ramp_ms[1])
 
+    def _on_volume_normalize_requested(self) -> None:
+        self._glide_volume_to_percent(self._volume_levels[0])
+
     def _on_volume_reset_requested(self) -> None:
-        level = self._volume_reset_level
-        if level is None:
-            return
-        self._stop_volume_ramp()
-        self._set_volume_reset_level(None)
-        self._apply_volume_step(level)
+        self._glide_volume_to_percent(self._volume_levels[1])
+
+    def _glide_volume_to_percent(self, percent: int) -> None:
+        """Normalize / Reset: to their level, the way the volume comes -- at Max's speed
+        coming down (as from Max), at Mute's speed going up (as from Mute)."""
+        level = percent_to_level(percent)
+        coming_down = self._loop_controller.target_volume > level
+        self._ramp_volume_to(level, self._volume_ramp_ms[0] if coming_down else self._volume_ramp_ms[1])
+
+    def _on_volume_levels_changed(self, normalize_percent: int, reset_percent: int) -> None:
+        self._volume_levels = (normalize_percent, reset_percent)
+        if self._settings is not None:
+            self._settings.set_volume_level_percent("normalize", normalize_percent)
+            self._settings.set_volume_level_percent("reset", reset_percent)
 
     def _on_volume_ramp_times_changed(self, max_ms: int, mute_ms: int) -> None:
         self._volume_ramp_ms = (max_ms, mute_ms)
@@ -368,11 +401,8 @@ class Application(QObject):
 
     def _ramp_volume_to(self, level: int, duration_ms: int) -> None:
         """Moves the user's volume to `level` over `duration_ms` while something plays (a
-        bookmark or a song); at once when nothing does or the time is 0. Reset remembers
-        the level from before the first Max/Mute."""
+        bookmark or a song); at once when nothing does or the time is 0."""
         start = self._loop_controller.target_volume
-        if self._volume_reset_level is None:
-            self._set_volume_reset_level(start)
         self._stop_volume_ramp()
         if duration_ms <= 0 or self._last_playback_state != "playing" or start == level:
             self._apply_volume_step(level)
@@ -397,10 +427,6 @@ class Application(QObject):
     def _apply_volume_step(self, level: int) -> None:
         self._set_player_volume(level)  # fades ramp to/from it; writes are coalesced
         self.window.show_volume(level)
-
-    def _set_volume_reset_level(self, level: int | None) -> None:
-        self._volume_reset_level = level
-        self.window.set_volume_reset_level(level)
 
     def _raise_volume_for_bookmark(self, *, fades_in: bool = False) -> None:
         """Playing a bookmark brings a quieter (or muted) player up to 85 %; a louder
@@ -516,6 +542,7 @@ class Application(QObject):
         # Forget the old player's playlist, or its bookmarks would be applied to whatever
         # the new one plays.
         self.playlists.reset(source_uri=source_uri)
+        self._clear_bookmark_playback()
         self._show_equalizer_support(new_adapter)
         self.session.swap_adapter(new_adapter, mute_on_connect=mute_on_connect)
 
@@ -539,6 +566,8 @@ class Application(QObject):
         self._last_playback_state = "stopped"
 
     def _stop_loop(self) -> None:
+        if self._bookmark_playback is not None and self._bookmark_playback.looping:
+            self._finish_bookmark_playback()
         self._loop_controller.stop()
         self._selection_loop_active = False
         self._active_loop_bookmark_id = None
@@ -662,6 +691,7 @@ class Application(QObject):
 
         self._submit(_play, on_done=lambda _r: self._clock.note_seek(start_us, playing=True))
         self._last_playback_state = "playing"
+        self._begin_bookmark_playback(bookmark, looping=False)
 
     def _on_loop_bookmark_requested(self, bookmark_id: UUID) -> None:
         bookmark = self._bookmark_repository.get(bookmark_id)
@@ -673,21 +703,93 @@ class Application(QObject):
         before = self._goto_for_displayed() if item is not None else None
         self._selection_loop_active = False
         self._active_loop_bookmark_id = bookmark.id
+        self._active_loop_was_enabled = bookmark.loop_enabled
         self._raise_volume_for_bookmark(fades_in=bookmark.fade_in_ms > 0)
-        self._start_loop(
-            LoopSpec(
-                start_us=bookmark.start_us, end_us=bookmark.end_us,
-                repeat_count=bookmark.repeat_count, gap_ms=bookmark.loop_gap_ms,
-                completion_action=bookmark.completion_action,
-                fade_in_ms=bookmark.fade_in_ms, fade_out_ms=bookmark.fade_out_ms,
-            ),
-            before=before,
-        )
+        self._start_loop(_loop_spec(bookmark), before=before)
         self._last_playback_state = "playing"
+        self._begin_bookmark_playback(bookmark, looping=True)
+
+    # -- green while a bookmark plays, yellow once it has played --
+
+    def _begin_bookmark_playback(self, bookmark: Any, *, looping: bool) -> None:
+        item = self._playlist_item_for_media(bookmark.media_id)
+        self._bookmark_playback = _BookmarkPlayback(
+            bookmark_id=bookmark.id, song_vlc_id=item.vlc_id if item is not None else None,
+            looping=looping, started=time.monotonic(),
+        )
+        self._show_bookmark_playback()
+
+    def _finish_bookmark_playback(self) -> None:
+        playback = self._bookmark_playback
+        if playback is not None and playback.state == "playing":
+            playback.state = "done"
+            self._show_bookmark_playback()
+
+    def _clear_bookmark_playback(self) -> None:
+        if self._bookmark_playback is not None:
+            self._bookmark_playback = None
+            self._show_bookmark_playback()
+
+    def _show_bookmark_playback(self) -> None:
+        if self._stopped:
+            return
+        playback = self._bookmark_playback
+        if playback is None:
+            self.window.show_bookmark_playback(None, None, None)
+        else:
+            self.window.show_bookmark_playback(playback.bookmark_id, playback.song_vlc_id, playback.state)
+
+    def _check_bookmark_playback_done(self, status: PlaybackStatus) -> None:
+        """A bookmark played with Play (no loop) is done once playback passes its end,
+        stops or pauses, or moves to another song. (A loop ends through the loop
+        controller instead.) Not in the first moment: a poll may predate the seek."""
+        playback = self._bookmark_playback
+        if playback is None or playback.state != "playing" or playback.looping:
+            return
+        if time.monotonic() - playback.started < BOOKMARK_PLAYBACK_GRACE_S:
+            return
+        bookmark = self._bookmark_repository.get(playback.bookmark_id)
+        if bookmark is None:
+            self._clear_bookmark_playback()
+            return
+        other_song = playback.song_vlc_id is not None and status.current_playlist_item_id != playback.song_vlc_id
+        past_end = bookmark.end_us is not None and status.time_us >= bookmark.end_us
+        if status.state != "playing" or other_song or past_end:
+            self._finish_bookmark_playback()
+
+    def _on_loop_failed(self, message: str) -> None:
+        self._log.info("loop stopped: %s", message)
+        if self._bookmark_playback is not None and self._bookmark_playback.looping:
+            self._finish_bookmark_playback()
+
+    def _follow_active_loop_bookmark(self) -> None:
+        """The playing loop's bookmark may just have been edited (Bookmark settings, the
+        list's columns, a drag, undo): the loop takes its settings at once -- a repeat
+        count already reached ends it after this pass and runs the new After-loop action.
+        Switching Loop off finishes the current pass; deleting the bookmark stops the loop
+        (playback goes on)."""
+        playback = self._bookmark_playback
+        if playback is not None and self._bookmark_repository.get(playback.bookmark_id) is None:
+            self._clear_bookmark_playback()  # the bookmark was deleted
+        bookmark_id = self._active_loop_bookmark_id
+        current = self._loop_controller.spec
+        if bookmark_id is None or current is None:
+            return
+        bookmark = self._bookmark_repository.get(bookmark_id)
+        if bookmark is None or bookmark.end_us is None:
+            self._loop_controller.stop()
+            self._active_loop_bookmark_id = None
+            return
+        spec = _loop_spec(bookmark)
+        switched_off = self._active_loop_was_enabled and not bookmark.loop_enabled
+        if spec != current or switched_off:
+            self._loop_controller.update_spec(spec, last_pass=switched_off)
 
     def _on_loop_completed(self, _action: object) -> None:
         self._selection_loop_active = False
         self._loop_item_id = None
+        if self._bookmark_playback is not None and self._bookmark_playback.looping:
+            self._finish_bookmark_playback()
 
     def _on_loop_navigation_requested(self, action: object) -> None:
         """"After loop: Next/Previous Bookmark": plays the neighbouring bookmark of the same
@@ -756,6 +858,8 @@ class Application(QObject):
         self._on_status_sample(issued_ns, status)
 
     def _on_status_sample(self, issued_ns: int, status: PlaybackStatus) -> None:
+        if self._stopped:
+            return  # a poll still in flight when the session stopped
         if self.session.mute_pending:
             # A VLC this app launched starts muted (it would otherwise blast the first
             # song). Through the volume model, so fades and a bookmark's 85 % know it's 0
@@ -779,6 +883,7 @@ class Application(QObject):
                 self.window.set_playhead(status.time_us)
             self._check_external_stop(status)
             self._loop_controller.on_tick()
+            self._check_bookmark_playback_done(status)
 
             if status.current_playlist_item_id != self._actually_playing_vlc_item_id:
                 self._actually_playing_vlc_item_id = status.current_playlist_item_id
@@ -923,7 +1028,9 @@ class Application(QObject):
 
     def _refresh_bookmark_views(self) -> None:
         """Every bookmark of the playlist (all songs) in the list, and per-song counts in
-        the playlist panel. Both panels ignore refreshes that change nothing."""
+        the playlist panel. Both panels ignore refreshes that change nothing. (Every
+        bookmark edit ends up here, so the playing loop follows its bookmark too.)"""
+        self._follow_active_loop_bookmark()
         playlist_id = self.playlists.active_playlist_id
         counts: dict[int, int] = {}
         resolved = self.playlists.resolved
@@ -1019,6 +1126,27 @@ class Application(QObject):
 
     def _on_waveform_failed(self, media_id: UUID, message: str) -> None:
         self._log.info("waveform generation failed for media %s: %s", media_id, message)
+
+
+@dataclass
+class _BookmarkPlayback:
+    """The bookmark playing ("playing") or played last ("done")."""
+
+    bookmark_id: UUID
+    song_vlc_id: int | None
+    looping: bool
+    started: float
+    state: str = "playing"
+
+
+def _loop_spec(bookmark: Any) -> LoopSpec:
+    """How a (segment) bookmark loops: its range and its own loop settings."""
+    return LoopSpec(
+        start_us=bookmark.start_us, end_us=bookmark.end_us,
+        repeat_count=bookmark.repeat_count, gap_ms=bookmark.loop_gap_ms,
+        completion_action=bookmark.completion_action,
+        fade_in_ms=bookmark.fade_in_ms, fade_out_ms=bookmark.fade_out_ms,
+    )
 
 
 def _item_duration_us(item: object) -> int | None:

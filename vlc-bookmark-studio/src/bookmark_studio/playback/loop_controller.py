@@ -65,6 +65,7 @@ class LoopController(QObject):
         self._executor: CommandExecutor = executor or ImmediateExecutor()
         self._spec: LoopSpec | None = None
         self._remaining: int | None = None
+        self._passes_done = 0  # finished passes of the running loop (update_spec counts them)
         self._state = LoopState.IDLE
         self._generation = 0
 
@@ -155,8 +156,45 @@ class LoopController(QObject):
         generation = self._generation
         self._spec = spec
         self._remaining = spec.repeat_count
+        self._passes_done = 0
         self._state = LoopState.ARMED
         self._submit_segment_start(generation, first=True, before=before)
+
+    def update_spec(self, spec: LoopSpec, *, last_pass: bool = False) -> None:
+        """The running loop's bookmark was edited: its new settings apply at once.
+
+        * Repeat counts the passes already played: a count that is already reached
+          (e.g. 1, set during the 3rd pass) ends the loop after the current pass, and
+          then the (new) After-loop action runs. `last_pass` (loop switched off) does
+          the same. During a gap there is no current pass: it ends right away.
+        * A new end re-schedules the current pass's boundary (and its fade-out); a new
+          start, gap or fade-in applies from the next pass.
+        """
+        if self._spec is None or self._state in (LoopState.IDLE, LoopState.COMPLETED):
+            return
+        old = self._spec
+        self._spec = spec
+        in_gap = self._state == LoopState.GAP
+        if last_pass:
+            self._remaining = 0 if in_gap else 1
+        elif spec.repeat_count is None:
+            self._remaining = None
+        else:
+            remaining = spec.repeat_count - self._passes_done
+            self._remaining = remaining if in_gap else max(1, remaining)
+        if in_gap and self._remaining is not None and self._remaining <= 0:
+            self._gap_timer.stop()
+            self._state = LoopState.COMPLETED
+            self._apply_completion_action()
+            return
+        if self._state == LoopState.PLAYING and (spec.end_us, spec.fade_out_ms) != (old.end_us, old.fade_out_ms):
+            position_us = self._clock.estimated_position_us()
+            if position_us >= spec.end_us:
+                self._handle_boundary_reached()
+                return
+            delay_ms = max(_MIN_BOUNDARY_TIMER_MS, int((spec.end_us - position_us) / self._clock.rate / 1000))
+            self._boundary_timer.start(delay_ms)
+            self._arm_fade_out(delay_ms)
 
     def stop(self, *, restore_volume: bool = True) -> None:
         """User-initiated stop (spec #166 case): no completion action applied. Puts VLC's
@@ -263,6 +301,7 @@ class LoopController(QObject):
         # so the next segment start (or the completion) restores the level.
         self._fade_timer.stop()
         self._fade_active = False
+        self._passes_done += 1
         if self._remaining is not None:
             self._remaining -= 1
 

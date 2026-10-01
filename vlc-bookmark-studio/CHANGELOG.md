@@ -4,6 +4,59 @@ All notable changes to VLC Bookmark Studio (called bm4vlc up to 0.3.1). Previous
 versions are kept in [`archive/`](archive/) and tagged in git
 (`vlc-bookmark-studio-v<version>`; `bm4vlc-v<version>` up to 0.3.1).
 
+## 0.8.0 — 2026-10-01
+
+### New
+
+- **Apply, for a new bookmark:** select a range on the waveform and the Bookmark
+  settings tab becomes the new bookmark's form -- a random name, the usual settings
+  (loop forever, no gap, no fades), Start/End following the selection (typed values
+  move the selection; impossible ones are refused). **Apply** -- or Enter in the name,
+  or Bookmark selection / Ctrl+B -- saves it with what was set up there. Apply is
+  greyed out while an existing bookmark is shown: its changes are saved as you make them.
+- **Undo / Redo** buttons beside Apply (the same history as Ctrl+Z / Ctrl+Y; their
+  tooltips say what they would undo or redo).
+- **The orange "saved" flash:** every change saved to a bookmark -- in the tab, in the
+  list's Loop/Gap/Fade columns, or by dragging it on the waveform -- turns its row in
+  the list and the Name field orange for two seconds. The row shows orange even while
+  it is the selected row.
+- **Equalizer presets glide:** choosing a preset (or Flat) moves the faders there over
+  the new **Glide** time (ms, remembered), step by step on the player too, while
+  something plays -- the same rule as Max and Mute; at once otherwise. The preset list
+  shows the target during the glide; grabbing a fader takes over.
+- **Normalize** in the Volume & EQ tab, between Max and Reset: brings the volume to its
+  own level, 80 % to begin with (adjustable, remembered).
+- **The playing bookmark shows green** in all three places -- its song in the playlist,
+  its area on the waveform and its row in the bookmark list -- and **yellow once it has
+  played** (a loop that completed or was stopped; a bookmark played without a loop once
+  playback passes its end, stops or moves to another song). The yellow stays until the
+  next bookmark plays.
+
+### Changed
+
+- **Reset goes to its own level** -- 50 % to begin with, set in the field under it
+  (remembered) -- instead of jumping back to the volume from before Max or Mute. Reset and
+  Normalize glide there the way the volume comes: at Max's speed coming down, at Mute's
+  speed going up (at once when nothing plays).
+- The **Bookmark** tab is now called **Bookmark settings**.
+- Selecting a range on the waveform while a bookmark is shown now switches the tab to
+  the new bookmark's form. Up to 0.7.0 the shown bookmark stayed (to protect what was
+  being typed); now what was being typed is saved first, so nothing is lost.
+- **The tabs make room for themselves:** opening a tab (Volume & EQ, Bookmark settings)
+  that doesn't fit takes room from the bookmark list and the waveform, and if that isn't
+  enough enlarges the window (within the screen) -- the whole equalizer is visible
+  without scrolling. The waveform and the lists below it now have a divider you can
+  drag; its position is kept with the window layout.
+
+### Fixed
+
+- **A playing loop ignored changes to its bookmark:** with a bookmark looping, setting
+  Repeat to 1 and After loop to Stop changed nothing -- the loop went on with the
+  settings it started with. Now the loop follows its bookmark at once: a repeat count
+  that is already reached ends it after the current pass and runs the new After-loop
+  action; a new end applies to the current pass; switching Loop off finishes the
+  current pass; deleting the bookmark stops the loop. (Reported while testing 0.8.0.)
+
 ## 0.7.0 — 2026-10-01
 
 ### New

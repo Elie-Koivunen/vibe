@@ -11,7 +11,7 @@ Runs on **Windows**, **Linux**, and **WSL (Ubuntu on Windows)**.
 
 ## Status
 
-Version 0.7.0. The core is implemented and tested: domain model, SQLite
+Version 0.8.0. The core is implemented and tested: domain model, SQLite
 persistence + migrations, media fingerprint/resolution, playlist
 recognition across sessions (similarity scoring over stored playlist
 order), the FFmpeg waveform pipeline (streamed, shown while it decodes), four
@@ -143,11 +143,31 @@ looping, the loop stops instead of resuming playback.
   column header to put the columns in another order; the order and widths are kept.
 - **Between the two:** Play, Loop, Delete, Move up, Move down and Save... for the
   selected bookmarks.
-- **Below, right, two tabs:** **Bookmark** holds the selected bookmark's settings (name,
-  start, end; Loop, Repeat and After loop on one row; Gap, Fade in and Fade out on the
-  next; tags; notes); **Volume & EQ** the player's volume and equalizer. Click the
-  volume readout above the waveform to jump to it. The open tab, the window size and
-  the panel sizes come back on the next start.
+- **Below, right, two tabs:** **Bookmark settings** holds the selected bookmark's
+  settings (name, start, end; Loop, Repeat and After loop on one row; Gap, Fade in and
+  Fade out on the next; tags; notes); **Volume & EQ** the player's volume and
+  equalizer. Click the volume readout above the waveform to jump to it. The open tab,
+  the window size and the panel sizes come back on the next start.
+
+**Bookmark settings:** a change to a bookmark is saved the moment you make it; its row
+in the list and the Name field flash orange to show it was saved. Beside the name,
+**Undo** and **Redo** step back and forth through your bookmark changes (as Ctrl+Z /
+Ctrl+Y do). To make a new bookmark, select a range on the waveform: the tab becomes the
+new bookmark's form -- a random name and the usual settings (loop forever, no gap, no
+fades), Start and End following the selection (typing them moves the selection). Set it
+up as you like and press **Apply** (or Enter in the name, or Bookmark selection /
+Ctrl+B). Apply is greyed out while an existing bookmark is shown -- there, every change
+is already saved. Changes to the bookmark that is looping right now apply to the loop at
+once (e.g. Repeat 1 + After loop: Stop ends it after the current pass).
+
+**Playing a bookmark** shows it in green in all three places -- its song in the
+playlist, its area on the waveform, its row in the bookmark list -- and in yellow once it
+has played (its loop completed or was stopped; without a loop, once playback passes its
+end, stops or moves on). The yellow stays until the next bookmark plays.
+
+A tab that doesn't fit makes room for itself when opened -- from the bookmark list and
+the waveform, then by enlarging the window -- so the equalizer is never cut off. The
+divider between the waveform and the lists below can be dragged.
 
 **Names:** a new bookmark is named with 6 random characters, e.g. `k3x9qa` (its times
 are in the Start and End columns). Bookmarks named before 0.7.0 keep their names.
@@ -173,14 +193,19 @@ including fades. Playing or looping a bookmark raises a quieter (or muted) playe
 Beside the fader: **Max** raises the volume to 100 % and **Mute** lowers it to silence,
 each over the time in its field (milliseconds, like a bookmark's fades; 0 = at once),
 while something plays -- a bookmark or a song; with nothing playing they act at once.
-**Reset** goes straight back to the volume from before Max or Mute. Moving the fader
-yourself stops a running Max or Mute. The two times are remembered.
+**Normalize** and **Reset** bring the volume to their own level -- 80 % and 50 % to
+begin with, set in the field under each -- gliding the way the volume comes: at Max's
+speed coming down, at Mute's speed going up (at once when nothing plays). Moving the
+fader yourself stops a running Max, Normalize, Reset or Mute. The times and levels are
+remembered.
 
 **Equalizer:** VLC's 10-band equalizer with a preamp and VLC's 18 presets (Flat, Rock,
 Club, Dance, ...), ±20 dB per band. Tick *Equalizer* to switch it on; while it is off
 the faders are greyed out. Pick a preset or drag the faders (a double-click returns a
 fader to neutral: 0 dB for a band, +12 dB for the preamp, which is VLC's neutral
-level). The settings belong to the player, not to a bookmark: they are remembered and
+level). A chosen preset (or Flat) glides there over the **Glide** time (ms; remembered)
+while something plays, like Max and Mute -- at once when nothing does; grabbing a fader
+during a glide takes over. The settings belong to the player, not to a bookmark: they are remembered and
 applied to whichever player you use -- the in-app player or a VLC window (through its
 HTTP interface; they stay across song changes). The band frequencies follow the player:
 60 Hz ... 16 kHz in a VLC window, 31 Hz ... 16 kHz in the in-app player. A switched-off

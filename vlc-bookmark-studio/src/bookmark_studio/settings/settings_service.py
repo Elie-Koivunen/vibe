@@ -14,6 +14,8 @@ _LEGACY_LOCATION = ("BookmarkStudio", "VLCBookmarkStudio")
 
 DEFAULT_BRIDGE_PORT = 43119
 DEFAULT_RAMP_MS = 1500  # Max / Mute (Volume & EQ tab)
+DEFAULT_VOLUME_LEVELS = {"normalize": 80, "reset": 50}  # percent (Volume & EQ tab)
+DEFAULT_GLIDE_MS = 1000  # the equalizer moving to a chosen preset
 
 
 def _bytes_or_none(value: object) -> QByteArray | None:
@@ -86,6 +88,19 @@ class SettingsService:
         except ValueError:
             return DEFAULT_RAMP_MS
 
+    def volume_level_percent(self, kind: str) -> int:
+        """The level "normalize" (80 %) or "reset" (50 %) brings the volume to."""
+        default = DEFAULT_VOLUME_LEVELS[kind]
+        try:
+            return max(0, min(125, int(str(self._settings.value(f"volume/{kind}_percent", default)))))
+        except ValueError:
+            return default
+
+    def set_volume_level_percent(self, kind: str, percent: int) -> None:
+        if kind not in DEFAULT_VOLUME_LEVELS:
+            raise ValueError(f"unknown volume level {kind!r}")
+        self._settings.setValue(f"volume/{kind}_percent", int(percent))
+
     def set_volume_ramp_ms(self, kind: str, value_ms: int) -> None:
         if kind not in ("max", "mute"):
             raise ValueError(f"unknown volume ramp {kind!r}")
@@ -104,6 +119,16 @@ class SettingsService:
             )
         except ValueError:  # a hand-edited settings file
             return EqualizerSettings()
+
+    def equalizer_glide_ms(self) -> int:
+        """How long the equalizer's faders take to move to a chosen preset."""
+        try:
+            return max(0, min(60_000, int(str(self._settings.value("equalizer/glide_ms", DEFAULT_GLIDE_MS)))))
+        except ValueError:
+            return DEFAULT_GLIDE_MS
+
+    def set_equalizer_glide_ms(self, value_ms: int) -> None:
+        self._settings.setValue("equalizer/glide_ms", int(value_ms))
 
     def set_equalizer(self, settings: EqualizerSettings) -> None:
         self._settings.setValue("equalizer/enabled", settings.enabled)

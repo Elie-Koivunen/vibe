@@ -127,7 +127,8 @@ def test_max_reset_and_mute_sit_between_the_fader_and_the_equalizer(qtbot) -> No
     QApplication.processEvents()
     fader_right = _top_left(panel.volume_strip, panel).x() + panel.volume_strip.width()
     eq_left = _top_left(panel._preamp, panel).x()
-    widgets = [panel._max_button, panel._max_ms, panel._volume_reset_button, panel._mute_ms, panel._mute_button]
+    widgets = [panel._max_button, panel._max_ms, panel._normalize_button, panel._normalize_level,
+               panel._volume_reset_button, panel._reset_level, panel._mute_ms, panel._mute_button]
     for widget in widgets:
         assert fader_right <= _top_left(widget, panel).x() < eq_left
     ys = [_top_left(w, panel).y() for w in widgets]
@@ -143,7 +144,9 @@ def _playing_app(qtbot, tmp_path, **kwargs):
     return app, adapter
 
 
-def test_mute_fades_the_volume_out_then_reset_restores_it_at_once(qtbot, tmp_path) -> None:
+def test_mute_fades_the_volume_out_then_reset_brings_it_back(qtbot, tmp_path) -> None:
+    """(0.7.0's Reset went back at once to the level from before; since 0.8.0 it glides
+    to its own level -- test_080_*.)"""
     app, adapter = _playing_app(qtbot, tmp_path)
     adapter.set_volume(200)
     qtbot.waitUntil(lambda: app._loop_controller.target_volume == 200, timeout=3000)
@@ -154,10 +157,9 @@ def test_mute_fades_the_volume_out_then_reset_restores_it_at_once(qtbot, tmp_pat
     qtbot.wait(150)
     assert 0 < adapter.get_status().volume < 200
     qtbot.waitUntil(lambda: adapter.get_status().volume == 0, timeout=3000)
-    assert app.window._volume_eq._volume_reset_button.isEnabled()
+    app.window._volume_eq._reset_level.setValue(78)  # 78 % = 200 on VLC's scale
     app.window._volume_eq._volume_reset_button.click()
-    qtbot.waitUntil(lambda: adapter.get_status().volume == 200, timeout=2000)
-    assert not app.window._volume_eq._volume_reset_button.isEnabled()
+    qtbot.waitUntil(lambda: adapter.get_status().volume == 200, timeout=3000)
 
 
 def test_max_raises_to_100_percent_over_its_time(qtbot, tmp_path) -> None:
@@ -186,7 +188,7 @@ def test_mute_is_instant_when_nothing_plays_and_the_fader_cancels_a_ramp(qtbot, 
     app.window._volume_eq._max_button.click()
     assert app._volume_ramp is not None
     app.window._volume.volume_changed.emit(100)  # the user grabs the fader
-    assert app._volume_ramp is None and not app.window._volume_eq._volume_reset_button.isEnabled()
+    assert app._volume_ramp is None
     qtbot.wait(200)
     assert adapter.get_status().volume == 100
 

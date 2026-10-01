@@ -2,18 +2,23 @@
 equalizer with a preamp.
 
 Max raises the volume to 100 % and Mute lowers it to silence, each over its own time
-(while something plays; at once otherwise). Reset goes straight back to the volume from
-before. The ramps themselves run in Application.
+(while something plays; at once otherwise). Normalize (80 %) and Reset (50 %) bring it to
+their own, adjustable level, gliding at Max's speed coming down and at Mute's going up.
+The volume ramps run in Application.
 
 The equalizer faders are painted like the volume fader (dark strip, lit slot, metal cap)
 but lit from their neutral mark: 0 dB for a band, +12 dB for the preamp (VLC's neutral
 level, see domain/equalizer.py). Click, drag, scroll or use the arrow keys; a double-click
 returns a fader to neutral. While the equalizer is switched off its faders are greyed out
-(VLC ignores changes then).
+(VLC ignores changes then). A chosen preset (or Flat) glides there over the "Glide" time,
+under the same rule as the volume ramps; a hand on a fader takes over at once.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+import time
+from typing import Callable
+
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -40,10 +45,14 @@ from bookmark_studio.domain.equalizer import (
     EqualizerSettings,
     band_label,
 )
-from bookmark_studio.ui.deck_fader import _LIT, _PANEL, _SCALE, _SLOT, _UNITY, VolumeStrip, level_to_percent
+from bookmark_studio.ui.deck_fader import _LIT, _PANEL, _SCALE, _SLOT, _UNITY, VolumeStrip
 
 CUSTOM_PRESET = "Custom"
 DEFAULT_RAMP_MS = 1500  # Max and Mute
+DEFAULT_NORMALIZE_PERCENT = 80
+DEFAULT_RESET_PERCENT = 50
+DEFAULT_GLIDE_MS = 1000  # the faders moving to a chosen preset
+_GLIDE_STEP_MS = 40
 _STEPS_PER_DB = 10  # the slider counts tenths of a dB
 _CAP_W = 22
 _CAP_H = 12
@@ -200,6 +209,9 @@ class VolumeEqPanel(QWidget):
     mute_requested = Signal()
     reset_requested = Signal()
     ramp_times_changed = Signal(int, int)  # Max ms, Mute ms
+    normalize_requested = Signal()
+    levels_changed = Signal(int, int)  # Normalize %, Reset %
+    glide_ms_changed = Signal(int)  # how long a preset change takes
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -244,7 +256,29 @@ class VolumeEqPanel(QWidget):
         self._reset_button.setToolTip("Back to flat (no change to the sound)")
         self._reset_button.clicked.connect(lambda: self._apply_preset("Flat"))
         header.addWidget(self._reset_button)
+        header.addSpacing(8)
+        header.addWidget(QLabel("Glide", self))
+        self._glide_ms = QSpinBox(self)
+        self._glide_ms.setRange(0, 60_000)
+        self._glide_ms.setSingleStep(250)
+        self._glide_ms.setSuffix(" ms")
+        self._glide_ms.setSpecialValueText("At once")
+        self._glide_ms.setValue(DEFAULT_GLIDE_MS)
+        self._glide_ms.setToolTip(
+            "How long the faders take to move to a chosen preset (or Flat), in ms -- while "
+            "something plays, like Max and Mute; at once otherwise"
+        )
+        self._glide_ms.valueChanged.connect(self.glide_ms_changed.emit)
+        header.addWidget(self._glide_ms)
         eq.addLayout(header)
+
+        # A preset glides there: every step goes to the player like a fader drag.
+        self._glide: tuple[EqualizerSettings, EqualizerSettings, int, int] | None = None
+        self._glide_timer = QTimer(self)
+        self._glide_timer.setInterval(_GLIDE_STEP_MS)
+        self._glide_timer.timeout.connect(self._on_glide_tick)
+        self._glide_allowed: Callable[[], bool] = lambda: True
+        self._pending_preset: str | None = None  # shown in the preset list while gliding to it
 
         rack = QGridLayout()
         rack.setHorizontalSpacing(4)
@@ -283,11 +317,12 @@ class VolumeEqPanel(QWidget):
         self._show(self._settings)
 
     def _build_ramp_column(self) -> QWidget:
-        """Beside the fader: Max (with its ramp time) at the top, Reset in the middle,
-        Mute (with its ramp time) at the bottom. The times work like a bookmark's fades:
-        milliseconds, 0 = at once."""
+        """Beside the fader, top to bottom: Max (with its ramp time), Normalize and Reset
+        (each with the level it goes to: 80 % and 50 % to begin with), Mute (with its ramp
+        time). The times work like a bookmark's fades: milliseconds, 0 = at once.
+        Normalize and Reset glide at Max's speed coming down, at Mute's going up."""
         column = QWidget(self)
-        column.setFixedWidth(96)
+        column.setFixedWidth(100)
         layout = QVBoxLayout(column)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
@@ -307,10 +342,30 @@ class VolumeEqPanel(QWidget):
         self._max_button.setToolTip("Raise the volume to 100 % over the time below")
         self._max_button.clicked.connect(self.max_requested.emit)
         self._max_ms = ramp_spin("How long Max takes to raise the volume")
+
+        def level_spin(value: int, tooltip: str) -> QSpinBox:
+            spin = QSpinBox(column)
+            spin.setRange(0, 125)  # the fader's range
+            spin.setSuffix(" %")
+            spin.setValue(value)
+            spin.setToolTip(tooltip)
+            spin.valueChanged.connect(lambda _value: self.levels_changed.emit(*self.levels()))
+            return spin
+
+        self._normalize_button = QPushButton("Normalize", column)
+        self._normalize_button.setToolTip(
+            "Bring the volume to the level below -- gliding at Max's speed coming down, at "
+            "Mute's speed going up (at once when nothing plays)"
+        )
+        self._normalize_button.clicked.connect(self.normalize_requested.emit)
+        self._normalize_level = level_spin(DEFAULT_NORMALIZE_PERCENT, "The level Normalize brings the volume to")
         self._volume_reset_button = QPushButton("Reset", column)
-        self._volume_reset_button.setToolTip("Back at once to the volume from before Max or Mute")
+        self._volume_reset_button.setToolTip(
+            "Bring the volume to the level below -- gliding at Max's speed coming down, at "
+            "Mute's speed going up (at once when nothing plays)"
+        )
         self._volume_reset_button.clicked.connect(self.reset_requested.emit)
-        self._volume_reset_button.setEnabled(False)
+        self._reset_level = level_spin(DEFAULT_RESET_PERCENT, "The level Reset brings the volume to")
         self._mute_ms = ramp_spin("How long Mute takes to lower the volume (while something plays)")
         self._mute_button = QPushButton("Mute", column)
         self._mute_button.setToolTip("Lower the volume to silence over the time above")
@@ -320,7 +375,11 @@ class VolumeEqPanel(QWidget):
         layout.addWidget(self._max_button)
         layout.addWidget(self._max_ms)
         layout.addStretch(1)
+        layout.addWidget(self._normalize_button)
+        layout.addWidget(self._normalize_level)
+        layout.addSpacing(4)
         layout.addWidget(self._volume_reset_button)
+        layout.addWidget(self._reset_level)
         layout.addStretch(1)
         layout.addWidget(self._mute_ms)
         layout.addWidget(self._mute_button)
@@ -338,13 +397,16 @@ class VolumeEqPanel(QWidget):
             spin.setValue(value)
             spin.blockSignals(False)
 
-    def set_reset_level(self, level: int | None) -> None:
-        """The volume Reset would go back to (0-512), or None: nothing to reset."""
-        self._volume_reset_button.setEnabled(level is not None)
-        if level is None:
-            self._volume_reset_button.setToolTip("Back at once to the volume from before Max or Mute")
-        else:
-            self._volume_reset_button.setToolTip(f"Back at once to {level_to_percent(level)} %")
+    def levels(self) -> tuple[int, int]:
+        """(Normalize, Reset) levels in percent."""
+        return self._normalize_level.value(), self._reset_level.value()
+
+    def set_levels(self, normalize_percent: int, reset_percent: int) -> None:
+        """Saved levels; no levels_changed."""
+        for spin, value in ((self._normalize_level, normalize_percent), (self._reset_level, reset_percent)):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
 
     @staticmethod
     def _value_label() -> QLabel:
@@ -378,6 +440,7 @@ class VolumeEqPanel(QWidget):
 
     def set_equalizer(self, settings: EqualizerSettings) -> None:
         """Shows saved settings; no signal."""
+        self._stop_glide()
         self._settings = settings
         self._show(settings)
 
@@ -405,10 +468,60 @@ class VolumeEqPanel(QWidget):
             self._show(self._settings)
 
     def _apply_preset(self, name: str) -> None:
-        self._on_user_edit(EqualizerSettings.from_preset(name, enabled=self._settings.enabled))
+        self.glide_to(EqualizerSettings.from_preset(name, enabled=self._settings.enabled))
+
+    # -- gliding to a preset --
+
+    def glide_ms(self) -> int:
+        return self._glide_ms.value()
+
+    def set_glide_ms(self, value_ms: int) -> None:
+        """The saved glide time; no glide_ms_changed."""
+        self._glide_ms.blockSignals(True)
+        self._glide_ms.setValue(value_ms)
+        self._glide_ms.blockSignals(False)
+
+    def set_glide_condition(self, allowed: Callable[[], bool]) -> None:
+        """When a preset may glide (Application: while something plays); at once otherwise."""
+        self._glide_allowed = allowed
+
+    def is_gliding(self) -> bool:
+        return self._glide is not None
+
+    def glide_to(self, target: EqualizerSettings) -> None:
+        self._stop_glide()
+        duration_ms = self._glide_ms.value()
+        if duration_ms <= 0 or target == self._settings or not self._glide_allowed():
+            self._on_user_edit(target)
+            return
+        self._pending_preset = target.matching_preset()
+        self._glide = (self._settings, target, time.monotonic_ns(), duration_ms * 1_000_000)
+        self._show(self._settings)  # the preset list shows where it is going
+        self._glide_timer.start()
+
+    def _on_glide_tick(self) -> None:
+        if self._glide is None:
+            self._glide_timer.stop()
+            return
+        start, target, started_ns, duration_ns = self._glide
+        fraction = min(1.0, (time.monotonic_ns() - started_ns) / duration_ns)
+        step = target if fraction >= 1.0 else start.blend(target, fraction)
+        if fraction >= 1.0:
+            self._stop_glide()
+        if step != self._settings:
+            self._settings = step
+            self._show(step)
+            self.equalizer_changed.emit(step)
+
+    def _stop_glide(self) -> None:
+        self._glide = None
+        self._glide_timer.stop()
+        self._pending_preset = None
 
     def _on_user_edit(self, settings: EqualizerSettings) -> None:
+        self._stop_glide()  # a hand on a fader (or the switch) takes over from a glide
         if settings == self._settings:
+            self._show(settings)
             return
         self._settings = settings
         self._show(settings)
@@ -427,7 +540,7 @@ class VolumeEqPanel(QWidget):
             value.setText(_format_db(db))
         for widget in (self._preamp, *self._bands, self._preset_combo, self._reset_button):
             widget.setEnabled(active)
-        preset = settings.matching_preset() or CUSTOM_PRESET
+        preset = self._pending_preset or settings.matching_preset() or CUSTOM_PRESET
         self._preset_combo.setCurrentIndex(max(0, self._preset_combo.findText(preset)))
 
 

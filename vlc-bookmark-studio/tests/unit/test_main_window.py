@@ -188,9 +188,11 @@ def test_inspector_mirrors_an_in_progress_selection(qtbot) -> None:
     assert window._inspector._start_edit.isEnabled() is False
 
 
-def test_inspector_selection_preview_does_not_clobber_a_loaded_bookmark(qtbot) -> None:
-    """An in-progress drag-selection elsewhere on the waveform must not silently
-    overwrite the fields for a bookmark someone is actively editing."""
+def test_a_new_selection_turns_the_tab_into_a_new_bookmark_form_and_keeps_the_old_edits(qtbot) -> None:
+    """Up to 0.7.0 a drag-selection left a loaded bookmark in the tab (so as not to lose
+    what was being typed). Since 0.8.0 a selection is a new bookmark in the making: the
+    tab becomes its form (Apply saves it) -- after saving what was being typed for the
+    bookmark that was shown, so nothing is lost."""
     from uuid import uuid4
 
     from bookmark_studio.domain.bookmark import Bookmark
@@ -207,11 +209,14 @@ def test_inspector_selection_preview_does_not_clobber_a_loaded_bookmark(qtbot) -
     repo.insert(bookmark)
     window._load_bookmark_into_inspector(bookmark)
     assert window._inspector._start_edit.text() == "00:00:05.000"
+    window._inspector._name_edit.setText("Chorus, take 2")  # typed, not yet committed
 
     window._waveform_scene.set_selection(Selection(start_us=1_000_000, end_us=2_000_000))
 
-    assert window._inspector.current_bookmark().id == bookmark.id
-    assert window._inspector._start_edit.text() == "00:00:05.000"  # unchanged
+    assert repo.get(bookmark.id).name == "Chorus, take 2"  # saved on the way out
+    assert window._inspector.current_bookmark() is None and window._inspector.is_drafting()
+    assert window._inspector._start_edit.text() == "00:00:01.000"
+    assert window._inspector._apply_button.isEnabled()
 
 
 def test_delete_bookmark_button_removes_the_selected_bookmark(qtbot) -> None:

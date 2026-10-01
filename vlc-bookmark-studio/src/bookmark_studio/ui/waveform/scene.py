@@ -55,6 +55,7 @@ class WaveformScene(QGraphicsScene):
         self._playhead_item.seek_requested.connect(self.seek_requested.emit)
         self._selection_item: SelectionItem | None = None
         self._bookmark_items: dict[UUID, BookmarkRegionItem | BookmarkPointItem] = {}
+        self._playback: tuple[UUID, str] | None = None  # the bookmark playing / played last
         self.setSceneRect(QRectF(0, 0, time_us_to_scene_x(max(duration_us, 1)), RULER_HEIGHT + self._height))
 
     # -- waveform / duration --
@@ -144,6 +145,18 @@ class WaveformScene(QGraphicsScene):
         item.setY(RULER_HEIGHT)
         self.addItem(item)
         self._bookmark_items[bookmark.id] = item
+        if self._playback is not None and self._playback[0] == bookmark.id:
+            item.set_playback_state(self._playback[1])
+
+    def set_bookmark_playback(self, bookmark_id: UUID | None, state: str | None) -> None:
+        """The bookmark playing ("playing": green) or played last ("done": yellow); kept
+        across the bookmarks being redrawn."""
+        previous = self._playback
+        if previous is not None and previous[0] in self._bookmark_items:
+            self._bookmark_items[previous[0]].set_playback_state(None)
+        self._playback = (bookmark_id, state) if bookmark_id is not None and state else None
+        if self._playback is not None and bookmark_id in self._bookmark_items:
+            self._bookmark_items[bookmark_id].set_playback_state(state)
 
     def bookmark_item(self, bookmark_id: UUID) -> BookmarkRegionItem | BookmarkPointItem | None:
         return self._bookmark_items.get(bookmark_id)

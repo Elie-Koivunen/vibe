@@ -24,6 +24,9 @@ COLUMNS = ["Title", "Artist", "Duration", "Bookmarks", "Status"]
 # loaded (paused/stopped).
 _ACTIVELY_PLAYING_COLOR = QColor("#8fd98f")
 _CURRENT_NOT_PLAYING_COLOR = QColor("#a9c9f5")
+# The song of the bookmark playing (green) or played last (yellow) -- like the bookmark's
+# row in the list and its area on the waveform.
+_BOOKMARK_SONG_COLORS = {"playing": QColor("#8fd98f"), "done": QColor("#ffe27a")}
 _NOT_CURRENT_BRUSH = QBrush()
 
 
@@ -40,6 +43,7 @@ class PlaylistPanel(QWidget):
         self._bookmark_counts: dict[int, int] = {}
         self._current_playing_id: int | None = None
         self._is_actively_playing = False
+        self._bookmark_song: tuple[int, str] | None = None  # (vlc_id, "playing" | "done")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -121,8 +125,23 @@ class PlaylistPanel(QWidget):
             return
         self._current_playing_id = vlc_id
         self._is_actively_playing = is_playing
+        self._paint_rows()
+
+    def set_bookmark_song(self, vlc_id: int | None, state: str | None) -> None:
+        """The song of the bookmark that is playing (green) or played last (yellow)."""
+        song = (vlc_id, state) if vlc_id is not None and state else None
+        if song != self._bookmark_song:
+            self._bookmark_song = song
+            self._paint_rows()
+
+    def bookmark_song(self) -> tuple[int, str] | None:
+        return self._bookmark_song
+
+    def _paint_rows(self) -> None:
         for row in top_level_rows(self._tree):
-            _set_row_playing(row, row.data(0, 32) == vlc_id, is_playing)
+            vlc_id = row.data(0, 32)
+            bookmark_state = self._bookmark_song[1] if self._bookmark_song and self._bookmark_song[0] == vlc_id else None
+            _set_row_playing(row, vlc_id == self._current_playing_id, self._is_actively_playing, bookmark_state)
 
     def select_item(self, vlc_id: int | None) -> None:
         """Highlights the row for `vlc_id` (selecting a bookmark selects its song).
@@ -180,7 +199,10 @@ class PlaylistPanel(QWidget):
                 ]
             )
             row.setData(0, 32, item.vlc_id)  # Qt.ItemDataRole.UserRole == 32
-            _set_row_playing(row, item.vlc_id == self._current_playing_id, self._is_actively_playing)
+            bookmark_state = (
+                self._bookmark_song[1] if self._bookmark_song and self._bookmark_song[0] == item.vlc_id else None
+            )
+            _set_row_playing(row, item.vlc_id == self._current_playing_id, self._is_actively_playing, bookmark_state)
             self._tree.addTopLevelItem(row)
         # Fit the columns to their contents on each rebuild (still resizable by hand).
         for column in range(len(COLUMNS)):
@@ -202,8 +224,11 @@ class PlaylistPanel(QWidget):
         self.item_double_clicked.emit(item.data(0, 32))
 
 
-def _set_row_playing(row: QTreeWidgetItem, is_current: bool, is_playing: bool) -> None:
-    if is_current:
+def _set_row_playing(row: QTreeWidgetItem, is_current: bool, is_playing: bool,
+                     bookmark_state: str | None = None) -> None:
+    if bookmark_state in _BOOKMARK_SONG_COLORS:
+        brush = QBrush(_BOOKMARK_SONG_COLORS[bookmark_state])
+    elif is_current:
         brush = QBrush(_ACTIVELY_PLAYING_COLOR if is_playing else _CURRENT_NOT_PLAYING_COLOR)
     else:
         brush = _NOT_CURRENT_BRUSH

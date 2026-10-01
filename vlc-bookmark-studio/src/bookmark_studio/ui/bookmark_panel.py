@@ -2,17 +2,22 @@
 its Play/Loop/Delete/Move buttons stacked beside it (towards the Bookmark tab)."""
 from __future__ import annotations
 
+import time
 from uuid import UUID
 
-from PySide6.QtCore import QByteArray, Qt, Signal
+from PySide6.QtCore import QByteArray, Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QPushButton,
+    QStyle,
     QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -32,6 +37,11 @@ COLUMNS = ["Song", "Name", "Start", "End", "Loop", "Gap", "Fade In", "Fade Out",
 TAGS_COLUMN = COLUMNS.index("Tags")
 DEFAULT_ORDER = ["Song", "Tags", "Name", "Start", "End", "Loop", "Gap", "Fade In", "Fade Out"]
 USER_ROLE = 32
+FLASH_ROLE = USER_ROLE + 1  # set while a row shows the orange "saved" flash
+SAVED_ROW_COLOR = QColor(255, 159, 26)
+SAVED_TEXT_COLOR = QColor(26, 26, 26)
+PLAYBACK_ROLE = USER_ROLE + 2  # "playing" / "done": the bookmark playing, or the one played last
+PLAYBACK_ROW_COLORS = {"playing": QColor("#8fd98f"), "done": QColor("#ffe27a")}
 LOOP_COLUMN = COLUMNS.index("Loop")
 GAP_COLUMN = COLUMNS.index("Gap")
 FADE_IN_COLUMN = COLUMNS.index("Fade In")
@@ -91,6 +101,25 @@ class _ComboColumnDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self._column_options = column_options
 
+    def paint(self, painter, option, index) -> None:  # noqa: N802 - Qt override
+        # A row whose change was just saved shows orange -- also when it is the selected
+        # row (as the edited one usually is), which a plain background brush would not.
+        # Below the flash: green while the bookmark plays, yellow once it has played.
+        if index.data(FLASH_ROLE):
+            color = SAVED_ROW_COLOR
+        elif index.data(PLAYBACK_ROLE) in PLAYBACK_ROW_COLORS:
+            color = PLAYBACK_ROW_COLORS[index.data(PLAYBACK_ROLE)]
+        else:
+            super().paint(painter, option, index)
+            return
+        flashed = QStyleOptionViewItem(option)
+        self.initStyleOption(flashed, index)
+        flashed.state &= ~QStyle.StateFlag.State_Selected
+        flashed.backgroundBrush = QBrush(color)
+        flashed.palette.setColor(QPalette.ColorRole.Text, SAVED_TEXT_COLOR)
+        style = flashed.widget.style() if flashed.widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, flashed, painter, flashed.widget)
+
     def createEditor(self, parent, option, index):  # noqa: N802 - Qt override
         options = self._column_options.get(index.column())
         if options is None:
@@ -145,6 +174,12 @@ class BookmarkPanel(QWidget):
         # Columns fit their contents until the user (or a saved layout) sizes them.
         self._fitting = False
         self._user_sized_columns = False
+        # Rows showing the orange "saved" flash: bookmark id -> when it ends (monotonic s).
+        self._flashing: dict[UUID, float] = {}
+        self._playback: tuple[UUID, str] | None = None  # the bookmark playing / played last
+        self._flash_timer = QTimer(self)
+        self._flash_timer.setSingleShot(True)
+        self._flash_timer.timeout.connect(self._expire_flashes)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
@@ -242,6 +277,61 @@ class BookmarkPanel(QWidget):
     def _on_section_resized(self, *_args) -> None:
         if not self._fitting:
             self._user_sized_columns = True
+
+    # -- green while a bookmark plays, yellow once it has played --
+
+    def set_bookmark_playback(self, bookmark_id: UUID | None, state: str | None) -> None:
+        self._playback = (bookmark_id, state) if bookmark_id is not None and state else None
+        self._apply_playback()
+
+    def playback_state(self, bookmark_id: UUID) -> str | None:
+        playback = self._playback
+        return playback[1] if playback is not None and playback[0] == bookmark_id else None
+
+    def _apply_playback(self) -> None:
+        playback = self._playback
+        self._tree.blockSignals(True)  # not an edit (see _apply_flashes)
+        try:
+            for row in top_level_rows(self._tree):
+                state = playback[1] if playback is not None and row.data(0, USER_ROLE) == playback[0] else None
+                if row.data(0, PLAYBACK_ROLE) != state:
+                    for column in range(len(COLUMNS)):
+                        row.setData(column, PLAYBACK_ROLE, state)
+        finally:
+            self._tree.blockSignals(False)
+
+    # -- the orange "saved" flash --
+
+    def flash_bookmark(self, bookmark_id: UUID, duration_ms: int = 2000) -> None:
+        """Shows the bookmark's row in orange for a moment: a change was saved. Survives
+        the list being rebuilt in the meantime."""
+        self._flashing[bookmark_id] = time.monotonic() + duration_ms / 1000
+        self._apply_flashes()
+        self._flash_timer.start(duration_ms)
+
+    def is_flashing(self, bookmark_id: UUID) -> bool:
+        return self._flashing.get(bookmark_id, 0.0) > time.monotonic()
+
+    def _apply_flashes(self) -> None:
+        now = time.monotonic()
+        # Not an edit: itemChanged would otherwise save the Gap/Fade columns again (and
+        # flash again, and again).
+        self._tree.blockSignals(True)
+        try:
+            for row in top_level_rows(self._tree):
+                flashing = self._flashing.get(row.data(0, USER_ROLE), 0.0) > now
+                if bool(row.data(0, FLASH_ROLE)) != flashing:
+                    for column in range(len(COLUMNS)):
+                        row.setData(column, FLASH_ROLE, flashing or None)
+        finally:
+            self._tree.blockSignals(False)
+
+    def _expire_flashes(self) -> None:
+        now = time.monotonic()
+        self._flashing = {k: v for k, v in self._flashing.items() if v > now}
+        self._apply_flashes()
+        if self._flashing:
+            self._flash_timer.start(max(10, int((min(self._flashing.values()) - now) * 1000)))
 
     def header_state(self) -> QByteArray:
         """The columns' order and widths (saved with the window layout)."""
@@ -417,6 +507,8 @@ class BookmarkPanel(QWidget):
             if previously_selected:
                 self.select_bookmarks(previously_selected)
             self._tree.verticalScrollBar().setValue(scroll_value)
+            self._apply_flashes()
+            self._apply_playback()
         finally:
             self._restoring = False
         self._update_buttons_for_selection()

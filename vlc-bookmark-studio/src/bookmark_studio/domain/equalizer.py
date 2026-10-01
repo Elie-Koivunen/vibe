@@ -84,6 +84,15 @@ class EqualizerSettings:
     def with_enabled(self, enabled: bool) -> "EqualizerSettings":
         return EqualizerSettings(enabled, self.preamp_db, self.bands_db)
 
+    def blend(self, target: "EqualizerSettings", fraction: float) -> "EqualizerSettings":
+        """The way from here to `target` (0.0 = here, 1.0 = there), for a glide."""
+        f = max(0.0, min(1.0, fraction))
+        return EqualizerSettings(
+            enabled=target.enabled,
+            preamp_db=self.preamp_db + (target.preamp_db - self.preamp_db) * f,
+            bands_db=tuple(a + (b - a) * f for a, b in zip(self.bands_db, target.bands_db)),
+        )
+
     def matching_preset(self) -> str | None:
         """The preset these gains are (within rounding), or None for custom settings."""
         for name, (preamp, bands) in PRESETS.items():

@@ -15,6 +15,12 @@ REGION_FILL = QColor(240, 180, 60, 130)
 REGION_BORDER = QColor(200, 140, 30)
 HANDLE_COLOR = QColor(180, 110, 10)
 POINT_COLOR = QColor(60, 170, 90)
+# A bookmark that is playing (green), or the one that played last (yellow) -- the same
+# colours as its song in the playlist and its row in the bookmark list.
+PLAYBACK_COLORS = {
+    "playing": (QColor(70, 200, 100, 150), QColor(30, 150, 60), QColor(20, 130, 50)),
+    "done": (QColor(255, 225, 60, 160), QColor(215, 175, 0), QColor(190, 150, 0)),
+}
 
 
 def _view_scale_x(item: QGraphicsItem) -> float:
@@ -58,6 +64,7 @@ class BookmarkRegionItem(QGraphicsObject):
         self.setAcceptHoverEvents(True)
         self._height = height
         self._bookmark = bookmark
+        self._playback_state: str | None = None
         self._drag_mode: str | None = None
         self._drag_origin_scene_x = 0.0
         self._orig_start_us = bookmark.start_us
@@ -68,6 +75,14 @@ class BookmarkRegionItem(QGraphicsObject):
 
     def bookmark(self) -> Bookmark:
         return self._bookmark
+
+    def set_playback_state(self, state: str | None) -> None:
+        """"playing" (green), "done" (yellow) or None (the usual amber)."""
+        self._playback_state = state
+        self.update()
+
+    def playback_state(self) -> str | None:
+        return self._playback_state
 
     def set_bookmark(self, bookmark: Bookmark) -> None:
         if bookmark.end_us is None:
@@ -88,11 +103,12 @@ class BookmarkRegionItem(QGraphicsObject):
     def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: N802
         rect = self.boundingRect()
         handle_width = self._handle_width_scene()
-        painter.setBrush(QBrush(REGION_FILL))
-        painter.setPen(cosmetic_pen(REGION_BORDER))
+        fill, border, handles = PLAYBACK_COLORS.get(self._playback_state or "", (REGION_FILL, REGION_BORDER, HANDLE_COLOR))
+        painter.setBrush(QBrush(fill))
+        painter.setPen(cosmetic_pen(border))
         painter.drawRect(rect)
-        painter.fillRect(QRectF(rect.left(), 0, handle_width, self._height), HANDLE_COLOR)
-        painter.fillRect(QRectF(rect.right() - handle_width, 0, handle_width, self._height), HANDLE_COLOR)
+        painter.fillRect(QRectF(rect.left(), 0, handle_width, self._height), handles)
+        painter.fillRect(QRectF(rect.right() - handle_width, 0, handle_width, self._height), handles)
 
         # Same scene-vs-device-pixel bug as TimeRulerItem (see waveform_item.device_pixel_width):
         # a font drawn in scene coordinates shrinks to invisible once the view is zoomed
@@ -185,6 +201,7 @@ class BookmarkPointItem(QGraphicsObject):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self._height = height
         self._bookmark = bookmark
+        self._playback_state: str | None = None
         self._dragging = False
         self._orig_start_us = bookmark.start_us
         self._live_start_us = bookmark.start_us
@@ -198,15 +215,24 @@ class BookmarkPointItem(QGraphicsObject):
         self._orig_start_us = self._live_start_us = bookmark.start_us
         self._sync_position()
 
+    def set_playback_state(self, state: str | None) -> None:
+        """"playing" (green), "done" (yellow) or None (the usual green marker)."""
+        self._playback_state = state
+        self.update()
+
+    def playback_state(self) -> str | None:
+        return self._playback_state
+
     def boundingRect(self) -> QRectF:  # noqa: N802
         half = self._MARKER_HALF_WIDTH
         return QRectF(-half, 0, half * 2, self._height)
 
     def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: N802
         half = self._MARKER_HALF_WIDTH
-        painter.setPen(cosmetic_pen(POINT_COLOR, 2))
+        color = PLAYBACK_COLORS[self._playback_state][1] if self._playback_state in PLAYBACK_COLORS else POINT_COLOR
+        painter.setPen(cosmetic_pen(color, 3 if self._playback_state else 2))
         painter.drawLine(QLineF(0, 0, 0, self._height))
-        painter.setBrush(QBrush(POINT_COLOR))
+        painter.setBrush(QBrush(color))
         painter.drawPolygon([QPointF(0, 0), QPointF(half, half), QPointF(0, half * 2), QPointF(-half, half)])
 
     def mousePressEvent(self, event) -> None:  # noqa: N802

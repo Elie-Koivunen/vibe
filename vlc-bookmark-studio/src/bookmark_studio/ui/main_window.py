@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from uuid import UUID, uuid4
 
-from PySide6.QtCore import QByteArray, QEvent, QSize, Qt, Signal
+from PySide6.QtCore import QByteArray, QEvent, QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QUndoStack
 from PySide6.QtWidgets import (
     QFrame,
@@ -82,8 +82,11 @@ class MainWindow(QMainWindow):
     equalizer_requested = Signal(object)  # EqualizerSettings, from the Volume & EQ tab
     volume_max_requested = Signal()  # Max: up to 100 % over its ramp time
     volume_mute_requested = Signal()  # Mute: down to silence over its ramp time
-    volume_reset_requested = Signal()  # Reset: back to the volume from before, at once
+    volume_normalize_requested = Signal()  # Normalize: to its level (80 % to begin with)
+    volume_reset_requested = Signal()  # Reset: to its level (50 % to begin with)
+    volume_levels_changed = Signal(int, int)  # Normalize %, Reset %
     volume_ramp_times_changed = Signal(int, int)  # Max ms, Mute ms
+    equalizer_glide_ms_changed = Signal(int)  # how long a preset change takes
     quit_requested = Signal()  # Quit button / File > Quit / Ctrl+Q
 
     # Player controls
@@ -155,6 +158,15 @@ class MainWindow(QMainWindow):
         Polished first -- the style's metrics add to the widgets' minimums."""
         self.ensurePolished()
         minimum = self.minimumSizeHint().expandedTo(QSize(900, 600))
+        # The splitters know their panels' needs at once; the layouts above them only a
+        # few event passes later (one nesting level per pass). Ask them directly.
+        splitters = getattr(self, "_splitters", None)
+        central = self.centralWidget()
+        central_layout = central.layout() if central is not None else None
+        if splitters is not None and central_layout is not None:
+            margins = central_layout.contentsMargins()
+            panels = splitters["vertical"].minimumSizeHint().width() + margins.left() + margins.right()
+            minimum = minimum.expandedTo(QSize(panels, 0))
         if minimum != self.minimumSize():
             self.setMinimumSize(minimum)
 
@@ -164,6 +176,11 @@ class MainWindow(QMainWindow):
         if event.type() == QEvent.Type.LayoutRequest:
             self._fit_minimum_size()
         return handled
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
+        if event.type() == QEvent.Type.LayoutRequest and isinstance(watched, QSplitter):
+            self._fit_minimum_size()  # a panel's needs changed: keep the window big enough
+        return super().eventFilter(watched, event)
 
     # -- layout --
 
@@ -287,9 +304,9 @@ class MainWindow(QMainWindow):
         # volume and equalizer. Scroll areas keep a short window usable.
         self._side_tabs = QTabWidget(self)
         self._side_tabs.setDocumentMode(True)
-        self._side_tabs.addTab(_scrolling(self._inspector), "Bookmark")
+        self._side_tabs.addTab(_scrolling(self._inspector), "Bookmark settings")
         self._side_tabs.addTab(_scrolling(self._volume_eq), "Volume && EQ")
-        self._side_tabs.setTabToolTip(0, "The selected bookmark's settings")
+        self._side_tabs.setTabToolTip(0, "The selected bookmark's settings, or a new one's for a selection")
         self._side_tabs.setTabToolTip(1, "The player's volume and equalizer")
 
         bottom_splitter = QSplitter(Qt.Orientation.Horizontal, self)
@@ -297,7 +314,20 @@ class MainWindow(QMainWindow):
         bottom_splitter.addWidget(self._side_tabs)
         bottom_splitter.setStretchFactor(0, 1)
         bottom_splitter.setStretchFactor(1, 1)
-        self._splitters = {"top": top_splitter, "bottom": bottom_splitter}
+        # The top (waveform) and bottom (lists, tabs) halves share the height; the divider
+        # can be dragged, and a tab that needs more room takes it (_fit_side_tab).
+        vertical_splitter = QSplitter(Qt.Orientation.Vertical, self)
+        vertical_splitter.addWidget(top_splitter)
+        vertical_splitter.addWidget(bottom_splitter)
+        vertical_splitter.setStretchFactor(0, 2)
+        vertical_splitter.setStretchFactor(1, 1)
+        vertical_splitter.setChildrenCollapsible(False)
+        self._splitters = {"top": top_splitter, "bottom": bottom_splitter, "vertical": vertical_splitter}
+        self._side_tabs.currentChanged.connect(lambda _index: self._schedule_side_tab_fit())
+        # A splitter re-laying out its panels doesn't reliably tell the window above it
+        # (nested in the vertical splitter, the window's minimum went stale): pass it on.
+        for splitter in self._splitters.values():
+            splitter.installEventFilter(self)
 
         header = QHBoxLayout()
         header.setContentsMargins(4, 0, 0, 0)
@@ -308,9 +338,66 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setSpacing(6)
         layout.addLayout(header)
-        layout.addWidget(top_splitter, 2)
-        layout.addWidget(bottom_splitter, 1)
+        layout.addWidget(vertical_splitter, 1)
         self.setCentralWidget(central)
+
+    # -- room for the side tab (no scrolling) --
+
+    def _schedule_side_tab_fit(self) -> None:
+        if self.isVisible():
+            QTimer.singleShot(0, self._fit_side_tab)
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt override
+        self._fit_minimum_size()
+        super().showEvent(event)
+        self._schedule_side_tab_fit()
+
+    def _fit_side_tab(self, *, second_pass: bool = False) -> None:
+        """Makes the open side tab (Bookmark settings, Volume & EQ) fit without scrolling:
+        first by taking room from the bookmark list and the waveform (down to what they
+        need), then by enlarging the window (within the screen). Only ever grows it."""
+        area = self._side_tabs.currentWidget()
+        if not isinstance(area, QScrollArea) or not self.isVisible():
+            return
+        page = area.widget()
+        if page is None:
+            return
+        # Scroll bars appear only below the page's minimum: that is all it needs. (Asking
+        # for more would rearrange a layout the user set up, every time a tab opens.)
+        wanted = page.minimumSizeHint()
+        short_w = wanted.width() - area.viewport().width()
+        short_h = wanted.height() - area.viewport().height()
+        if short_w <= 0 and short_h <= 0:
+            return
+        bottom, vertical = self._splitters["bottom"], self._splitters["vertical"]
+        if short_w > 0:
+            left, right = bottom.sizes()
+            take = min(short_w, max(0, left - self._bookmark_panel.minimumSizeHint().width()))
+            if take > 0:
+                bottom.setSizes([left - take, right + take])
+                short_w -= take
+        if short_h > 0:
+            top, low = vertical.sizes()
+            take = min(short_h, max(0, top - self._splitters["top"].minimumSizeHint().height()))
+            if take > 0:
+                vertical.setSizes([top - take, low + take])
+                short_h -= take
+        if (short_w > 0 or short_h > 0) and not second_pass and not (self.isMaximized() or self.isFullScreen()):
+            screen = self.screen().availableGeometry() if self.screen() is not None else None
+            width = self.width() + max(0, short_w)
+            height = self.height() + max(0, short_h)
+            if screen is not None:  # as far as the screen allows -- never smaller than now
+                width = max(self.width(), min(width, screen.width()))
+                height = max(self.height(), min(height, screen.height()))
+            self.resize(width, height)
+            if screen is not None:  # keep it on the screen
+                frame = self.frameGeometry()
+                dx = min(0, screen.right() - frame.right())
+                dy = min(0, screen.bottom() - frame.bottom())
+                if dx or dy:
+                    self.move(max(screen.left(), frame.left() + dx), max(screen.top(), frame.top() + dy))
+            # The splitters shared the new room; hand it to the tab once settled.
+            QTimer.singleShot(0, lambda: self._fit_side_tab(second_pass=True))
 
     def show_side_tab(self, name: str) -> None:
         """"bookmark" or "volume": brings that tab of the side panel to the front."""
@@ -431,6 +518,20 @@ class MainWindow(QMainWindow):
         self._inspector.tags_committed.connect(self._on_tags_committed)
         self._inspector.notes_committed.connect(self._on_notes_committed)
         self._inspector.edit_tags_requested.connect(self.edit_tags)
+        self._inspector.apply_requested.connect(self._on_apply_new_bookmark)
+        self._inspector.draft_range_edited.connect(self._on_draft_range_edited)
+        # Undo / Redo beside Apply: the same stack as the Edit menu.
+        undo, redo = self._inspector.undo_button, self._inspector.redo_button
+        undo.clicked.connect(self._undo_stack.undo)
+        redo.clicked.connect(self._undo_stack.redo)
+        # Bound to the tab's own methods (not lambdas): the undo stack outlives the window,
+        # and Qt drops these connections when the tab goes.
+        self._undo_stack.canUndoChanged.connect(self._inspector.set_can_undo)
+        self._undo_stack.canRedoChanged.connect(self._inspector.set_can_redo)
+        self._undo_stack.undoTextChanged.connect(self._inspector.set_undo_text)
+        self._undo_stack.redoTextChanged.connect(self._inspector.set_redo_text)
+        self._inspector.set_can_undo(self._undo_stack.canUndo())
+        self._inspector.set_can_redo(self._undo_stack.canRedo())
 
         self._playlist_panel.launch_vlc_requested.connect(self.launch_vlc_requested.emit)
         self._playlist_panel.quit_requested.connect(self.quit_requested.emit)
@@ -440,7 +541,10 @@ class MainWindow(QMainWindow):
         self._volume_eq.max_requested.connect(self.volume_max_requested.emit)
         self._volume_eq.mute_requested.connect(self.volume_mute_requested.emit)
         self._volume_eq.reset_requested.connect(self.volume_reset_requested.emit)
+        self._volume_eq.normalize_requested.connect(self.volume_normalize_requested.emit)
+        self._volume_eq.levels_changed.connect(self.volume_levels_changed.emit)
         self._volume_eq.ramp_times_changed.connect(self.volume_ramp_times_changed.emit)
+        self._volume_eq.glide_ms_changed.connect(self.equalizer_glide_ms_changed.emit)
         self._transport.volume_clicked.connect(self._on_volume_readout_clicked)
         self._playlist_panel.item_selected.connect(self.playlist_item_selected.emit)
         self._playlist_panel.item_double_clicked.connect(self.playlist_item_double_clicked.emit)
@@ -491,9 +595,23 @@ class MainWindow(QMainWindow):
     def volume_ramp_times(self) -> tuple[int, int]:
         return self._volume_eq.ramp_times()
 
-    def set_volume_reset_level(self, level: int | None) -> None:
-        """What Reset would restore (0-512), or None to disable it."""
-        self._volume_eq.set_reset_level(level)
+    def show_volume_levels(self, normalize_percent: int, reset_percent: int) -> None:
+        """Saved Normalize/Reset levels (no volume_levels_changed)."""
+        self._volume_eq.set_levels(normalize_percent, reset_percent)
+
+    def volume_levels(self) -> tuple[int, int]:
+        return self._volume_eq.levels()
+
+    def show_equalizer_glide_ms(self, value_ms: int) -> None:
+        """The saved preset glide time (no equalizer_glide_ms_changed)."""
+        self._volume_eq.set_glide_ms(value_ms)
+
+    def equalizer_glide_ms(self) -> int:
+        return self._volume_eq.glide_ms()
+
+    def set_equalizer_glide_condition(self, allowed) -> None:  # noqa: ANN001 - Callable[[], bool]
+        """When a preset may glide rather than jump (Application: while something plays)."""
+        self._volume_eq.set_glide_condition(allowed)
 
     # -- tags --
 
@@ -566,6 +684,14 @@ class MainWindow(QMainWindow):
                       *, is_playing: bool) -> None:
         self._transport.set_time(time_us, duration_us)
         self._playlist_panel.set_current_playing(current_item_id, is_playing=is_playing)
+
+    def show_bookmark_playback(self, bookmark_id: UUID | None, song_vlc_id: int | None, state: str | None) -> None:
+        """The bookmark playing ("playing": green) or played last ("done": yellow), on all
+        three places it shows: its song in the playlist, its area on the waveform, its row
+        in the bookmark list. None clears them."""
+        self._waveform_scene.set_bookmark_playback(bookmark_id, state)
+        self._bookmark_panel.set_bookmark_playback(bookmark_id, state)
+        self._playlist_panel.set_bookmark_song(song_vlc_id, state)
 
     def set_playhead(self, time_us: int, *, follow: bool = True) -> None:
         self._waveform_scene.set_playhead_time_us(time_us)
@@ -655,11 +781,14 @@ class MainWindow(QMainWindow):
             self._selection_end_label.setText("--:--:--.---")
             self._selection_duration_label.setText("")
             self._set_selection_buttons_enabled(False)
-        # Mirrors the selection in the Inspector's Start/End fields whenever no
-        # bookmark is loaded there (see
-        # BookmarkInspector.show_selection's docstring for why it won't clobber an
-        # actively-inspected bookmark).
-        self._inspector.show_selection(selection if isinstance(selection, Selection) else None)
+        # A selection is a new bookmark in the making: the Bookmark settings tab becomes
+        # its form (Apply saves it). Without one, the form goes away.
+        if isinstance(selection, Selection):
+            self._show_new_bookmark_form(selection)
+        elif self._inspector.is_drafting():
+            self._inspector.end_draft()
+        else:
+            self._inspector.show_selection(None)
 
     def _on_selection_preview_changed(self, start_us: int, end_us: int) -> None:
         """Live readout while dragging one of SelectionItem's resize handles: fires
@@ -668,7 +797,68 @@ class MainWindow(QMainWindow):
         from bookmark_studio.domain.selection import Selection
 
         self._show_selection_range(start_us, end_us)
-        self._inspector.show_selection(Selection(start_us=start_us, end_us=end_us))
+        self._show_new_bookmark_form(Selection(start_us=start_us, end_us=end_us))
+
+    def _show_new_bookmark_form(self, selection) -> None:  # noqa: ANN001 - Selection
+        """The Bookmark settings tab as the form for a new bookmark over `selection`. A
+        bookmark shown there is left first -- its changes are already saved, and what is
+        still being typed is saved now -- so nothing is lost by switching."""
+        if self._inspector.is_drafting():
+            self._inspector.show_selection(selection)  # Start/End follow the selection
+            return
+        if self._inspector.current_bookmark() is not None:
+            self._inspector.commit_pending()
+        self._inspector.begin_draft(selection)
+
+    def _on_draft_range_edited(self, start_us: int, end_us: int) -> None:
+        """Start/End typed into the new-bookmark form move the waveform's selection (and
+        are refused, back to the selection, if they make no range)."""
+        from bookmark_studio.domain.selection import Selection
+
+        duration_us = self._waveform_scene._duration_us
+        if 0 <= start_us < end_us and (not duration_us or end_us <= duration_us):
+            self._waveform_scene.set_selection(Selection(start_us=start_us, end_us=end_us))
+        else:
+            self._inspector.show_selection(self._waveform_scene.selection())
+
+    def _on_apply_new_bookmark(self) -> None:
+        """Apply (or Enter in the name, or Bookmark selection): saves the new bookmark set
+        up in the Bookmark settings tab, over the waveform's selection."""
+        values = self._inspector.draft_values()
+        selection = self._waveform_scene.selection()
+        if values is None or selection is None or self._current_media_id is None:
+            return
+        loop_enabled = bool(values["loop_enabled"])
+        bookmark = Bookmark(
+            id=uuid4(),
+            playlist_id=self._current_playlist_id,
+            media_id=self._current_media_id,
+            scope=BookmarkScope.PLAYLIST_MEDIA if self._current_playlist_id else BookmarkScope.GLOBAL_MEDIA,
+            lane_id=None,
+            bookmark_type=BookmarkType.SEGMENT,
+            name=values["name"],
+            start_us=selection.start_us,
+            end_us=selection.end_us,
+            loop_enabled=loop_enabled,
+            repeat_count=values["repeat_count"],
+            loop_gap_ms=values["loop_gap_ms"],
+            completion_action=values["completion_action"],
+            notes=values["notes"],
+            tags=tuple(values["tags"]),
+            fade_in_ms=values["fade_in_ms"],
+            fade_out_ms=values["fade_out_ms"],
+        )
+        self._create_bookmark_and_focus_name(bookmark)
+        self._waveform_scene.clear_selection()
+        self._flash_saved(bookmark.id)
+
+    def _flash_saved(self, bookmark_id: UUID) -> None:
+        """The orange flash: the bookmark's row in the list, and the name field when the
+        Bookmark settings tab shows it -- the change was saved."""
+        self._bookmark_panel.flash_bookmark(bookmark_id)
+        current = self._current_inspected_bookmark()
+        if current is not None and current.id == bookmark_id:
+            self._inspector.flash_saved()
 
     def _show_selection_range(self, start_us: int, end_us: int) -> None:
         from bookmark_studio.domain.timecode import format_timecode
@@ -686,6 +876,10 @@ class MainWindow(QMainWindow):
     def _on_bookmark_selection_clicked(self) -> None:
         selection = self._waveform_scene.selection()
         if selection is None or self._current_media_id is None:
+            return
+        if self._inspector.is_drafting():
+            # The same as Apply: what was set up in the Bookmark settings tab.
+            self._on_apply_new_bookmark()
             return
         bookmark = Bookmark(
             id=uuid4(),
@@ -779,6 +973,7 @@ class MainWindow(QMainWindow):
         )
         self._refresh_bookmarks()
         self._refresh_inspector_if_current(bookmark_id)
+        self._flash_saved(bookmark_id)
 
     def _on_bookmark_resize_finished(self, bookmark_id: UUID, handle: str, value_us: int) -> None:
         bookmark = self._bookmark_repository.get(bookmark_id)
@@ -792,6 +987,7 @@ class MainWindow(QMainWindow):
         )
         self._refresh_bookmarks()
         self._refresh_inspector_if_current(bookmark_id)
+        self._flash_saved(bookmark_id)
 
     def _refresh_inspector_if_current(self, bookmark_id: UUID) -> None:
         """Reloads the Inspector after a bookmark it shows was dragged or resized on
@@ -812,6 +1008,7 @@ class MainWindow(QMainWindow):
         self._push(RenameBookmarkCommand(self._bookmark_repository, bookmark.id, bookmark.name, new_name))
         self._refresh_bookmarks()
         self._sync_inspector_snapshot(bookmark.id)
+        self._flash_saved(bookmark.id)
 
     def _on_tags_committed(self, tags: tuple) -> None:
         bookmark = self._current_inspected_bookmark()
@@ -825,6 +1022,7 @@ class MainWindow(QMainWindow):
         )
         self._refresh_bookmarks()
         self._sync_inspector_snapshot(bookmark.id)
+        self._flash_saved(bookmark.id)
 
     def _on_notes_committed(self, notes: object) -> None:
         bookmark = self._current_inspected_bookmark()
@@ -838,6 +1036,7 @@ class MainWindow(QMainWindow):
         )
         self._refresh_bookmarks()
         self._sync_inspector_snapshot(bookmark.id)
+        self._flash_saved(bookmark.id)
 
     def _push(self, command) -> None:
         self._pushing = True
@@ -885,6 +1084,7 @@ class MainWindow(QMainWindow):
         )
         self._refresh_bookmarks()
         self._sync_inspector_snapshot(bookmark.id)
+        self._flash_saved(bookmark.id)
 
     # In-place edits from the bookmark list: like _on_loop_settings_committed, but
     # target whichever bookmark row was edited in the list (not necessarily the one
@@ -946,6 +1146,7 @@ class MainWindow(QMainWindow):
         )
         self._refresh_bookmarks()
         self._refresh_inspector_if_current(bookmark.id)
+        self._flash_saved(bookmark.id)
 
     def _on_inspector_start_committed(self, start_us: int) -> None:
         """A start time typed into the Inspector (Enter commits)."""
@@ -960,6 +1161,7 @@ class MainWindow(QMainWindow):
         )
         self._refresh_bookmarks()
         self._refresh_inspector_if_current(bookmark.id)
+        self._flash_saved(bookmark.id)
 
     def _on_inspector_end_committed(self, end_us: int) -> None:
         bookmark = self._current_inspected_bookmark()
@@ -973,6 +1175,7 @@ class MainWindow(QMainWindow):
         )
         self._refresh_bookmarks()
         self._refresh_inspector_if_current(bookmark.id)
+        self._flash_saved(bookmark.id)
 
     def _on_rename_shortcut(self) -> None:
         if self._current_inspected_bookmark() is not None:
