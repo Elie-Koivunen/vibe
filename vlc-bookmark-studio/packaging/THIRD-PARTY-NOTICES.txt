@@ -1,9 +1,10 @@
 VLC Bookmark Studio - third-party software in the packaged builds
 ===================================================================
 
-VLC Bookmark Studio itself is free software under the GNU General Public License v3
-(LICENSE.txt). The packaged builds also contain the following programs and libraries,
-each under its own license. Their source code is available from the addresses below.
+VLC Bookmark Studio itself is proprietary pre-release software (LICENSE.txt; its final
+version will be released under an open-source license). The packaged builds also
+contain the following programs and libraries, each under its own license, which
+LICENSE.txt does not limit. Their source code is available from the addresses below.
 
 VLC media player and libVLC (Windows build: folder vlc/)
     VideoLAN, https://www.videolan.org/vlc/

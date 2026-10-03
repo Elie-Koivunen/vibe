@@ -49,6 +49,9 @@ class LoopController(QObject):
     loop_completed = Signal(object)  # CompletionAction that was applied
     bookmark_navigation_requested = Signal(object)  # CompletionAction (NEXT/PREVIOUS_BOOKMARK etc.)
     loop_failed = Signal(str)  # a playback command failed; the loop was stopped
+    # The volume a fade (or the end of one) just set, 0-512 -- for the volume fader to
+    # follow. The user's own level (target_volume) is unchanged by it.
+    volume_stepped = Signal(int)
 
     def __init__(
         self,
@@ -117,7 +120,17 @@ class LoopController(QObject):
         still report a mid-ramp level, which would otherwise ratchet the target down."""
         if self._fade_active or self._volume_owned:
             return
-        if sampled_at_ns is not None and sampled_at_ns < self._volume_fence_ns:
+        # A volume write still on its way (a fade's last step, the restore after a fade-out,
+        # a segment start at 0) or a poll from before it landed: the player may still show
+        # the level it is replacing -- a faded-out 0 became the "user's level" that way,
+        # and the next bookmark's fade-in ramped up to 0.
+        has_pending = getattr(self._executor, "has_pending", None)
+        if has_pending is not None and has_pending("volume"):
+            return
+        # (<=: Windows' monotonic clock ticks every ~15 ms; a poll in the same tick as the
+        # write can't be told to have come after it.)
+        fence_ns = max(self._volume_fence_ns, self._executor.fence_ns("volume"))
+        if sampled_at_ns is not None and sampled_at_ns <= fence_ns:
             return
         self._target_volume = max(0, min(_MAX_VOLUME, int(level)))
 
@@ -160,21 +173,45 @@ class LoopController(QObject):
         self._state = LoopState.ARMED
         self._submit_segment_start(generation, first=True, before=before)
 
-    def update_spec(self, spec: LoopSpec, *, last_pass: bool = False) -> None:
+    def join(self, spec: LoopSpec) -> None:
+        """Takes over playback that is already inside `spec`'s range -- a bookmark made
+        while the song plays through it: no seek; the pass playing now counts as the
+        first, then it loops as `spec` says (repeat count, gap, fade-out, After loop). Its
+        fade-in has gone by."""
+        self._cancel_timers()
+        self._fade_active = False
+        self._generation += 1
+        self._spec = spec
+        self._remaining = spec.repeat_count
+        self._passes_done = 0
+        self._state = LoopState.PLAYING
+        position_us = self._clock.estimated_position_us()
+        rate = self._clock.rate if self._clock.rate > 0 else 1.0
+        delay_ms = max(_MIN_BOUNDARY_TIMER_MS, int(max(0, spec.end_us - position_us) / rate / 1000))
+        self._boundary_timer.start(delay_ms)
+        self._arm_fade_out(delay_ms)
+        self.loop_started.emit(spec)
+
+    def update_spec(self, spec: LoopSpec, *, last_pass: bool = False, count_from_now: bool = False) -> None:
         """The running loop's bookmark was edited: its new settings apply at once.
 
         * Repeat counts the passes already played: a count that is already reached
           (e.g. 1, set during the 3rd pass) ends the loop after the current pass, and
           then the (new) After-loop action runs. `last_pass` (loop switched off) does
           the same. During a gap there is no current pass: it ends right away.
-        * A new end re-schedules the current pass's boundary (and its fade-out); a new
-          start, gap or fade-in applies from the next pass.
+          `count_from_now`: the passes so far don't count -- the one playing is the first
+          (a playing selection that just became a bookmark).
+        * A new end re-schedules the current pass's boundary; a fade-out is set for this
+          pass if it has become the last (and called off if it no longer is); a new start
+          or gap applies from the next pass.
         """
         if self._spec is None or self._state in (LoopState.IDLE, LoopState.COMPLETED):
             return
         old = self._spec
         self._spec = spec
         in_gap = self._state == LoopState.GAP
+        if count_from_now:
+            self._passes_done = 0
         if last_pass:
             self._remaining = 0 if in_gap else 1
         elif spec.repeat_count is None:
@@ -187,13 +224,38 @@ class LoopController(QObject):
             self._state = LoopState.COMPLETED
             self._apply_completion_action()
             return
-        if self._state == LoopState.PLAYING and (spec.end_us, spec.fade_out_ms) != (old.end_us, old.fade_out_ms):
-            position_us = self._clock.estimated_position_us()
-            if position_us >= spec.end_us:
-                self._handle_boundary_reached()
-                return
-            delay_ms = max(_MIN_BOUNDARY_TIMER_MS, int((spec.end_us - position_us) / self._clock.rate / 1000))
-            self._boundary_timer.start(delay_ms)
+        if self._state == LoopState.PLAYING:
+            delay_ms: int | None = None
+            if spec.end_us != old.end_us:
+                position_us = self._clock.estimated_position_us()
+                if position_us >= spec.end_us:
+                    self._handle_boundary_reached()
+                    return
+                delay_ms = max(_MIN_BOUNDARY_TIMER_MS, int((spec.end_us - position_us) / self._clock.rate / 1000))
+                self._boundary_timer.start(delay_ms)
+            elif self._boundary_timer.isActive():
+                delay_ms = max(_MIN_BOUNDARY_TIMER_MS, self._boundary_timer.remainingTime())
+            if self._fade_active and self._fade_direction == "out":
+                if not self._is_last_pass():  # more passes after all: back to the user's level
+                    self._fade_active = False
+                    self._fade_timer.stop()
+                    self._restore_volume_if_owned()
+            elif delay_ms is not None:
+                self._arm_fade_out(delay_ms)
+
+    def retime(self) -> None:
+        """The playback rate changed (Tempo): this pass's end -- and its fade-out -- come
+        sooner or later than they were set for."""
+        if self._state != LoopState.PLAYING or self._spec is None:
+            return
+        position_us = self._clock.estimated_position_us()
+        if position_us >= self._spec.end_us:
+            self._handle_boundary_reached()
+            return
+        rate = self._clock.rate if self._clock.rate > 0 else 1.0
+        delay_ms = max(_MIN_BOUNDARY_TIMER_MS, int((self._spec.end_us - position_us) / rate / 1000))
+        self._boundary_timer.start(delay_ms)
+        if not self._fade_active:
             self._arm_fade_out(delay_ms)
 
     def stop(self, *, restore_volume: bool = True) -> None:
@@ -240,7 +302,8 @@ class LoopController(QObject):
         spec = self._spec
         assert spec is not None
         adapter = self._adapter
-        fade_in = spec.fade_in_ms > 0
+        # The fade-in is the loop's start only -- later passes go on at the level reached.
+        fade_in = first and spec.fade_in_ms > 0
         restore = not fade_in and self._volume_owned
         target = self._target_volume
 
@@ -255,6 +318,10 @@ class LoopController(QObject):
             adapter.play()
 
         fences = ("position", "volume") if (fade_in or restore) else ("position",)
+        if fade_in:
+            # Ours from now on, not from when the 0 has been written: a poll in between
+            # would otherwise take that 0 for the user's level.
+            self._volume_owned = True
         self._executor.submit(
             job,
             on_done=lambda _result: self._on_segment_started(generation, first=first, fade_in=fade_in,
@@ -271,6 +338,7 @@ class LoopController(QObject):
         if touched_volume:
             self._volume_fence_ns = time.monotonic_ns()
             self._volume_owned = fade_in  # at 0 for a fade-in; back at target otherwise
+            self.volume_stepped.emit(0 if fade_in else self._target_volume)
         self._state = LoopState.PLAYING
         if fade_in:
             self._begin_fade("in")
@@ -363,6 +431,7 @@ class LoopController(QObject):
             on_done=lambda _result: self._mark_volume_written(),
             on_error=lambda exc: self._log.info("volume restore failed: %s", exc),
         )
+        self.volume_stepped.emit(target)
 
     def _mark_volume_written(self) -> None:
         self._volume_fence_ns = time.monotonic_ns()
@@ -382,9 +451,14 @@ class LoopController(QObject):
 
     # -- fade in/out (spec: "add options to fade in and fade out when playing back") --
 
+    def _is_last_pass(self) -> bool:
+        """The pass playing is the loop's last (a "Forever" loop has none)."""
+        return self._remaining is not None and self._remaining <= 1
+
     def _arm_fade_out(self, segment_ms: int) -> None:
+        """The fade-out ends the loop's last pass only (0.9.0; every pass before)."""
         self._fade_out_timer.stop()
-        if self._spec is None or self._spec.fade_out_ms <= 0:
+        if self._spec is None or self._spec.fade_out_ms <= 0 or not self._is_last_pass():
             return
         fade_out_ms = min(self._spec.fade_out_ms, segment_ms)
         lead_ms = segment_ms - fade_out_ms
@@ -423,6 +497,7 @@ class LoopController(QObject):
             on_done=lambda _result: self._mark_volume_written(),
             on_error=lambda exc: self._log.debug("fade step failed: %s", exc),
         )
+        self.volume_stepped.emit(level_int)
         if fraction >= 1.0:
             self._fade_active = False
             self._fade_timer.stop()

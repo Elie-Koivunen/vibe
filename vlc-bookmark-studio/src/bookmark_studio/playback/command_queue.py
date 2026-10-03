@@ -45,6 +45,8 @@ class CommandExecutor(Protocol):
 
     def fence_ns(self, name: str) -> int: ...
 
+    def has_pending(self, fence: str) -> bool: ...
+
 
 class ImmediateExecutor:
     """Runs every command synchronously on the caller's thread. Errors propagate to the
@@ -80,6 +82,9 @@ class ImmediateExecutor:
 
     def fence_ns(self, name: str) -> int:
         return self._fences.get(name, 0)
+
+    def has_pending(self, fence: str) -> bool:
+        return False  # every command has run by the time submit() returns
 
     def shutdown(self, *, drain_timeout_s: float = 0.0) -> None:
         pass
@@ -118,6 +123,7 @@ class ThreadedCommandQueue(QObject):
         self._callbacks: dict[int, _Job] = {}
         self._next_id = 0
         self._busy = False
+        self._running: _Job | None = None
         self._closed = False
         self._fences: dict[str, int] = {}
         self._thread = threading.Thread(target=self._run, name="vlc-bookmark-studio-commands", daemon=True)
@@ -162,6 +168,14 @@ class ThreadedCommandQueue(QObject):
         with self._cv:
             return not self._pending and not self._busy
 
+    def has_pending(self, fence: str) -> bool:
+        """Whether a command with this fence (e.g. a volume write) is queued or running: a
+        player status read meanwhile may still show what it is about to change."""
+        with self._cv:
+            running = self._running
+            return (running is not None and fence in running.fences) or any(
+                fence in job.fences for job in self._pending)
+
     def shutdown(self, *, drain_timeout_s: float = 1.5) -> None:
         """Lets already-queued jobs run for up to `drain_timeout_s`, then stops."""
         deadline = time.monotonic() + drain_timeout_s
@@ -185,11 +199,13 @@ class ThreadedCommandQueue(QObject):
                     return
                 job = self._pending.popleft()
                 self._busy = True
+                self._running = job
             try:
                 result = job.fn()
             except Exception as exc:  # noqa: BLE001 - delivered to the UI thread
                 with self._cv:
                     self._busy = False
+                    self._running = None
                     self._cv.notify_all()
                 self._signals.failed.emit(job.job_id, exc)
                 continue
@@ -198,6 +214,7 @@ class ThreadedCommandQueue(QObject):
                 for name in job.fences:
                     self._fences[name] = finished
                 self._busy = False
+                self._running = None
                 self._cv.notify_all()
             self._signals.done.emit(job.job_id, result)
 

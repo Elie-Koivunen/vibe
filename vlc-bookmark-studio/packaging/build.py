@@ -130,9 +130,9 @@ def add_docs(app_dir: Path) -> None:
     shutil.copy2(ROOT / "README.md", app_dir / "README.md")
     shutil.copy2(ROOT / "CHANGELOG.md", app_dir / "CHANGELOG.md")
     shutil.copy2(HERE / "THIRD-PARTY-NOTICES.txt", app_dir / "THIRD-PARTY-NOTICES.txt")
-    license_file = ROOT.parent / "LICENSE"
-    if license_file.exists():
-        shutil.copy2(license_file, app_dir / "LICENSE.txt")
+    # VLC Bookmark Studio's own license (proprietary pre-release since 0.9.0), not the
+    # repository's GPL, which covers its other projects and 0.1.0-0.8.0.
+    shutil.copy2(ROOT / "LICENSE", app_dir / "LICENSE.txt")
     if IS_WINDOWS:
         # Portable mode: data, settings and logs stay inside the unpacked folder.
         (app_dir / f"{PROGRAM}-portable.cmd").write_text(

@@ -1,9 +1,10 @@
 """The "Volume & EQ" tab: the DJ volume fader, Max / Reset / Mute beside it, and a 10-band
 equalizer with a preamp.
 
-Max raises the volume to 100 % and Mute lowers it to silence, each over its own time
-(while something plays; at once otherwise). Normalize (80 %) and Reset (50 %) bring it to
-their own, adjustable level, gliding at Max's speed coming down and at Mute's going up.
+Max raises the volume to 125 % (the fader's top) and Mute lowers it to silence, each over
+its own time (while something plays; at once otherwise). Normalize (80 %) and Reset
+(50 %) bring it to their own, adjustable level, gliding at Max's speed coming down and at
+Mute's going up.
 The volume ramps run in Application.
 
 The equalizer faders are painted like the volume fader (dark strip, lit slot, metal cap)
@@ -46,6 +47,7 @@ from bookmark_studio.domain.equalizer import (
     band_label,
 )
 from bookmark_studio.ui.deck_fader import _LIT, _PANEL, _SCALE, _SLOT, _UNITY, VolumeStrip
+from bookmark_studio.ui.tempo_panel import TempoPanel
 
 CUSTOM_PRESET = "Custom"
 DEFAULT_RAMP_MS = 1500  # Max and Mute
@@ -212,6 +214,7 @@ class VolumeEqPanel(QWidget):
     normalize_requested = Signal()
     levels_changed = Signal(int, int)  # Normalize %, Reset %
     glide_ms_changed = Signal(int)  # how long a preset change takes
+    # (The BPM panel's own signals: see self.tempo_panel.)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -227,6 +230,9 @@ class VolumeEqPanel(QWidget):
         self.volume_strip.volume_changed.connect(self.volume_changed.emit)
         layout.addWidget(self.volume_strip)
         layout.addWidget(self._build_ramp_column())
+        # Between the buttons and the equalizer: the tempo, for playing only (0.9.0).
+        self.tempo_panel = TempoPanel(self)
+        layout.addWidget(self.tempo_panel, 0, Qt.AlignmentFlag.AlignTop)
 
         divider = QFrame(self)
         divider.setFrameShape(QFrame.Shape.VLine)
@@ -339,7 +345,7 @@ class VolumeEqPanel(QWidget):
             return spin
 
         self._max_button = QPushButton("Max", column)
-        self._max_button.setToolTip("Raise the volume to 100 % over the time below")
+        self._max_button.setToolTip("Raise the volume to 125 % (the fader's top) over the time below")
         self._max_button.clicked.connect(self.max_requested.emit)
         self._max_ms = ramp_spin("How long Max takes to raise the volume")
 

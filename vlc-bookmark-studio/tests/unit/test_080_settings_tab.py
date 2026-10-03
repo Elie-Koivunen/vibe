@@ -167,9 +167,9 @@ def _with_selection(qtbot, tmp_path):
     return app, app.window._inspector
 
 
-def test_the_tab_is_called_bookmark_settings(qtbot, tmp_path) -> None:
+def test_the_tab_is_called_bookmark_studio(qtbot, tmp_path) -> None:
     app = _make_app(qtbot, tmp_path)
-    assert app.window._side_tabs.tabText(0) == "Bookmark settings"
+    assert app.window._side_tabs.tabText(0) == "Bookmark Studio"  # "Bookmark settings" in 0.8.0
 
 
 def test_apply_saves_a_new_bookmark_as_set_up_in_the_tab(qtbot, tmp_path) -> None:
@@ -415,11 +415,26 @@ def test_the_volume_and_eq_tab_gets_room_for_the_whole_equalizer(qtbot, tmp_path
     qtbot.waitExposed(window)
     window._splitters["bottom"].setSizes([900, 200])  # the list took nearly everything
     QApplication.processEvents()
+    screen = window.screen().availableGeometry()
     window.show_side_tab("volume")
     area = window._side_tabs.currentWidget()
-    qtbot.waitUntil(lambda: area.viewport().width() >= area.widget().minimumSizeHint().width(), timeout=3000)
+
+    def fits() -> bool:
+        needed = area.widget().minimumSizeHint()
+        return area.viewport().width() >= needed.width() and area.viewport().height() >= needed.height()
+
+    def at_the_screens_edge() -> bool:
+        frame = window.frameGeometry()
+        return frame.width() >= screen.width() or frame.height() >= screen.height()
+
+    # The list and the waveform give up their room first; past that the window grows as
+    # far as the screen allows (the offscreen test screen is smaller than this window).
+    qtbot.waitUntil(lambda: fits() or at_the_screens_edge(), timeout=3000)
     QApplication.processEvents()
-    assert not area.horizontalScrollBar().isVisible() and not area.verticalScrollBar().isVisible()
+    assert window._splitters["bottom"].sizes()[1] > 200  # the tab got room from the list
+    if fits():  # the scroll bars go once the area has re-laid out
+        qtbot.waitUntil(lambda: not area.horizontalScrollBar().isVisible()
+                        and not area.verticalScrollBar().isVisible(), timeout=3000)
 
 
 def test_the_window_grows_when_the_panels_cannot_make_room(qtbot, tmp_path) -> None:

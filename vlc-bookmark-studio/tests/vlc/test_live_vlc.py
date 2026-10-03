@@ -381,3 +381,191 @@ def test_live_equalizer_over_http(live) -> None:
     assert _vlc_equalizer(adapter) == (9.0, list(tweaked.bands_db))
     adapter.set_equalizer(tweaked.with_enabled(False))
     assert _wait(lambda: _vlc_equalizer(adapter) is None)
+
+
+@pytest.mark.parametrize("how", ["selection", "play"])
+def test_live_a_bookmark_made_while_its_selection_plays_is_green(live, qtbot, tmp_path, how) -> None:
+    """0.9.0, reported from a real VLC: after Bookmark selection the new bookmark wasn't
+    green. With ▶ Selection the bookmark takes the selection's loop over; with the main
+    Play (the song simply playing through it) it is the bookmark playing."""
+    from bookmark_studio.app.application import Application
+    from bookmark_studio.domain.selection import Selection
+    from bookmark_studio.persistence.database import connect
+    from bookmark_studio.persistence.migrations import migrate
+
+    adapter = live.adapter()
+    _wait(lambda: _playlist_ready(adapter), timeout=15)
+    conn = connect(tmp_path / "live.db")
+    migrate(conn)
+    app = Application(conn=conn, adapter=adapter, ffmpeg_path=ps.find_ffmpeg() or "/nonexistent",
+                      waveform_cache_dir=tmp_path / "wf")
+    qtbot.addWidget(app.window)
+    try:
+        app.start()
+        qtbot.waitUntil(lambda: len(app.playlists.resolved) == 2
+                        and app.playlists.synchronizer.active_playlist_id is not None, timeout=15000)
+        # The song on screen settles first (its first status may switch it, clearing a
+        # selection drawn before).
+        qtbot.waitUntil(lambda: app._current_vlc_item_id is not None and app.window.waveform_duration_us() > 0,
+                        timeout=15000)
+        qtbot.wait(1000)
+        window = app.window
+        window._waveform_scene.set_selection(Selection(start_us=2_000_000, end_us=6_000_000))
+        if how == "selection":
+            window._loop_selection_button.click()
+        else:
+            app._seek_displayed(2_500_000)
+            window._transport.play_pause_button.click()
+        qtbot.waitUntil(lambda: adapter.get_status().state == "playing"
+                        and 2_000_000 <= adapter.get_status().time_us < 4_000_000
+                        and app._actually_playing_vlc_item_id == app._current_vlc_item_id, timeout=8000)
+        assert window._waveform_scene.selection() is not None
+        window._bookmark_selection_button.click()
+        bookmark = window._inspector.current_bookmark()
+        assert bookmark is not None
+        for _ in range(5):  # and it stays green while it plays
+            assert app._bookmark_playback is not None and app._bookmark_playback.bookmark_id == bookmark.id
+            assert app._bookmark_playback.state == "playing"
+            assert window._waveform_scene.bookmark_item(bookmark.id).playback_state() == "playing"
+            assert window._bookmark_panel._playback == (bookmark.id, "playing")
+            assert window._playlist_panel._bookmark_song == (app._current_vlc_item_id, "playing")
+            qtbot.wait(150)
+        assert app._active_loop_bookmark_id == bookmark.id  # it loops on, as the bookmark
+        # ... counting its passes: at its end it goes back to its start (the pass playing
+        # when it was saved was its first)
+        qtbot.waitUntil(lambda: app._loop_controller._passes_done >= 1, timeout=8000)
+        qtbot.waitUntil(lambda: 2_000_000 <= adapter.get_status().time_us < 4_500_000, timeout=3000)
+        assert adapter.get_status().state == "playing"
+    finally:
+        app.stop()
+        conn.close()
+
+
+def test_live_play_plays_the_song_picked_in_the_playlist(live, qtbot, tmp_path) -> None:
+    """0.9.0, reported from a real VLC: a song picked in the playlist (a single click shows
+    it) and Play -- the red line didn't move: Play resumed VLC's own song."""
+    from bookmark_studio.app.application import Application
+    from bookmark_studio.persistence.database import connect
+    from bookmark_studio.persistence.migrations import migrate
+
+    adapter = live.adapter()
+    items = _wait(lambda: _playlist_ready(adapter), timeout=15)
+    conn = connect(tmp_path / "live.db")
+    migrate(conn)
+    app = Application(conn=conn, adapter=adapter, ffmpeg_path=ps.find_ffmpeg() or "/nonexistent",
+                      waveform_cache_dir=tmp_path / "wf")
+    qtbot.addWidget(app.window)
+    try:
+        app.start()
+        qtbot.waitUntil(lambda: len(app.playlists.resolved) == 2 and app._actually_playing_vlc_item_id is not None,
+                        timeout=15000)
+        qtbot.wait(1000)
+        other = next(item for item in items if item.vlc_id != app._actually_playing_vlc_item_id)
+        app._on_playlist_item_selected(other.vlc_id)  # the single click
+        assert app._current_vlc_item_id == other.vlc_id
+        app.window._transport.play_pause_button.click()
+        qtbot.waitUntil(lambda: adapter.get_status().current_playlist_item_id == other.vlc_id
+                        and adapter.get_status().state == "playing", timeout=8000)
+        start = app.window.playhead_time_us()
+        qtbot.waitUntil(lambda: app.window.playhead_time_us() >= start + 700_000, timeout=5000)  # the line moves
+    finally:
+        app.stop()
+        conn.close()
+
+
+def test_live_tempo_over_http(live, qtbot, tmp_path) -> None:
+    """0.9.0's Tempo fader through VLC's HTTP interface: +20 BPM on a 100 BPM song plays
+    it at 1.2x; quitting puts VLC back at its normal speed."""
+    from bookmark_studio.app.application import Application
+    from bookmark_studio.persistence.database import connect
+    from bookmark_studio.persistence.migrations import migrate
+
+    adapter = live.adapter()
+    _wait(lambda: _playlist_ready(adapter), timeout=15)
+    conn = connect(tmp_path / "live.db")
+    migrate(conn)
+    app = Application(conn=conn, adapter=adapter, ffmpeg_path=ps.find_ffmpeg() or "/nonexistent",
+                      waveform_cache_dir=tmp_path / "wf")
+    qtbot.addWidget(app.window)
+    try:
+        app.start()
+        qtbot.waitUntil(lambda: app._current_media_id is not None and app._actually_playing_vlc_item_id is not None,
+                        timeout=15000)
+        app.window._transport.play_pause_button.click()
+        qtbot.waitUntil(lambda: adapter.get_status().state == "playing", timeout=8000)
+        app.window._volume_eq.tempo_panel.switch.click()  # BPM on
+        app._on_detected_bpm_corrected(100.0)  # the song's BPM, as the user knows it
+        app.window._volume_eq.tempo_panel.fader._set_by_user(20)
+        qtbot.waitUntil(lambda: abs(adapter.get_status().rate - 1.2) < 0.01, timeout=5000)
+        start_time, start_clock = adapter.get_status().time_us, time.monotonic()
+        qtbot.wait(1500)
+        advanced = (adapter.get_status().time_us - start_time) / ((time.monotonic() - start_clock) * 1_000_000)
+        assert 0.9 < advanced < 1.6, advanced  # (VLC reports whole seconds over HTTP: coarse)
+    finally:
+        app.stop()
+        conn.close()
+    assert abs(adapter.get_status().rate - 1.0) < 0.01
+
+
+def _loudness_windows(path: Path, window_s: float = 0.010) -> np.ndarray:
+    """RMS of each `window_s` of a WAV file, over the part with sound (edges trimmed)."""
+    with wave.open(str(path)) as f:
+        rate, channels, width = f.getframerate(), f.getnchannels(), f.getsampwidth()
+        raw = f.readframes(f.getnframes())
+    samples = np.frombuffer(raw, dtype={2: np.int16, 4: np.int32}[width]).astype(np.float64)
+    if channels > 1:
+        samples = samples.reshape(-1, channels).mean(axis=1)
+    size = int(rate * window_s)
+    rms = np.sqrt((samples[: len(samples) // size * size].reshape(-1, size) ** 2).mean(axis=1))
+    loud = rms > rms.max() * 0.2
+    first, last = int(np.argmax(loud)), len(loud) - int(np.argmax(loud[::-1]))
+    return rms[first + 5:last - 5]
+
+
+def test_live_a_tempo_glide_plays_on_without_gaps(qtbot, tmp_path) -> None:
+    """0.9.0's Tempo buttons glide the rate in small steps: VLC's output (written to a file
+    here) has no silent stretch, nor more than a passing dip, all the way up to 1.5x and
+    back."""
+    from bookmark_studio.app.application import Application
+    from bookmark_studio.persistence.database import connect
+    from bookmark_studio.persistence.migrations import migrate
+    from bookmark_studio.settings.settings_service import TempoButtons
+
+    if ps.is_wsl() and ps.is_windows_executable(_vlc()):
+        pytest.skip("a Windows vlc.exe started from WSL can't write its output into WSL's temporary folder")
+    out = tmp_path / "out.wav"
+    live = LiveVlc(tmp_path, extra_args=["--aout=afile", f"--audiofile-file={out}", "--audiofile-wav"])
+    adapter = live.adapter()
+    _wait(lambda: _playlist_ready(adapter), timeout=15)
+    conn = connect(tmp_path / "live.db")
+    migrate(conn)
+    app = Application(conn=conn, adapter=adapter, ffmpeg_path=ps.find_ffmpeg() or "/nonexistent",
+                      waveform_cache_dir=tmp_path / "wf")
+    qtbot.addWidget(app.window)
+    try:
+        app.start()
+        qtbot.waitUntil(lambda: app._current_media_id is not None and app._actually_playing_vlc_item_id is not None,
+                        timeout=15000)
+        app.window._transport.play_pause_button.click()
+        qtbot.waitUntil(lambda: adapter.get_status().state == "playing", timeout=8000)
+        qtbot.wait(1500)
+        app.window._volume_eq.tempo_panel.switch.click()  # BPM on
+        app._on_detected_bpm_corrected(100.0)
+        app._on_tempo_buttons_changed(TempoButtons(step_bpm=50, glide_ms=2000))
+        app.window._volume_eq.tempo_panel.increase_button.click()  # 100 -> 150 BPM: 1.0x -> 1.5x over 2 s
+        qtbot.wait(3000)
+        assert abs(adapter.get_status().rate - 1.5) < 0.01
+        app.window._volume_eq.tempo_panel.reset_button.click()  # and back
+        qtbot.wait(3000)
+        assert abs(adapter.get_status().rate - 1.0) < 0.01
+        adapter.stop()
+        qtbot.wait(500)
+    finally:
+        app.stop()
+        conn.close()
+        live.close()
+    windows = _loudness_windows(out)
+    median = float(np.median(windows))
+    assert windows.size > 500  # several seconds of sound
+    assert float(windows.min()) > median * 0.5  # no gap, no deep dip anywhere
+    assert int((windows < median * 0.9).sum()) <= 3  # at most a passing dip or two

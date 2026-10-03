@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject
 
 from bookmark_studio.domain.bookmark import MIN_SEGMENT_DURATION_US
 from bookmark_studio.domain.selection import Selection
+from bookmark_studio.ui.waveform.bookmark_item import PLAYBACK_COLORS
 from bookmark_studio.ui.waveform.waveform_item import cosmetic_pen, time_us_to_scene_x
 
 # Green tint: a drag-selection about to become a bookmark.
@@ -50,11 +51,22 @@ class SelectionItem(QGraphicsObject):
         self._orig_end_us = selection.end_us
         self._live_start_us = selection.start_us
         self._live_end_us = selection.end_us
+        # While the selection loops ("playing": green) and once it has ("done": yellow),
+        # like a bookmark.
+        self._playback_state: str | None = None
         self.setZValue(50)
         self._sync_position()
 
     def selection(self) -> Selection:
         return self._selection
+
+    def set_playback_state(self, state: str | None) -> None:
+        if state != self._playback_state:
+            self._playback_state = state
+            self.update()
+
+    def playback_state(self) -> str | None:
+        return self._playback_state
 
     def set_selection(self, selection: Selection) -> None:
         self.prepareGeometryChange()
@@ -75,12 +87,14 @@ class SelectionItem(QGraphicsObject):
 
     def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: N802
         rect = self.boundingRect()
-        painter.setBrush(QBrush(SELECTION_FILL))
-        painter.setPen(cosmetic_pen(SELECTION_BORDER))
+        fill, border, handles = PLAYBACK_COLORS.get(self._playback_state or "",
+                                                    (SELECTION_FILL, SELECTION_BORDER, SELECTION_BORDER))
+        painter.setBrush(QBrush(fill))
+        painter.setPen(cosmetic_pen(border))
         painter.drawRect(rect)
         handle_width = self._handle_width_scene()
-        painter.fillRect(QRectF(rect.left(), 0, handle_width, self._height), SELECTION_BORDER)
-        painter.fillRect(QRectF(rect.right() - handle_width, 0, handle_width, self._height), SELECTION_BORDER)
+        painter.fillRect(QRectF(rect.left(), 0, handle_width, self._height), handles)
+        painter.fillRect(QRectF(rect.right() - handle_width, 0, handle_width, self._height), handles)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         local_x = event.pos().x()

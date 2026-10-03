@@ -1,4 +1,5 @@
-"""0.5.0: logo, DJ-style volume fader, 85 % when a bookmark plays, centred transport
+"""0.5.0: logo, DJ-style volume fader, an audible start when a bookmark plays (85 % then;
+the Reset level for a muted player since 0.9.0), centred transport
 without the ±5 s buttons, a smooth waveform zoom, and Quit."""
 from __future__ import annotations
 
@@ -17,7 +18,9 @@ from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import QApplication, QGraphicsItem, QLabel, QPushButton
 
 from bookmark_studio.app import application as application_module
-from bookmark_studio.app.application import BOOKMARK_PLAY_VOLUME, Application
+from bookmark_studio.app.application import Application
+
+RESET_LEVEL = 128  # the Reset button's default, 50 % of VLC's 256
 from bookmark_studio.domain.bookmark import Bookmark
 from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
 from bookmark_studio.persistence.database import connect
@@ -76,22 +79,22 @@ def test_multi_size_ico_is_written(qapp, tmp_path) -> None:
 # -- transport --
 
 
-def test_transport_is_one_centred_group_without_seek_buttons(qtbot) -> None:
+def test_transport_is_one_group_without_seek_buttons(qtbot) -> None:
+    """0.5.0: one centred row without -5s/+5s. Since 0.9.0 the group is a compact grid in
+    the column beside the waveform, in the same order, with 🔁 after the others."""
     bar = TransportBar()
     qtbot.addWidget(bar)
-    bar.resize(1300, 60)
     bar.show()
     qtbot.waitExposed(bar)
     assert not hasattr(bar, "seek_back_button") and not hasattr(bar, "seek_forward_button")
     buttons = [bar.previous_bookmark_button, bar.previous_track_button, bar.stop_button,
-               bar.play_pause_button, bar.next_track_button, bar.next_bookmark_button]
+               bar.play_pause_button, bar.next_track_button, bar.next_bookmark_button,
+               bar.loop_bookmark_button]
     texts = [b.text() for b in bar.findChildren(QPushButton)]
-    assert "−5s" not in texts and "+5s" not in texts and len(texts) == 6
-    xs = [b.mapTo(bar, QPoint(0, 0)).x() for b in buttons]
-    assert xs == sorted(xs)  # in this order, left to right
-    left = xs[0]
-    right = buttons[-1].mapTo(bar, QPoint(buttons[-1].width(), 0)).x()
-    assert abs((left + right) / 2 - bar.width() / 2) < 12  # centred
+    assert "−5s" not in texts and "+5s" not in texts and len(texts) == 7
+    corners = [b.mapTo(bar, QPoint(0, 0)) for b in buttons]
+    reading_order = sorted(corners, key=lambda p: (p.y(), p.x()))
+    assert corners == reading_order  # row by row, left to right
 
 
 def test_arrow_keys_still_seek_five_seconds(qtbot, tmp_path) -> None:
@@ -208,8 +211,12 @@ def test_moving_the_fader_sets_the_player_volume_and_polls_move_the_fader(qtbot,
     qtbot.waitUntil(lambda: app.window.volume_level() == 300, timeout=3000)
 
 
-@pytest.mark.parametrize("start, expected", [(0, BOOKMARK_PLAY_VOLUME), (100, BOOKMARK_PLAY_VOLUME), (300, 300)])
-def test_playing_a_bookmark_raises_a_quiet_player_to_85_percent(qtbot, tmp_path, start, expected) -> None:
+@pytest.mark.parametrize("start, expected", [(0, RESET_LEVEL), (100, 100), (300, 300)])
+def test_playing_a_bookmark_keeps_the_users_level_and_a_muted_player_starts_at_reset(
+    qtbot, tmp_path, start, expected,
+) -> None:
+    """0.5.0 raised anything below 85 %; since 0.9.0 the user's level stays across
+    bookmarks -- only a player at 0 (e.g. launched muted) starts at the Reset level."""
     app = _make_app(qtbot, tmp_path)
     adapter = app.session.adapter
     adapter.set_volume(start)
@@ -218,7 +225,7 @@ def test_playing_a_bookmark_raises_a_quiet_player_to_85_percent(qtbot, tmp_path,
     app._on_play_bookmark_requested(bookmark.id)
     qtbot.waitUntil(lambda: adapter.get_status().state == "playing", timeout=3000)
     qtbot.waitUntil(lambda: adapter.get_status().volume == expected, timeout=3000)
-    assert BOOKMARK_PLAY_VOLUME == 218  # 85 % of VLC's 256
+    assert app._loop_controller.target_volume == expected
 
 
 def test_looping_a_bookmark_raises_the_volume_too_and_a_fade_in_ramps_to_it(qtbot, tmp_path) -> None:
@@ -228,8 +235,8 @@ def test_looping_a_bookmark_raises_the_volume_too_and_a_fade_in_ramps_to_it(qtbo
     qtbot.waitUntil(lambda: app._loop_controller.target_volume == 0, timeout=3000)
     bookmark = _bookmark(app, end_us=4_000_000, loop_enabled=True, fade_in_ms=300)
     app._on_loop_bookmark_requested(bookmark.id)
-    assert app._loop_controller.target_volume == BOOKMARK_PLAY_VOLUME
-    qtbot.waitUntil(lambda: adapter.get_status().volume == BOOKMARK_PLAY_VOLUME, timeout=4000)
+    assert app._loop_controller.target_volume == RESET_LEVEL
+    qtbot.waitUntil(lambda: adapter.get_status().volume == RESET_LEVEL, timeout=4000)
 
 
 def test_a_muted_launch_is_known_at_once_so_a_bookmark_is_audible(qtbot, tmp_path) -> None:
@@ -242,9 +249,9 @@ def test_a_muted_launch_is_known_at_once_so_a_bookmark_is_audible(qtbot, tmp_pat
     assert app.window.volume_level() == 0
     bookmark = _bookmark(app)
     app._on_play_bookmark_requested(bookmark.id)
-    qtbot.waitUntil(lambda: adapter.get_status().volume == BOOKMARK_PLAY_VOLUME, timeout=3000)
+    qtbot.waitUntil(lambda: adapter.get_status().volume == RESET_LEVEL, timeout=3000)
     qtbot.wait(900)  # a later poll must not mute it again
-    assert adapter.get_status().volume == BOOKMARK_PLAY_VOLUME
+    assert adapter.get_status().volume == RESET_LEVEL
 
 
 # -- quit --

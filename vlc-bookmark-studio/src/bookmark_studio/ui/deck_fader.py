@@ -1,10 +1,14 @@
-"""A DJ-mixer style channel fader for the player's volume.
+"""DJ-mixer style faders: the player's volume, and its tempo.
 
 `DeckFader` is a vertical QSlider (0-125 %, VLC's own GUI range) painted like a mixer
 channel: a dark strip with a scale, a lit slot up to the level, a marker at unity (100 %)
 and a ribbed fader cap. Clicking anywhere moves the cap there and drags it; the wheel and
 the arrow keys step 1 %, Page Up/Down 10 %, and a double-click returns to 100 %.
 `VolumeStrip` adds the caption and the percentage readout.
+
+`TempoFader` is the same fader for a change of tempo: -50 to +50 BPM in steps of 5, 0 in
+the middle (lit from there to the cap; the 0 mark red while the tempo panel is skewed).
+The panel around it is ui/tempo_panel.py.
 
 Volumes cross the app's boundary on VLC's 0-512 scale (256 = 100 %).
 """
@@ -25,6 +29,8 @@ _SLOT = QColor(12, 13, 16)
 _LIT = QColor(46, 160, 255)
 _SCALE = QColor(150, 156, 168)
 _UNITY = QColor(255, 176, 60)
+_SKEWED = QColor(224, 64, 58)  # the tempo fader's middle, while skewed
+DISABLED_OPACITY = 0.4
 
 
 def level_to_percent(level: int) -> int:
@@ -36,35 +42,50 @@ def percent_to_level(percent: int) -> int:
 
 
 class DeckFader(QSlider):
-    volume_changed = Signal(int)  # percent, only for the user's own moves
+    volume_changed = Signal(int)  # the value (percent), only for the user's own moves
+
+    # The scale; a subclass sets its own (see TempoFader).
+    MINIMUM = 0
+    MAXIMUM = MAX_PERCENT
+    HOME = UNITY_PERCENT  # the amber mark, where a double-click goes
+    STEP = 1  # what a value snaps to; the wheel's and arrow keys' step
+    PAGE = 10
+    TICK_EVERY = 5
+    LABEL_EVERY = 25
+    LIT_FROM = 0  # the lit slot runs from here to the cap
+    TOOLTIP = "Volume (drag, scroll or arrow keys; double-click for 100 %)"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(Qt.Orientation.Vertical, parent)
-        self.setRange(0, MAX_PERCENT)
-        self.setSingleStep(1)
-        self.setPageStep(10)
-        self.setValue(UNITY_PERCENT)
+        self.setRange(self.MINIMUM, self.MAXIMUM)
+        self.setSingleStep(self.STEP)
+        self.setPageStep(self.PAGE)
+        self.setValue(self.HOME)
         self.setFixedWidth(86)
         self.setMinimumHeight(140)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setToolTip("Volume (drag, scroll or arrow keys; double-click for 100 %)")
+        self.setToolTip(self.TOOLTIP)
         self._dragging = False
         self.actionTriggered.connect(self._on_action)  # keyboard / wheel steps
 
     # -- values --
 
+    def _clamped(self, value: int) -> int:
+        value = round(value / self.STEP) * self.STEP
+        return max(self.MINIMUM, min(self.MAXIMUM, value))
+
     def set_volume_percent(self, percent: int) -> None:
-        """Shows the player's volume. Ignored while the user is holding the cap."""
+        """Shows the player's value. Ignored while the user is holding the cap."""
         if self._dragging:
             return
         self.blockSignals(True)
-        self.setValue(max(0, min(MAX_PERCENT, percent)))
+        self.setValue(self._clamped(percent))
         self.blockSignals(False)
         self.update()
 
     def _set_by_user(self, percent: int) -> None:
-        percent = max(0, min(MAX_PERCENT, percent))
+        percent = self._clamped(percent)
         if percent != self.value():
             self.blockSignals(True)
             self.setValue(percent)
@@ -83,11 +104,17 @@ class DeckFader(QSlider):
 
     def _y_for(self, percent: float) -> float:
         rect = self._scale_rect()
-        return rect.bottom() - rect.height() * percent / MAX_PERCENT
+        return rect.bottom() - rect.height() * (percent - self.MINIMUM) / (self.MAXIMUM - self.MINIMUM)
 
     def _percent_at(self, y: float) -> int:
         rect = self._scale_rect()
-        return round((rect.bottom() - y) / rect.height() * MAX_PERCENT)
+        return round(self.MINIMUM + (rect.bottom() - y) / rect.height() * (self.MAXIMUM - self.MINIMUM))
+
+    def _label(self, value: int) -> str:
+        return str(value)
+
+    def _home_colour(self) -> QColor:
+        return _UNITY
 
     # -- mouse: the cap goes where you click, then follows the pointer --
 
@@ -114,7 +141,7 @@ class DeckFader(QSlider):
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
-        self._set_by_user(UNITY_PERCENT)
+        self._set_by_user(self.HOME)
         event.accept()
 
     # -- painting --
@@ -122,6 +149,8 @@ class DeckFader(QSlider):
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if not self.isEnabled():
+            painter.setOpacity(DISABLED_OPACITY)  # greyed out as a whole (the BPM switch, EQ off)
         width = self.width()
         centre_x = width / 2
 
@@ -129,30 +158,32 @@ class DeckFader(QSlider):
         painter.setBrush(_PANEL)
         painter.drawRoundedRect(QRectF(0, 0, width, self.height()), 6, 6)
 
-        # Scale: a tick every 5 %, long and labelled every 25 %; unity in amber.
+        # Scale: a tick every 5, long and labelled every 25; home (unity, 0 BPM) in amber.
         font = QFont(self.font())
         font.setPointSizeF(max(6.5, font.pointSizeF() - 2))
         painter.setFont(font)
-        for percent in range(0, MAX_PERCENT + 1, 5):
+        for percent in range(self.MINIMUM, self.MAXIMUM + 1, self.TICK_EVERY):
             y = self._y_for(percent)
-            major = percent % 25 == 0
-            colour = _UNITY if percent == UNITY_PERCENT else _SCALE
+            major = (percent - self.MINIMUM) % self.LABEL_EVERY == 0
+            colour = self._home_colour() if percent == self.HOME else _SCALE
             painter.setPen(QPen(colour, 1.4 if major else 1))
             length = 9 if major else 5
             painter.drawLine(QPointF(centre_x - 8 - length, y), QPointF(centre_x - 8, y))
             painter.drawLine(QPointF(centre_x + 8, y), QPointF(centre_x + 8 + length, y))
             if major:
                 label_rect = QRectF(2, y - 7, centre_x - _CAP_WIDTH / 2 - 4, 14)
-                painter.drawText(label_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, str(percent))
+                painter.drawText(label_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                                 self._label(percent))
 
-        # Slot, lit from the bottom up to the level.
-        top, bottom = self._y_for(MAX_PERCENT), self._y_for(0)
+        # Slot, lit from LIT_FROM (the bottom; the middle for the tempo) to the cap.
+        top, bottom = self._y_for(self.MAXIMUM), self._y_for(self.MINIMUM)
         slot = QRectF(centre_x - 3, top, 6, bottom - top)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(_SLOT)
         painter.drawRoundedRect(slot, 3, 3)
         cap_y = self._y_for(self.value())
-        lit = QRectF(slot.left() + 1, cap_y, slot.width() - 2, bottom - cap_y)
+        lit_y = self._y_for(self.LIT_FROM)
+        lit = QRectF(slot.left() + 1, min(cap_y, lit_y), slot.width() - 2, abs(lit_y - cap_y))
         painter.setBrush(_LIT if self.isEnabled() else _SCALE)
         painter.drawRoundedRect(lit, 2, 2)
 
@@ -219,4 +250,42 @@ class VolumeStrip(QWidget):
         self._readout.setText(f"{percent} %")
 
 
-__all__ = ["DeckFader", "VolumeStrip", "level_to_percent", "percent_to_level"]
+TEMPO_RANGE_BPM = 50
+TEMPO_STEP_BPM = 5
+DEFAULT_SONG_BPM = 120.0  # counted with when a song's BPM isn't known
+
+
+class TempoFader(DeckFader):
+    """The change of tempo, in BPM: -50 to +50 in steps of 5, 0 (the song's own) in the middle."""
+
+    MINIMUM = -TEMPO_RANGE_BPM
+    MAXIMUM = TEMPO_RANGE_BPM
+    HOME = 0
+    STEP = TEMPO_STEP_BPM
+    PAGE = 2 * TEMPO_STEP_BPM
+    TICK_EVERY = TEMPO_STEP_BPM
+    LABEL_EVERY = 25
+    LIT_FROM = 0
+    TOOLTIP = "BPM change from the middle (drag, scroll or arrow keys, 5 BPM a step; double-click for the middle)"
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._skewed = False
+
+    def set_skewed(self, skewed: bool) -> None:
+        """Its middle is off the song's detected BPM (Align skew): the 0 mark turns red."""
+        if skewed != self._skewed:
+            self._skewed = skewed
+            self.update()
+
+    def skewed(self) -> bool:
+        return self._skewed
+
+    def _home_colour(self) -> QColor:
+        return _SKEWED if self._skewed else _UNITY
+
+    def _label(self, value: int) -> str:
+        return f"{value:+d}" if value else "0"
+
+
+__all__ = ["DeckFader", "TempoFader", "VolumeStrip", "level_to_percent", "percent_to_level"]

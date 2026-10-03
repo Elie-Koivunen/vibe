@@ -1,8 +1,12 @@
 [project]
 name = "vlc-bookmark-studio"
-version = "0.8.0"
+version = "0.9.0"
 description = "VLC Bookmark Studio — playlist-aware visual bookmarking and looping for VLC Media Player"
 readme = "README.md"
+# Proprietary pre-release until the final version, which will be open source (LICENSE).
+license = { file = "LICENSE" }
+authors = [{ name = "Elie Koivunen" }]
+classifiers = ["License :: Other/Proprietary License", "Private :: Do Not Upload"]
 # Tested on 3.10-3.13 (Linux/WSL) and 3.12 (Windows); see .github/workflows/vlc-bookmark-studio-tests.yml.
 requires-python = ">=3.10"
 dependencies = [
@@ -27,6 +31,10 @@ packaging = [
     "pyinstaller>=6.10",
 ]
 
+[project.urls]
+Repository = "https://github.com/Elie-Koivunen/vibe/tree/main/vlc-bookmark-studio"
+Releases = "https://github.com/Elie-Koivunen/vibe/releases"
+
 [project.scripts]
 vlc-bookmark-studio = "bookmark_studio.bootstrap:main"
 
@@ -46,9 +54,10 @@ packages = ["src/bookmark_studio"]
 # installed package needs its own copy (persistence/migrations.py looks here first).
 "migrations" = "bookmark_studio/migrations"
 "vlc/bookmarkstudio.lua" = "bookmark_studio/vlc/bookmarkstudio.lua"
+"LICENSE" = "bookmark_studio/resources/LICENSE.txt"
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "migrations", "vlc", "tests", "packaging", "README.md", "CHANGELOG.md", "PROJECT_SPEC.md",
+include = ["src", "migrations", "vlc", "tests", "packaging", "README.md", "CHANGELOG.md", "PROJECT_SPEC.md", "LICENSE",
            "launch_vlc_bookmark_studio.bat", "launch_vlc_bookmark_studio.sh"]
 exclude = ["archive"]
 

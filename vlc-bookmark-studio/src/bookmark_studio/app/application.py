@@ -14,6 +14,7 @@ to) or the in-app libVLC player.
 """
 from __future__ import annotations
 
+import shutil
 import sqlite3
 import subprocess
 import time
@@ -42,6 +43,7 @@ from bookmark_studio.domain.equalizer import VLC_BANDS_HZ, EqualizerSettings
 from bookmark_studio.domain.loop import LoopSpec
 from bookmark_studio.domain.selection import Selection
 from bookmark_studio.logging.setup import get_logger
+from bookmark_studio.media.extract import ExtractJob
 from bookmark_studio.media.resolver import uri_to_local_path
 from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
 from bookmark_studio.persistence.media_repository import MediaRepository
@@ -53,12 +55,13 @@ from bookmark_studio.playback.http_fallback import StandardHttpPlaybackAdapter
 from bookmark_studio.playback.loop_controller import LoopController
 from bookmark_studio.playback.playback_clock import PlaybackClock
 from bookmark_studio.playback.status import PlaybackStatus, VlcPlaylistItem
-from bookmark_studio.settings.settings_service import SettingsService
+from bookmark_studio.settings.settings_service import SettingsService, TempoButtons
 from bookmark_studio.ui.deck_fader import percent_to_level
 from bookmark_studio.ui.dialogs.vlc_launch_dialog import VlcLaunchChoice, VlcLaunchDialog
 from bookmark_studio.ui.main_window import MainWindow
 from bookmark_studio.waveform.pyramid import WaveformPyramid
 from bookmark_studio.waveform.service import WaveformService
+from bookmark_studio.waveform.tempo import estimate_bpm, tempo_rate
 
 if TYPE_CHECKING:
     from bookmark_studio.project.sync_service import SyncService
@@ -71,11 +74,11 @@ if TYPE_CHECKING:
 EXTERNAL_STOP_GRACE_S = 0.6
 EXTERNAL_STOP_VOTES = 2
 _SYNC_INTERVAL_MS = 60_000
-# Playing a bookmark brings a quieter (or muted) player up to 85 % (VLC's 0-512 scale).
-BOOKMARK_PLAY_VOLUME = round(0.85 * 256)
-# The Volume & EQ tab's Max: VLC's normal full volume (the fader goes to 125 %, which can
-# distort). Its ramp steps every 40 ms.
-MAX_BUTTON_VOLUME = 256
+# A Tempo button's glide: a change of rate every 100 ms (each a small step; VLC plays on).
+TEMPO_GLIDE_STEP_MS = 100
+# The Volume & EQ tab's Max: the fader's top, 125 % (VLC's 0-512 scale; 100 % until the
+# first 0.9.0 build). Its ramp steps every 40 ms.
+MAX_BUTTON_VOLUME = round(1.25 * 256)
 # A bookmark played without a loop counts as done once playback leaves it -- but not in
 # this first moment, when a status poll may still predate the seek.
 BOOKMARK_PLAYBACK_GRACE_S = 1.0
@@ -137,6 +140,15 @@ class Application(QObject):
         )
 
         self._waveform_service = WaveformService(ffmpeg_path=ffmpeg_path, cache_dir=waveform_cache_dir)
+        self._ffmpeg_path = ffmpeg_path  # also cuts bookmarks out as audio files (Extract)
+        # Tempo (Volume & EQ tab): a change in BPM for playing only -- never saved, nor part
+        # of a bookmark. Songs' BPMs: estimated from their waveforms, or put right by the
+        # user (this session).
+        self._tempo_change_bpm = 0.0  # what plays, from the detected BPM
+        self._tempo_skew_bpm = 0.0  # where the fader's middle is, from the detected BPM (Align skew)
+        self._estimated_bpm: dict[UUID, float] = {}
+        self._corrected_bpm: dict[UUID, float] = {}
+        self._rate = 1.0
         self._waveform_orchestrator = WaveformOrchestrator(
             service=self._waveform_service, repository=self._waveform_repository
         )
@@ -152,6 +164,9 @@ class Application(QObject):
         self._loop_controller.bookmark_navigation_requested.connect(self._on_loop_navigation_requested)
         self._loop_controller.loop_completed.connect(self._on_loop_completed)
         self._loop_controller.loop_failed.connect(self._on_loop_failed)
+        # The volume fader follows a fade as it lowers and raises the volume (the polls
+        # meanwhile predate the fade's own writes, so they can't show it).
+        self._loop_controller.volume_stepped.connect(self._on_fade_volume_step)
         self._loop_controller.loop_started.connect(lambda _spec: self._note_loop_segment_started())
         self._loop_controller.iteration_changed.connect(lambda _remaining: self._note_loop_segment_started())
 
@@ -176,6 +191,16 @@ class Application(QObject):
             if settings is not None else self.window.volume_levels()
         )
         self.window.show_volume_levels(*self._volume_levels)
+        # The BPM panel: its switch (off: the song's own tempo), Increase / Lower's Step and
+        # the Glide time.
+        self._tempo_enabled = settings.tempo_enabled() if settings is not None else False
+        self.window.show_tempo_enabled(self._tempo_enabled)
+        self._tempo_buttons = settings.tempo_buttons() if settings is not None else TempoButtons()
+        self.window.show_tempo_buttons(self._tempo_buttons)
+        self._tempo_glide: tuple[float, float, int, int] | None = None  # from, to, started_ns, duration_ns
+        self._tempo_glide_timer = QTimer(self)
+        self._tempo_glide_timer.setInterval(TEMPO_GLIDE_STEP_MS)
+        self._tempo_glide_timer.timeout.connect(self._on_tempo_glide_tick)
         # Equalizer presets glide under the same rule as the volume ramps.
         if settings is not None:
             self.window.show_equalizer_glide_ms(settings.equalizer_glide_ms())
@@ -234,6 +259,12 @@ class Application(QObject):
             return
         self._stopped = True
         self._save_window_layout()
+        self.window.end_session()
+        self._stop_tempo_glide()
+        if self._rate != 1.0:  # a VLC window this app attached to isn't left at another tempo
+            adapter = self._adapter
+            self._submit(lambda: adapter.set_rate(1.0))
+            self._rate = 1.0
         self._sync_timer.stop()
         self._stop_volume_ramp()
         self._loop_controller.stop(restore_volume=True)  # undo a fade's volume change
@@ -259,12 +290,14 @@ class Application(QObject):
         w.play_pause_requested.connect(self._on_play_pause_clicked)
         w.stop_requested.connect(self._on_stop_clicked)
         w.seek_relative_requested.connect(self._seek_relative)
-        w.previous_track_requested.connect(lambda: self._submit_adapter_call("previous_track"))
-        w.next_track_requested.connect(lambda: self._submit_adapter_call("next_track"))
+        w.previous_track_requested.connect(lambda: self._change_track("previous_track"))
+        w.next_track_requested.connect(lambda: self._change_track("next_track"))
         w.previous_bookmark_requested.connect(self._on_previous_bookmark)
         w.next_bookmark_requested.connect(self._on_next_bookmark)
         w.seek_requested.connect(self._seek_displayed)
         w.waveform_selection_changed.connect(self._on_waveform_selection_changed)
+        w.selection_bookmarked.connect(self._on_selection_bookmarked)
+        w.extract_bookmarks_requested.connect(self._on_extract_bookmarks_requested)
         w.playlist_item_double_clicked.connect(self._on_playlist_item_double_clicked)
         w.playlist_item_selected.connect(self._on_playlist_item_selected)
         w.follow_player_toggled.connect(self._on_follow_vlc_toggled)
@@ -284,6 +317,14 @@ class Application(QObject):
         w.volume_reset_requested.connect(self._on_volume_reset_requested)
         w.volume_normalize_requested.connect(self._on_volume_normalize_requested)
         w.volume_levels_changed.connect(self._on_volume_levels_changed)
+        w.tempo_changed.connect(self._on_tempo_changed)
+        w.detected_bpm_corrected.connect(self._on_detected_bpm_corrected)
+        w.tempo_align_skew_requested.connect(self._on_tempo_align_skew)
+        w.tempo_increase_requested.connect(lambda: self._step_tempo(+1))
+        w.tempo_reset_requested.connect(self._on_tempo_reset)
+        w.tempo_lower_requested.connect(lambda: self._step_tempo(-1))
+        w.tempo_buttons_changed.connect(self._on_tempo_buttons_changed)
+        w.tempo_switched.connect(self._on_tempo_switched)
         w.volume_ramp_times_changed.connect(self._on_volume_ramp_times_changed)
         w.equalizer_glide_ms_changed.connect(
             lambda value_ms: self._settings.set_equalizer_glide_ms(value_ms) if self._settings is not None else None
@@ -303,6 +344,16 @@ class Application(QObject):
 
     def _fire_and_forget(self, fn: Callable[[], object]) -> None:
         self._submit(fn)
+
+    def _change_track(self, method_name: str) -> None:
+        """Previous / next track: a song of the playlist plays (any loop ends, the last
+        bookmark's highlight goes); one that starts playback starts audible (see
+        _volume_up_for_playback)."""
+        self._stop_loop()
+        self._clear_bookmark_playback()
+        if self._last_playback_state != "playing":
+            self._volume_up_for_playback()
+        self._submit_adapter_call(method_name)
 
     def _submit_adapter_call(self, method_name: str) -> None:
         adapter = self._adapter
@@ -358,6 +409,8 @@ class Application(QObject):
         # left alone, so a VLC window keeps an equalizer set up in VLC itself.
         if connected and self._equalizer.enabled:
             self._apply_equalizer()
+        if connected and self._tempo_change_bpm:
+            self._apply_tempo(force=True)
 
     def _on_user_volume(self, level: int) -> None:
         """The fader: the user takes over from a running Max/Normalize/Reset/Mute."""
@@ -368,7 +421,7 @@ class Application(QObject):
 
     def _on_volume_max_requested(self) -> None:
         if self._loop_controller.target_volume >= MAX_BUTTON_VOLUME:
-            return  # already at (or above) 100 %
+            return  # already at the top
         self._ramp_volume_to(MAX_BUTTON_VOLUME, self._volume_ramp_ms[0])
 
     def _on_volume_mute_requested(self) -> None:
@@ -428,14 +481,17 @@ class Application(QObject):
         self._set_player_volume(level)  # fades ramp to/from it; writes are coalesced
         self.window.show_volume(level)
 
-    def _raise_volume_for_bookmark(self, *, fades_in: bool = False) -> None:
-        """Playing a bookmark brings a quieter (or muted) player up to 85 %; a louder
-        setting is kept. With a fade-in, the fade itself ramps up to that level."""
-        if self._loop_controller.target_volume >= BOOKMARK_PLAY_VOLUME:
+    def _volume_up_for_playback(self, *, fades_in: bool = False) -> None:
+        """Playing -- a song or a bookmark -- with the volume at 0 (e.g. a VLC launched
+        muted) starts at the Reset level (Volume & EQ tab); any other level stays as the
+        user set it, across bookmarks too (0.9.0; a bookmark used to raise anything below
+        85 %). With a fade-in, the fade itself ramps up to that level."""
+        if self._loop_controller.target_volume > 0:
             return
+        level = percent_to_level(self._volume_levels[1])
         self._stop_volume_ramp()  # e.g. a Mute still fading out
-        self._set_player_volume(BOOKMARK_PLAY_VOLUME, write=not fades_in)
-        self.window.show_volume(BOOKMARK_PLAY_VOLUME)
+        self._set_player_volume(level, write=not fades_in)
+        self.window.show_volume(level)
 
     # -- choosing the player: attach / launch a VLC window / play inside the app --
 
@@ -557,7 +613,23 @@ class Application(QObject):
             self._submit(adapter.pause)
             self._last_playback_state = "paused"
         else:
-            self._submit(adapter.play)
+            # Play is for the song on screen: one picked in the playlist (a single click
+            # previews it) is switched to first. Before, Play resumed the player's own
+            # song and nothing moved on the waveform.
+            self._volume_up_for_playback()
+            goto = self._goto_for_displayed()
+            if goto is None:
+                self._submit(adapter.play)
+            else:
+                # A song picked in the playlist: no bookmark's highlight is about it.
+                self._clear_bookmark_playback()
+                self.window.set_follow_player(True, notify=False)
+
+                def _play_displayed() -> None:
+                    goto()
+                    adapter.play()
+
+                self._submit(_play_displayed, on_done=lambda _r: self._clock.note_seek(0, playing=True))
             self._last_playback_state = "playing"
 
     def _on_stop_clicked(self) -> None:
@@ -586,6 +658,7 @@ class Application(QObject):
             return None
         adapter = self._adapter
         self._actually_playing_vlc_item_id = displayed
+        QTimer.singleShot(0, self._on_tempo_song_switched)  # after the caller queued the switch
         return lambda: adapter.goto_item(displayed)
 
     def _seek_displayed(self, time_us: int) -> None:
@@ -633,11 +706,20 @@ class Application(QObject):
                      completion_action=CompletionAction.CONTINUE),
             before=before,
         )
+        # Green while it plays, like a bookmark: its song and the selection.
+        self._bookmark_playback = _BookmarkPlayback(
+            bookmark_id=None, song_vlc_id=self._current_vlc_item_id, looping=True, started=time.monotonic(),
+        )
+        self._show_bookmark_playback()
 
     def _on_waveform_selection_changed(self, selection: object) -> None:
         """Dragging an edge of a selection that is being looped restarts the loop with the
-        new bounds; clearing it stops the loop."""
+        new bounds; clearing it stops the loop. Another selection, when none is looping,
+        drops the colours of one that did."""
         if not self._selection_loop_active:
+            playback = self._bookmark_playback
+            if playback is not None and playback.bookmark_id is None:
+                self._clear_bookmark_playback()
             return
         if not isinstance(selection, Selection):
             self._stop_loop()
@@ -646,6 +728,237 @@ class Application(QObject):
             LoopSpec(start_us=selection.start_us, end_us=selection.end_us, repeat_count=None, gap_ms=0,
                      completion_action=CompletionAction.CONTINUE)
         )
+        self._show_bookmark_playback()  # a redrawn selection is green again
+
+    def _on_selection_bookmarked(self, bookmark_id: UUID) -> None:
+        """A bookmark was just made from the waveform's selection. If that selection was
+        looping (▶ Selection), the new bookmark takes the loop over -- playback goes on, now
+        as the bookmark (green in all three places), with the bookmark's own settings;
+        before, clearing the bookmarked selection stopped it. If the song was simply
+        playing through it (the main Play), the new bookmark is the one playing now: green,
+        and yellow once playback leaves it."""
+        bookmark = self._bookmark_repository.get(bookmark_id)
+        if bookmark is None or bookmark.end_us is None:
+            return
+        if not self._selection_loop_active:
+            self._mark_bookmark_playing_if_inside(bookmark)
+            return
+        spec = self._loop_controller.spec
+        if spec is None:
+            return
+        if (spec.start_us, spec.end_us) != (bookmark.start_us, bookmark.end_us):
+            return
+        self._selection_loop_active = False  # clearing the selection next won't stop it
+        self._active_loop_bookmark_id = bookmark.id
+        self._active_loop_was_enabled = bookmark.loop_enabled
+        self._begin_bookmark_playback(bookmark, looping=True)
+        # Its own count starts now -- the pass playing is its first (the selection's passes
+        # don't count) -- and its fades and After loop apply from here. Loop unticked in
+        # the form: this pass is the last.
+        self._loop_controller.update_spec(_loop_spec(bookmark), last_pass=not bookmark.loop_enabled,
+                                          count_from_now=True)
+
+    def _mark_bookmark_playing_if_inside(self, bookmark: Any) -> None:
+        """The song on screen plays (no loop) with the playhead inside `bookmark`: it is the
+        bookmark playing (green). With Loop on it loops from here -- the pass playing now
+        is its first, then its Repeat count, gap, fades and After loop as set; without, it
+        is done once playback passes its end, stops or moves on."""
+        if self._loop_controller.state not in (LoopState.IDLE, LoopState.COMPLETED):
+            return  # a loop is playing: that is what plays
+        if self._last_playback_state != "playing" or self._current_vlc_item_id is None:
+            return
+        if self._current_vlc_item_id != self._actually_playing_vlc_item_id:
+            return  # the player is on another song than the one on screen
+        position_us = self._clock.estimated_position_us()
+        if bookmark.end_us is None or not bookmark.start_us <= position_us < bookmark.end_us:
+            return
+        if not bookmark.loop_enabled:
+            self._begin_bookmark_playback(bookmark, looping=False)
+            return
+        self._selection_loop_active = False
+        self._active_loop_bookmark_id = bookmark.id
+        self._active_loop_was_enabled = True
+        self._loop_item_id = self._current_vlc_item_id
+        self._external_stop_votes = 0
+        self._loop_controller.join(_loop_spec(bookmark))
+        self._begin_bookmark_playback(bookmark, looping=True)
+
+    # -- Tempo (Volume & EQ tab) --
+
+    def _tempo_media_id(self) -> UUID | None:
+        """The song the tempo applies to: the one playing, else the one on screen."""
+        for item, media in self.playlists.resolved:
+            if item.vlc_id == self._actually_playing_vlc_item_id:
+                return media.id
+        return self._current_media_id
+
+    def _song_bpm(self, media_id: UUID | None) -> float | None:
+        if media_id is None:
+            return None
+        return self._corrected_bpm.get(media_id) or self._estimated_bpm.get(media_id)
+
+    def _show_tempo(self) -> None:
+        if not self._stopped:
+            self.window.show_tempo(self._song_bpm(self._tempo_media_id()), self._tempo_skew_bpm,
+                                   self._tempo_change_bpm)
+
+    def _on_tempo_changed(self, fader_bpm: int) -> None:
+        """The fader (the change from the BPM Skew): the user takes over from a glide."""
+        self._stop_tempo_glide()
+        self._tempo_change_bpm = self._tempo_skew_bpm + float(fader_bpm)
+        self._apply_tempo()
+        self._show_tempo()
+
+    def _on_tempo_buttons_changed(self, buttons: TempoButtons) -> None:
+        self._tempo_buttons = buttons
+        if self._settings is not None:
+            self._settings.set_tempo_buttons(buttons)
+
+    def _on_tempo_switched(self, enabled: bool) -> None:
+        """The BPM switch: off plays the song at its own tempo (what was set is kept for
+        when it's switched on again)."""
+        self._stop_tempo_glide()
+        self._tempo_enabled = enabled
+        self.window.show_tempo_enabled(enabled)  # (the switch itself, unless it was the switch)
+        if self._settings is not None:
+            self._settings.set_tempo_enabled(enabled)
+        self._apply_tempo()
+        self._show_tempo()
+
+    def _reset_tempo_for_bookmark(self) -> None:
+        """A bookmark moved on to (After loop Next/Previous Bookmark, ⏮ / ⏭) plays at its
+        song's detected BPM: the change and the skew back to 0, at once."""
+        self._stop_tempo_glide()
+        self._tempo_skew_bpm = 0.0
+        self._set_tempo_change(0.0)
+
+    def _on_tempo_align_skew(self) -> None:
+        """Align skew: the fader's middle becomes what plays now -- nothing changes for the
+        ear; the fader's 50 either way are around it from now on."""
+        self._stop_tempo_glide()
+        self._tempo_skew_bpm = self._tempo_change_bpm
+        self._show_tempo()
+
+    def _on_tempo_reset(self) -> None:
+        """Reset: back to the song's detected BPM; the skew is cancelled."""
+        self._tempo_skew_bpm = 0.0
+        self._glide_tempo_to(0.0)
+
+    def _step_tempo(self, direction: int) -> None:
+        """Increase (+1) / Lower (-1): a Step faster or slower, as far as the fader goes."""
+        target = self._tempo_change_bpm + direction * self._tempo_buttons.step_bpm
+        self._glide_tempo_to(target)
+
+    def _glide_tempo_to(self, change: float) -> None:
+        """To `change` (from the detected BPM; within the fader's 50 either way of the
+        skew) over the Glide time while something plays -- step by step, each a small
+        change of rate (VLC carries on playing; no gap) -- at once otherwise."""
+        skew = self._tempo_skew_bpm
+        change = skew + max(-50.0, min(50.0, float(change) - skew))
+        self._stop_tempo_glide()
+        glide_ms = self._tempo_buttons.glide_ms
+        if glide_ms <= 0 or self._last_playback_state != "playing" or abs(change - self._tempo_change_bpm) < 0.05:
+            self._set_tempo_change(change)
+            return
+        self._tempo_glide = (self._tempo_change_bpm, change, time.monotonic_ns(), glide_ms * 1_000_000)
+        self._tempo_glide_timer.start()
+        self._show_tempo()
+
+    def _on_tempo_glide_tick(self) -> None:
+        glide = self._tempo_glide
+        if glide is None or self._stopped:
+            self._stop_tempo_glide()
+            return
+        start, end, started_ns, duration_ns = glide
+        fraction = min(1.0, (time.monotonic_ns() - started_ns) / duration_ns)
+        self._set_tempo_change(start + (end - start) * fraction)
+        if fraction >= 1.0:
+            self._stop_tempo_glide()
+
+    def _stop_tempo_glide(self) -> None:
+        self._tempo_glide = None
+        self._tempo_glide_timer.stop()
+
+    def _set_tempo_change(self, change: float) -> None:
+        self._tempo_change_bpm = change
+        self._apply_tempo()
+        self._show_tempo()
+
+    def _on_tempo_song_switched(self) -> None:
+        """Another song plays (or will: the switch is queued before this runs): the BPM
+        panel shows its detected BPM, and the change plays from it. (Before, a switch the
+        app made itself -- a bookmark of another song, a song picked and played -- left
+        the previous song's BPM in both.)"""
+        if self._stopped:
+            return
+        self._show_tempo()
+        if self._tempo_change_bpm:
+            self._apply_tempo(force=True)
+
+    def _on_detected_bpm_corrected(self, bpm: float) -> None:
+        """The user put the song's detected BPM right (this session): what plays follows."""
+        media_id = self._tempo_media_id()
+        if media_id is not None and bpm > 0:
+            self._corrected_bpm[media_id] = float(bpm)
+        self._apply_tempo()
+        self._show_tempo()
+
+    def _apply_tempo(self, *, force: bool = False) -> None:
+        """Plays at the song's detected BPM plus the change (VLC keeps the pitch); a song
+        whose BPM isn't detected counts as 120. Switched off: the song's own tempo. A
+        loop's current pass is timed anew."""
+        bpm = self._song_bpm(self._tempo_media_id()) or 120.0
+        rate = tempo_rate(bpm, self._tempo_change_bpm) if self._tempo_enabled else 1.0
+        if not force and abs(rate - self._rate) < 1e-6:
+            return
+        self._rate = rate
+        adapter = self._adapter
+        # Only the latest rate matters: a glide's steps never queue up behind a busy player.
+        self.session.commands.submit(
+            lambda: adapter.set_rate(rate), coalesce_key="rate", fences=("position",),
+            on_error=lambda exc: self._log.debug("tempo change failed: %s", exc),
+        )
+        self._clock.note_rate(rate)
+        self._loop_controller.retime()
+
+    # -- Extract: bookmarks as audio files --
+
+    def _on_extract_bookmarks_requested(self, bookmark_ids: list[UUID]) -> None:
+        """Extract... (beside the list, Bookmark menu): the Extract audio window for the
+        selected bookmarks."""
+        jobs = [job for job in (self._extract_job(bookmark_id) for bookmark_id in bookmark_ids) if job is not None]
+        if jobs:
+            self.window.open_extract_dialog(jobs, self._usable_ffmpeg(), self._settings)
+
+    def _extract_job(self, bookmark_id: UUID) -> ExtractJob | None:
+        """What Extract needs about a bookmark: its range, its song's file (None when it
+        can't be found) and the song's original name -- the file's, without extension."""
+        bookmark = self._bookmark_repository.get(bookmark_id)
+        if bookmark is None:
+            return None
+        media = self._media_repository.get(bookmark.media_id)
+        item = self._playlist_item_for_media(bookmark.media_id)
+        uri = (media.canonical_uri if media is not None else None) or (item.uri if item is not None else None)
+        local = uri_to_local_path(uri) if uri else None
+        source = local if local is not None and local.is_file() else None
+        song = (
+            (local.stem if local is not None else None)
+            or (Path(media.filename).stem if media is not None and media.filename else None)
+            or self.playlists.song_names.get(bookmark.media_id)
+            or "song"
+        )
+        return ExtractJob(
+            bookmark_id=bookmark.id, song=song, name=bookmark.name, start_us=bookmark.start_us,
+            end_us=bookmark.end_us, source=source, fade_in_ms=bookmark.fade_in_ms, fade_out_ms=bookmark.fade_out_ms,
+            title=(media.title if media is not None else None) or song, loop_enabled=bookmark.loop_enabled,
+            repeat_count=bookmark.repeat_count, gap_ms=bookmark.loop_gap_ms,
+        )
+
+    def _usable_ffmpeg(self) -> str | None:
+        path = self._ffmpeg_path
+        if path and (Path(path).is_file() or shutil.which(path)):
+            return path
+        return None
 
     def _start_loop(self, spec: LoopSpec, *, before: Callable[[], object] | None = None) -> None:
         self._loop_item_id = self._current_vlc_item_id or self._actually_playing_vlc_item_id
@@ -675,7 +988,7 @@ class Application(QObject):
             self._on_loop_bookmark_requested(bookmark_id)
             return
         self._stop_loop()
-        self._raise_volume_for_bookmark()
+        self._volume_up_for_playback()
         item = self._playlist_item_for_media(bookmark.media_id)
         if item is not None:
             self._switch_displayed_song_for_bookmark(item)
@@ -704,7 +1017,7 @@ class Application(QObject):
         self._selection_loop_active = False
         self._active_loop_bookmark_id = bookmark.id
         self._active_loop_was_enabled = bookmark.loop_enabled
-        self._raise_volume_for_bookmark(fades_in=bookmark.fade_in_ms > 0)
+        self._volume_up_for_playback(fades_in=bookmark.fade_in_ms > 0)
         self._start_loop(_loop_spec(bookmark), before=before)
         self._last_playback_state = "playing"
         self._begin_bookmark_playback(bookmark, looping=True)
@@ -736,15 +1049,17 @@ class Application(QObject):
         playback = self._bookmark_playback
         if playback is None:
             self.window.show_bookmark_playback(None, None, None)
+            self.window.show_selection_playback(None)
         else:
             self.window.show_bookmark_playback(playback.bookmark_id, playback.song_vlc_id, playback.state)
+            self.window.show_selection_playback(playback.state if playback.bookmark_id is None else None)
 
     def _check_bookmark_playback_done(self, status: PlaybackStatus) -> None:
         """A bookmark played with Play (no loop) is done once playback passes its end,
         stops or pauses, or moves to another song. (A loop ends through the loop
         controller instead.) Not in the first moment: a poll may predate the seek."""
         playback = self._bookmark_playback
-        if playback is None or playback.state != "playing" or playback.looping:
+        if playback is None or playback.state != "playing" or playback.looping or playback.bookmark_id is None:
             return
         if time.monotonic() - playback.started < BOOKMARK_PLAYBACK_GRACE_S:
             return
@@ -757,19 +1072,24 @@ class Application(QObject):
         if status.state != "playing" or other_song or past_end:
             self._finish_bookmark_playback()
 
+    def _on_fade_volume_step(self, level: int) -> None:
+        if not self._stopped:
+            self.window.show_volume(level)
+
     def _on_loop_failed(self, message: str) -> None:
         self._log.info("loop stopped: %s", message)
         if self._bookmark_playback is not None and self._bookmark_playback.looping:
             self._finish_bookmark_playback()
 
     def _follow_active_loop_bookmark(self) -> None:
-        """The playing loop's bookmark may just have been edited (Bookmark settings, the
+        """The playing loop's bookmark may just have been edited (Bookmark Studio, the
         list's columns, a drag, undo): the loop takes its settings at once -- a repeat
         count already reached ends it after this pass and runs the new After-loop action.
         Switching Loop off finishes the current pass; deleting the bookmark stops the loop
         (playback goes on)."""
         playback = self._bookmark_playback
-        if playback is not None and self._bookmark_repository.get(playback.bookmark_id) is None:
+        if (playback is not None and playback.bookmark_id is not None
+                and self._bookmark_repository.get(playback.bookmark_id) is None):
             self._clear_bookmark_playback()  # the bookmark was deleted
         bookmark_id = self._active_loop_bookmark_id
         current = self._loop_controller.spec
@@ -792,8 +1112,11 @@ class Application(QObject):
             self._finish_bookmark_playback()
 
     def _on_loop_navigation_requested(self, action: object) -> None:
-        """"After loop: Next/Previous Bookmark": plays the neighbouring bookmark of the same
-        song (by start time) with its own settings."""
+        """"After loop: Next/Previous Bookmark": plays the bookmark below/above this one in
+        the bookmark list -- its order, across the playlist's songs (0.9.0; before, only
+        the same song's bookmarks by start time, so the last one of a song went nowhere)
+        -- with its own settings. Bookmarks of a song the player doesn't have are passed
+        over; past either end of the list, playback goes on."""
         current_id = self._active_loop_bookmark_id
         if action is CompletionAction.NEXT_SEGMENT_QUEUE_ITEM:
             self._log.info("Segment Queue is not available yet; continuing playback")
@@ -803,52 +1126,91 @@ class Application(QObject):
         current = self._bookmark_repository.get(current_id)
         if current is None:
             return
-        siblings = sorted(
-            self._bookmark_repository.list_for_context(current.playlist_id, current.media_id),
-            key=lambda b: (b.start_us, str(b.id)),
-        )
-        ids = [b.id for b in siblings]
+        listing = self._bookmark_listing_for(current)
+        ids = [b.id for b in listing]
         if current.id not in ids:
             return
-        index = ids.index(current.id) + (1 if action is CompletionAction.NEXT_BOOKMARK else -1)
-        if 0 <= index < len(siblings):
-            target_id = siblings[index].id
-            # Deferred: we're inside LoopController's own signal emission.
-            QTimer.singleShot(0, lambda: self._on_play_bookmark_requested(target_id))
+        step = 1 if action is CompletionAction.NEXT_BOOKMARK else -1
+        index = ids.index(current.id) + step
+        while 0 <= index < len(listing):
+            candidate = listing[index]
+            if candidate.media_id == current.media_id or self._playlist_item_for_media(candidate.media_id) is not None:
+                target_id = candidate.id
+                # Deferred: we're inside LoopController's own signal emission.
+                QTimer.singleShot(0, lambda: self._play_bookmark_moved_to(target_id))
+                return
+            index += step
+        self._log.info("after loop: no %s bookmark in the list; playback goes on",
+                       "next" if step > 0 else "previous")
+
+    def _play_bookmark_moved_to(self, bookmark_id: UUID) -> None:
+        """After loop: Next/Previous Bookmark (and ⏮ / ⏭) -- plays it at its song's
+        detected BPM, and selects it in the list so the Bookmark Studio tab shows its
+        settings."""
+        if self._stopped:
+            return  # the window closed before the deferred call
+        self._reset_tempo_for_bookmark()
+        self._on_play_bookmark_requested(bookmark_id)
+        self.window.show_bookmark_in_studio(bookmark_id)
+
+    def _bookmark_listing_for(self, bookmark: Any) -> list[Any]:
+        """The bookmarks in the order the list shows them, when `bookmark` is one of them
+        (the active playlist's); else its song's bookmarks by start time."""
+        playlist_id = self.playlists.active_playlist_id
+        if playlist_id is not None:
+            listing = self._bookmark_repository.list_for_playlist(playlist_id)
+            if any(b.id == bookmark.id for b in listing):
+                return listing
+        return sorted(
+            self._bookmark_repository.list_for_context(bookmark.playlist_id, bookmark.media_id),
+            key=lambda b: (b.start_us, str(b.id)),
+        )
 
     def _on_bookmark_reorder_requested(self, ordered_bookmark_ids: list[UUID]) -> None:
         self._bookmark_repository.reorder(ordered_bookmark_ids)
         self._refresh_bookmark_views()
 
-    def _current_bookmarks_sorted(self) -> list[Any]:
-        if self._current_media_id is None:
-            return []
-        bookmarks = self._bookmark_repository.list_for_context(self.playlists.active_playlist_id,
-                                                               self._current_media_id)
-        return sorted(bookmarks, key=lambda b: b.start_us)
-
-    def _displayed_position_us(self) -> int:
-        if self._current_vlc_item_id is not None and self._current_vlc_item_id == self._actually_playing_vlc_item_id:
-            return self._clock.estimated_position_us()
-        return self.window.playhead_time_us()
-
     def _on_previous_bookmark(self) -> None:
-        bookmarks = self._current_bookmarks_sorted()
-        if not bookmarks:
-            return
-        current_time = self._displayed_position_us()
-        candidates = [b for b in bookmarks if b.start_us < current_time - 500_000]
-        target = candidates[-1] if candidates else bookmarks[-1]
-        self._seek_displayed(target.start_us)
+        self._step_through_bookmarks(-1)
 
     def _on_next_bookmark(self) -> None:
-        bookmarks = self._current_bookmarks_sorted()
-        if not bookmarks:
+        self._step_through_bookmarks(1)
+
+    def _step_through_bookmarks(self, step: int) -> None:
+        """⏮ / ⏭ (and the Playback menu): plays the bookmark above / below in the bookmark
+        list -- its order, across songs (0.9.0; before, they sought to the song's own
+        bookmarks by position) -- counting from the bookmark playing; with none playing,
+        from the one selected in the list, else the one played last; with none of those,
+        from the top (⏭) or the bottom (⏮). Like a double-click, it plays with the
+        bookmark's own settings, and it is selected, so the Bookmark Studio tab shows it.
+        Bookmarks of a song the player doesn't have are passed over."""
+        playlist_id = self.playlists.active_playlist_id
+        if playlist_id is None:
             return
-        current_time = self._displayed_position_us()
-        candidates = [b for b in bookmarks if b.start_us > current_time + 500_000]
-        target = candidates[0] if candidates else bookmarks[0]
-        self._seek_displayed(target.start_us)
+        listing = self._bookmark_repository.list_for_playlist(playlist_id)
+        if not listing:
+            return
+        ids = [b.id for b in listing]
+        anchor = self._bookmark_navigation_anchor()
+        if anchor in ids:
+            index = ids.index(anchor) + step
+        else:
+            index = 0 if step > 0 else len(listing) - 1
+        while 0 <= index < len(listing):
+            if self._playlist_item_for_media(listing[index].media_id) is not None:
+                self._play_bookmark_moved_to(listing[index].id)
+                return
+            index += step
+
+    def _bookmark_navigation_anchor(self) -> UUID | None:
+        """Where ⏮ / ⏭ count from (see _step_through_bookmarks)."""
+        playback = self._bookmark_playback
+        if playback is not None and playback.state == "playing" and playback.bookmark_id is not None:
+            return playback.bookmark_id
+        selected = self.window.selected_bookmark_id()
+        if selected is not None:
+            return selected
+        return playback.bookmark_id if playback is not None else None
 
     # -- status --
 
@@ -870,7 +1232,7 @@ class Application(QObject):
         try:
             # Fades ramp to/from the user's real volume (ignored while a fade owns it).
             self._loop_controller.set_target_volume(status.volume, sampled_at_ns=issued_ns)
-            if not self.session.is_volume_stale(issued_ns):
+            if not self.session.is_volume_stale(issued_ns) and not self.session.commands.has_pending("volume"):
                 self.window.show_volume(status.volume)
             if self.session.is_stale(issued_ns):
                 return  # sampled before our last seek/goto/play took effect
@@ -884,12 +1246,33 @@ class Application(QObject):
             self._check_external_stop(status)
             self._loop_controller.on_tick()
             self._check_bookmark_playback_done(status)
+            self._show_crossing(status)
 
             if status.current_playlist_item_id != self._actually_playing_vlc_item_id:
                 self._actually_playing_vlc_item_id = status.current_playlist_item_id
                 self._apply_actually_playing_item_if_following(status)
+                self._on_tempo_song_switched()
         except Exception:  # noqa: BLE001 - spec #104: never crash the UI over one poll
             self._log.exception("status result handling failed")
+
+    def _show_crossing(self, status: PlaybackStatus) -> None:
+        """While a song plays -- from the playlist, not a bookmark -- the bookmarks whose
+        range the playhead is in show orange in the list, for as long as it is (as the
+        red line moves: at each status poll). Point bookmarks have no range."""
+        crossing: frozenset[UUID] = frozenset()
+        playback = self._bookmark_playback
+        bookmark_playing = playback is not None and playback.bookmark_id is not None and playback.state == "playing"
+        playlist_id = self.playlists.active_playlist_id
+        if status.state in ("playing", "paused") and not bookmark_playing and playlist_id is not None:
+            media_id = next((media.id for item, media in self.playlists.resolved
+                             if item.vlc_id == status.current_playlist_item_id), None)
+            if media_id is not None:
+                now_us = status.time_us
+                crossing = frozenset(
+                    b.id for b in self._bookmark_repository.list_for_context(playlist_id, media_id)
+                    if b.end_us is not None and b.start_us <= now_us < b.end_us
+                )
+        self.window.show_bookmark_crossing(crossing)
 
     def _check_external_stop(self, status: PlaybackStatus) -> None:
         """Stops a playing loop when the user paused/stopped playback or changed song in
@@ -931,13 +1314,17 @@ class Application(QObject):
             self._on_current_item_changed(status.media_uri, status.duration_us)
 
     def _on_playlist_item_double_clicked(self, vlc_id: int) -> None:
-        """Double-click on a song plays it from the beginning (stopping any loop)."""
+        """Double-click on a song plays it from the beginning (stopping any loop); the
+        last bookmark played isn't highlighted any more -- the whole song plays."""
         self._stop_loop()
+        self._clear_bookmark_playback()
+        self._volume_up_for_playback()
         item = self.playlists.item(vlc_id)
         self.window.set_follow_player(True, notify=False)
         if item is not None and item.uri:
             self._show_item(item)
         self._actually_playing_vlc_item_id = vlc_id  # see _goto_for_displayed
+        QTimer.singleShot(0, self._on_tempo_song_switched)
         adapter = self._adapter
 
         def _play_from_start() -> None:
@@ -1099,6 +1486,12 @@ class Application(QObject):
             self._waveform_orchestrator.request(media.id, media.fast_fingerprint, str(local_path))
 
     def _on_waveform_ready(self, media_id: UUID, pyramid: WaveformPyramid) -> None:
+        bpm = estimate_bpm(pyramid)
+        if bpm is not None:
+            self._estimated_bpm[media_id] = bpm
+            if media_id == self._tempo_media_id():
+                self._show_tempo()
+                self._apply_tempo()
         if media_id != self._current_media_id:
             return  # switched songs before this one finished (spec #65)
         self.window.show_waveform(pyramid, pyramid.duration_us or self.window.waveform_duration_us())
@@ -1130,9 +1523,10 @@ class Application(QObject):
 
 @dataclass
 class _BookmarkPlayback:
-    """The bookmark playing ("playing") or played last ("done")."""
+    """The bookmark playing ("playing") or played last ("done"); bookmark_id None: the
+    waveform's selection (▶ Selection)."""
 
-    bookmark_id: UUID
+    bookmark_id: UUID | None
     song_vlc_id: int | None
     looping: bool
     started: float

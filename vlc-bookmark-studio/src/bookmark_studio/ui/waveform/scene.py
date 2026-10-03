@@ -99,6 +99,12 @@ class WaveformScene(QGraphicsScene):
     def clear_selection(self) -> None:
         self.set_selection(None)
 
+    def set_selection_playback(self, state: str | None) -> None:
+        """The selection looping ("playing": green) or looped ("done": yellow). A new
+        selection starts without."""
+        if self._selection_item is not None:
+            self._selection_item.set_playback_state(state)
+
     def _on_selection_resize_preview(self, handle: str, value_us: int) -> None:
         current = self.selection()
         if current is None:

@@ -4,6 +4,159 @@ All notable changes to VLC Bookmark Studio (called bm4vlc up to 0.3.1). Previous
 versions are kept in [`archive/`](archive/) and tagged in git
 (`vlc-bookmark-studio-v<version>`; `bm4vlc-v<version>` up to 0.3.1).
 
+## 0.9.0 — 2026-10-03
+
+### Changed
+
+- **License: proprietary pre-release** (the project's own LICENSE) until the final
+  version, which will be open source. 0.1.0-0.8.0 were published under the GNU GPL v3
+  (the repository's LICENSE) and stay under it; the packaged builds now carry the
+  project's LICENSE, and the third-party notices say so.
+- **A looping bookmark fades in at its first start and out before the end of its last
+  pass only** -- not on every pass (as Extract fades the whole file). A Forever loop has
+  no last pass, so no fade-out; Loop switched off or a Repeat count reached during a
+  pass makes it the last.
+- **The window widens for the bookmark list's columns** -- when it opens with its
+  bookmarks and when a column is shown: the list gets all the new room, the side tab
+  keeps the width the user gave it (only ever wider, never past the screen; a window
+  narrowed afterwards stays so).
+- **A bookmark the song plays through shows orange** in the bookmark list while the red
+  line crosses its range -- a song playing from the playlist, not a bookmark (that one
+  is green); overlapping bookmarks light up together, and one further down the list is
+  scrolled into view without changing the selection.
+- **The playlist is in a Source Playlist tab** -- Follow currently playing VLC song,
+  the filter and the player's playlist (orange when selected, like the other tabs);
+  Launch VLC..., Quit and the connection stay above it.
+- **A song played from the playlist clears the last bookmark's highlight** (yellow in
+  the playlist, on the waveform and in the bookmark list) -- a double-click, a song
+  picked and ▶, or next / previous track: the whole song plays, no bookmark. A plain ▶
+  resuming the same song keeps it.
+- **Your volume stays yours across songs and bookmarks**: playing a bookmark no longer
+  raises a level below 85 %; only a bookmark's fades (and you) move it. Playing with
+  the volume at 0 -- a VLC this app launches starts muted -- starts at the Reset level
+  (Volume & EQ tab), for songs too (Play, a double-click in the playlist, next/previous
+  track).
+
+- **The playback buttons moved beside the waveform**, into a Playback group above View:
+  the position and song length, the buttons in a compact grid, and the volume readout.
+  The row above the waveform is gone; the waveform has the full height.
+- **🔁 Loop** joined the playback buttons: it loops the bookmark selected in the list
+  (enabled when one bookmark with a range is selected). The Play and Loop buttons beside
+  the list are gone -- a double-click on a row plays the bookmark.
+- **The Bookmark settings tab is now "Bookmark Studio"**, and holds at its top, above
+  the name: **Bookmark selection**, and the selection's **▶ Selection** (play/loop it)
+  and **✕ Clear** (all three were beside the waveform).
+- **Bookmark now is gone**: it did what Bookmark selection does, or made a point
+  bookmark at the playhead -- that one is in the Bookmark menu (Ctrl+Shift+B).
+- **New bookmarks go to the top of the bookmark list** (they were sorted in by start
+  time).
+- **Delete** is below **Save...** (and Extract...) beside the list.
+- **⏮ / ⏭ (previous / next bookmark) step through the bookmark list**, across songs,
+  counting from the bookmark playing (else the selected row; with neither, from the top
+  or the bottom): they play the bookmark with its own settings, green, and select it, so
+  the Bookmark Studio tab shows it. They used to seek to the song's own bookmarks by
+  position, without playing or showing them.
+- **Max** raises the volume to **125 %**, the fader's top (it stopped at 100 %).
+- **A bookmark saved while its range plays loops from there**: the pass playing counts
+  as its first, then its Repeat count, fades and After loop apply as when it is played
+  -- whether the song was simply playing (the main Play) or the selection was looping
+  (its count starts at the save; the selection's passes don't count).
+
+### New
+
+- **After Loop column** in the bookmark list, next to Loop, with the same choices as in
+  the Bookmark settings tab (editable in place, undoable). A column layout saved by
+  0.7.0-0.8.0 keeps its order; the new column goes next to Loop.
+- **The selected tab is orange** (Bookmark Studio / Volume & EQ, and Bookmarks), the
+  orange of the "saved" flash.
+- **A selection playing with ▶ Selection is green**, its song in the playlist too, like
+  a playing bookmark -- and yellow once it has played.
+- **Extract...** (beside the list, between Save... and Delete; Bookmark menu, Ctrl+E):
+  the selected bookmarks saved as audio files of their own, to a folder you choose,
+  named `<song> - <bookmark> - <start> to <end>.<ext>` after the song's file -- in MP3,
+  Ogg Vorbis, Opus, FLAC or WAV, with a choice of quality. As each bookmark is set up
+  in Bookmark Studio (both on to begin with; the list says what each file gets): its
+  **loops** -- its Repeat count, its gap as silence between, `x3` in the file name
+  ("Forever" has no count: once) -- and its **fades** over the whole file, in at its
+  very start and out at its very end, however often it repeats. Each file keeps the
+  song's tags -- including Ogg/Opus stream tags -- and its cover (MP3, FLAC), is titled
+  after the bookmark, and names VLC Bookmark Studio (encoded-by tag and comment). FFmpeg
+  cuts them in the background (Cancel stops it); a file is never overwritten, a failed
+  or cancelled one leaves nothing behind, point bookmarks are skipped, and only the
+  formats the FFmpeg in use can write are offered. The folder, format, quality and
+  options are kept for next time.
+- **Duplicate** (beside the list, above Save...; Bookmark menu, Ctrl+D): copies of the
+  selected bookmarks -- the same settings, tags and notes, each with a new random name
+  no other bookmark has -- at the top of the list, selected; one Undo takes them back.
+- **BPM** (Volume & EQ tab, between the volume buttons and the equalizer): a fader
+  that plays up to 50 BPM faster or slower than its middle, in steps of 5; VLC keeps
+  the pitch. Beside it, **BPM Skew** (how far what plays is from the detected BPM, e.g.
+  +10; red unless 0), **Current BPM** (what plays) and **Detected BPM** -- the song's
+  own, estimated from its waveform (good to a BPM on music with a beat); a double-click
+  puts it right by hand. Only for playing -- not saved, not part of a bookmark; the
+  player goes back to normal speed on quitting. A loop's pass is timed anew when the
+  tempo changes, and another song plays the change from its own BPM.
+- **BPM on/off switch** beside the panel's title: off (as it starts the first time),
+  the song plays at its own tempo and the panel is greyed out, so nothing changes
+  playback by accident; on, the tempo set plays again. Remembered.
+- **A bookmark moved on to plays at its song's detected BPM** -- After loop Next /
+  Previous Bookmark, ⏮ / ⏭: BPM Skew back to 0.
+- **Align skew** (above the BPM fader): what plays now becomes the fader's middle,
+  with nothing to hear -- the fader has its full 50 either way from there. While its
+  middle isn't the detected BPM, the button and the fader's 0 mark are red.
+- **BPM buttons**, stacked beside the fader with Reset level with its 0:
+  **Increase** and **Lower** (a **Step** faster or slower, 5 BPM to begin with) and
+  **Reset** (back to the detected BPM, the skew cancelled), each gliding there over the
+  **Glide** time while something plays (2000 ms to begin with; at once otherwise). A
+  glide changes the rate in small steps that VLC plays straight through: checked on
+  VLC's own output, no gap. Step and Glide are remembered.
+- **Extract: your own tags** -- name and value, any number -- written into every file,
+  over the song's; remembered for next time.
+- **Extract: file names every common file system can store.** A name with symbols
+  such as emoji, characters Windows forbids, a reserved or overlong name, or accents in
+  a form macOS and Windows disagree on, is replaced by one that starts with the
+  bookmark's own (random, unique) name and keeps what can be kept of the song's.
+- **Help > GitHub Repository, Help > License**, and About naming the owner (Elie
+  Koivunen), the developers (Elie Koivunen and Claude) and the repository.
+- **Columns menu**: right-click a column title of the bookmark list -- or of the
+  source playlist -- to tick which columns show, move the one clicked left or right,
+  open **Arrange Columns...** (tick and drag them into order) or **Restore Default
+  Columns**. Kept with the window layout.
+
+### Fixed
+
+- **The bookmark list's dropdowns were as narrow as their column**, cutting off the
+  choices (After Loop's "Previous Bookmark", say). They are as wide as their longest
+  choice now.
+- **The volume fader didn't move during a fade.** It now follows a bookmark's fade-in
+  and fade-out as they raise and lower the volume, and returns to your level after.
+  (The status polls during a fade predate the fade's own volume changes, so they were
+  rightly ignored -- and nothing else told the fader.)
+- **After loop: Next Bookmark went nowhere when the next bookmark was in another song**
+  (or when the bookmark was the last of its song): playback went on in the same song.
+  Next / Previous Bookmark looked only at the same song's bookmarks, by start time. They
+  now follow the bookmark list -- its order, across the playlist's songs -- and play the
+  bookmark below / above with its own settings; past the end of the list, playback goes
+  on. The bookmark it moves on to is selected in the list, so the Bookmark Studio tab
+  shows its settings (unless a new bookmark is being set up there).
+- **Bookmark selection while the selection played stopped the playback.** Clearing the
+  bookmarked selection stopped its loop. The new bookmark now takes the loop over: it
+  keeps playing, green in all three places, with the settings set up in the tab. And a
+  bookmark made while the song simply plays through it (the main Play) is green at once.
+- **Play didn't play the song picked in the playlist**: a single click shows a song
+  without playing it, and Play then resumed the song VLC was on -- so the red line
+  didn't move on the waveform. Play now switches to the song on screen first.
+- **Typing into Fade in / Fade out (and Gap, Repeat) needed "Off" deleted first.** A
+  click into those fields selects their text, so typing replaces it.
+- **Moving on to a bookmark with a fade-in could leave the volume at 0.** A status
+  poll that saw the volume at 0 -- the previous bookmark's fade-out, or the fade-in's
+  own start -- while the change back was still on its way became "your level", and the
+  fade-in then rose to 0. Polls are now ignored while a volume change is on its way or
+  was sampled before it landed, and a fade-in owns the volume from the moment it starts.
+- **An error at every quit**: the undo stack, clearing itself as the window was
+  destroyed, redrew the window after its waveform was gone. It is unhooked when the
+  session ends.
+
 ## 0.8.0 — 2026-10-01
 
 ### New

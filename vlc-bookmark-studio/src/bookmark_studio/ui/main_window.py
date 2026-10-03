@@ -1,16 +1,20 @@
 """MainWindow: menu bar, QSplitter panel layout, active-context breadcrumb (spec #7-#8)."""
 from __future__ import annotations
 
+from dataclasses import replace
 from uuid import UUID, uuid4
 
-from PySide6.QtCore import QByteArray, QEvent, QObject, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QKeySequence, QShortcut, QUndoStack
+from PySide6.QtCore import QByteArray, QEvent, QObject, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut, QUndoStack
 from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSplitter,
@@ -19,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from bookmark_studio.about import COPYRIGHT, DEVELOPERS, LICENSE_SUMMARY, OWNER, REPOSITORY_URL, license_text
 from bookmark_studio.app.commands import (
     ChangeLoopCommand,
     CreateBookmarkCommand,
@@ -28,7 +33,7 @@ from bookmark_studio.app.commands import (
     RenameBookmarkCommand,
     ResizeBookmarkCommand,
 )
-from bookmark_studio.domain.bookmark import Bookmark, default_bookmark_name
+from bookmark_studio.domain.bookmark import Bookmark, default_bookmark_name, unique_bookmark_name
 from bookmark_studio.domain.enums import BookmarkScope, BookmarkType, CompletionAction
 from bookmark_studio.domain.equalizer import EqualizerSettings
 from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
@@ -36,9 +41,11 @@ from bookmark_studio.persistence.tag_repository import TagRepository
 from bookmark_studio.ui.bookmark_panel import BookmarkPanel
 from bookmark_studio.ui.branding import APP_NAME, app_icon, logo_pixmap
 from bookmark_studio.ui.deck_fader import VolumeStrip, level_to_percent
+from bookmark_studio.ui.dialogs.extract_dialog import ExtractDialog
 from bookmark_studio.ui.dialogs.tag_catalog_dialog import TagCatalogDialog
 from bookmark_studio.ui.inspector import BookmarkInspector
 from bookmark_studio.ui.playlist_panel import PlaylistPanel
+from bookmark_studio.ui.qt_helpers import style_tabs
 from bookmark_studio.ui.transport import TransportBar
 from bookmark_studio.ui.volume_eq_panel import VolumeEqPanel
 from bookmark_studio.ui.waveform.scene import WaveformScene
@@ -87,6 +94,14 @@ class MainWindow(QMainWindow):
     volume_levels_changed = Signal(int, int)  # Normalize %, Reset %
     volume_ramp_times_changed = Signal(int, int)  # Max ms, Mute ms
     equalizer_glide_ms_changed = Signal(int)  # how long a preset change takes
+    tempo_changed = Signal(int)  # the BPM fader: the change from its middle
+    detected_bpm_corrected = Signal(float)  # the user's correction of the playing song's BPM
+    tempo_align_skew_requested = Signal()
+    tempo_increase_requested = Signal()
+    tempo_reset_requested = Signal()
+    tempo_lower_requested = Signal()
+    tempo_buttons_changed = Signal(object)  # TempoButtons (Step, Glide)
+    tempo_switched = Signal(bool)  # the BPM panel's on/off switch
     quit_requested = Signal()  # Quit button / File > Quit / Ctrl+Q
 
     # Player controls
@@ -101,6 +116,10 @@ class MainWindow(QMainWindow):
 
     # Waveform / playlist
     waveform_selection_changed = Signal(object)  # Selection | None
+    # A bookmark was just made from the waveform's selection (before the selection is
+    # cleared): a selection playing right now carries on as that bookmark.
+    selection_bookmarked = Signal(object)  # bookmark id
+    extract_bookmarks_requested = Signal(list)  # bookmark ids (Extract...)
     playlist_item_selected = Signal(int)  # vlc_id -- previewed, not played
     playlist_item_double_clicked = Signal(int)  # vlc_id -- play it
     follow_player_toggled = Signal(bool)
@@ -125,6 +144,11 @@ class MainWindow(QMainWindow):
         # push(), whose callers refresh precisely themselves.
         self._pushing = False
         self._undo_stack.indexChanged.connect(self._on_undo_index_changed)
+        # The bookmark list's columns were given room as the window opened (see
+        # _on_bookmark_columns_changed).
+        self._bookmark_columns_fitted = False
+        self._bookmark_fit_pending = False
+        self._tab_width_to_keep: int | None = None
 
         self._logo = QLabel(self)
         self._logo.setPixmap(logo_pixmap(28))
@@ -214,9 +238,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._selection_duration_label)
 
     def _build_tool_column(self) -> None:
-        """View, bookmark and selection buttons in a column beside the waveform, grouped
-        (spec #37's selection actions: a persistent control that enables when a
-        selection exists, not a floating popup)."""
+        """The column beside the waveform, top to bottom: the selection readout, the
+        Playback group (time, playback buttons with 🔁, volume), and View (zoom). Bookmark
+        selection and the selection's Play / Clear are in the Bookmark Studio tab (0.9.0). The selection's buttons are a persistent control that enables
+        when a selection exists (spec #37), not a floating popup."""
         self._tool_column = QWidget(self)
         layout = QVBoxLayout(self._tool_column)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -236,6 +261,9 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self._selection_bar)
 
+        heading("PLAYBACK")
+        layout.addWidget(self._transport)
+
         # Visible zoom buttons: Ctrl+wheel/Ctrl+0 (spec #84) alone are too easy to miss.
         heading("VIEW")
         zoom_row = QHBoxLayout()
@@ -250,28 +278,17 @@ class MainWindow(QMainWindow):
         self._zoom_fit_button = button("Fit", "Show the whole song (Ctrl+0)", self._waveform_view.fit_entire_media)
         layout.addWidget(self._zoom_fit_button)
 
-        # Bookmark now is always enabled: it bookmarks the drag-selection when there is
-        # one (like Bookmark selection), otherwise the playhead position.
-        heading("BOOKMARK")
-        self._bookmark_now_button = button(
-            "Bookmark now", "Bookmark the selection, or the playhead position if nothing is selected",
-            self._on_bookmark_now_clicked,
-        )
-        layout.addWidget(self._bookmark_now_button)
-        self._bookmark_selection_button = button(
-            "Bookmark selection", "Bookmark the selection (Ctrl+B)", self._on_bookmark_selection_clicked,
-        )
-        layout.addWidget(self._bookmark_selection_button)
-
-        # "Play selection" loops the selection, like a new bookmark (loop on by default).
-        heading("SELECTION")
-        self._loop_selection_button = button("Play selection", "Loop the selection", self._on_loop_selection_clicked)
-        layout.addWidget(self._loop_selection_button)
-        self._clear_selection_button = button(
-            "Clear selection", "Remove the selection", lambda: self._waveform_scene.clear_selection(),
-        )
-        layout.addWidget(self._clear_selection_button)
         layout.addStretch(1)
+
+        # In the Bookmark Studio tab, above the name (no "Bookmark now" since 0.9.0: it did
+        # what Bookmark selection does, or a point bookmark -- Bookmark menu). The
+        # selection's Play loops it, like a new bookmark.
+        self._bookmark_selection_button = self._inspector.bookmark_selection_button
+        self._bookmark_selection_button.clicked.connect(self._on_bookmark_selection_clicked)
+        self._loop_selection_button = self._inspector.play_selection_button
+        self._loop_selection_button.clicked.connect(self._on_loop_selection_clicked)
+        self._clear_selection_button = self._inspector.clear_selection_button
+        self._clear_selection_button.clicked.connect(lambda: self._waveform_scene.clear_selection())
 
         self._set_selection_buttons_enabled(False)
 
@@ -282,13 +299,12 @@ class MainWindow(QMainWindow):
             button.setEnabled(enabled)
 
     def _build_layout(self) -> None:
-        # The deck: the transport above the waveform, the tool column (selection readout,
-        # view, bookmark and selection buttons) beside it.
+        # The deck: the waveform at full height, the tool column (selection readout,
+        # Playback, View) beside it.
         deck = QWidget(self)
         deck_layout = QVBoxLayout(deck)
         deck_layout.setContentsMargins(0, 0, 0, 0)
         deck_layout.setSpacing(4)
-        deck_layout.addWidget(self._transport)
         waveform_row = QHBoxLayout()
         waveform_row.setSpacing(6)
         waveform_row.addWidget(self._waveform_view, 1)
@@ -304,9 +320,12 @@ class MainWindow(QMainWindow):
         # volume and equalizer. Scroll areas keep a short window usable.
         self._side_tabs = QTabWidget(self)
         self._side_tabs.setDocumentMode(True)
-        self._side_tabs.addTab(_scrolling(self._inspector), "Bookmark settings")
+        self._side_tabs.addTab(_scrolling(self._inspector), "Bookmark Studio")
         self._side_tabs.addTab(_scrolling(self._volume_eq), "Volume && EQ")
-        self._side_tabs.setTabToolTip(0, "The selected bookmark's settings, or a new one's for a selection")
+        style_tabs(self._side_tabs)
+        self._side_tabs.setTabToolTip(
+            0, "New bookmarks, the selection, and the selected bookmark's settings (or a new one's)",
+        )
         self._side_tabs.setTabToolTip(1, "The player's volume and equalizer")
 
         bottom_splitter = QSplitter(Qt.Orientation.Horizontal, self)
@@ -351,9 +370,84 @@ class MainWindow(QMainWindow):
         self._fit_minimum_size()
         super().showEvent(event)
         self._schedule_side_tab_fit()
+        self._schedule_bookmark_fit()
+
+    def _screen_rect(self):  # noqa: ANN202 - QRect | None
+        """The room the screen has for the window (None: not known)."""
+        return self.screen().availableGeometry() if self.screen() is not None else None
+
+    def _grow_window(self, extra_width: int, extra_height: int) -> None:
+        """Wider / taller by that much, as far as the screen allows; never smaller than now,
+        and kept on the screen."""
+        screen = self._screen_rect()
+        width = self.width() + max(0, extra_width)
+        height = self.height() + max(0, extra_height)
+        if screen is not None:
+            width = max(self.width(), min(width, screen.width()))
+            height = max(self.height(), min(height, screen.height()))
+        self.resize(width, height)
+        if screen is not None:
+            frame = self.frameGeometry()
+            dx = min(0, screen.right() - frame.right())
+            dy = min(0, screen.bottom() - frame.bottom())
+            if dx or dy:
+                self.move(max(screen.left(), frame.left() + dx), max(screen.top(), frame.top() + dy))
+
+    # -- room for the bookmark list's columns --
+
+    def _schedule_bookmark_fit(self) -> None:
+        if self.isVisible() and not self._bookmark_fit_pending:  # several changes at once: one fit
+            self._bookmark_fit_pending = True
+            QTimer.singleShot(0, self._fit_bookmark_columns)
+
+    def _on_bookmark_columns_changed(self, by_user: bool) -> None:
+        """Room for the columns when the user shows one, and once as the window opens with
+        its bookmarks -- not at every later reload (a window the user narrowed stays so)."""
+        if by_user or not self._bookmark_columns_fitted:
+            self._schedule_bookmark_fit()
+
+    def _fit_bookmark_columns(self, *, again: bool = True) -> None:
+        """Every column of the bookmark list shown, without scrolling sideways: the window
+        widens (within the screen; only ever wider) and the list gets all the new room --
+        the side tab keeps the width the user gave it."""
+        self._bookmark_fit_pending = False
+        if not self.isVisible():
+            return
+        if self._bookmark_panel.row_count():
+            self._bookmark_columns_fitted = True
+        short = self._bookmark_panel.columns_short_by()
+        if short <= 0 or self.isMaximized() or self.isFullScreen():
+            return
+        bottom = self._splitters["bottom"]
+        if self._tab_width_to_keep is None:  # (still being handed back: the width from before)
+            self._tab_width_to_keep = bottom.sizes()[1]
+        before = self.width()
+        self._grow_window(short, 0)
+        if self.width() > before:
+            # Once the splitter has shared out the new room: all of it to the list.
+            QTimer.singleShot(0, lambda: self._keep_tab_width(again=again))
+        else:
+            self._tab_width_to_keep = None
+
+    def _keep_tab_width(self, *, again: bool = False) -> None:
+        tab_width, self._tab_width_to_keep = self._tab_width_to_keep, None
+        if tab_width is None:
+            return
+        bottom = self._splitters["bottom"]
+        left, right = bottom.sizes()
+        # (Never less than the open tab's page needs -- its own fit may have run meanwhile.)
+        area = self._side_tabs.currentWidget()
+        page = area.widget() if isinstance(area, QScrollArea) else None
+        if isinstance(area, QScrollArea) and page is not None:
+            tab_width = max(tab_width, page.minimumSizeHint().width() + right - area.viewport().width())
+        if right != tab_width:
+            bottom.setSizes([left + right - tab_width, tab_width])
+        if again and self._bookmark_panel.columns_short_by() > 0:
+            # The tab needed some of it back (it was below its page's needs): once more.
+            QTimer.singleShot(0, lambda: self._fit_bookmark_columns(again=False))
 
     def _fit_side_tab(self, *, second_pass: bool = False) -> None:
-        """Makes the open side tab (Bookmark settings, Volume & EQ) fit without scrolling:
+        """Makes the open side tab (Bookmark Studio, Volume & EQ) fit without scrolling:
         first by taking room from the bookmark list and the waveform (down to what they
         need), then by enlarging the window (within the screen). Only ever grows it."""
         area = self._side_tabs.currentWidget()
@@ -383,19 +477,7 @@ class MainWindow(QMainWindow):
                 vertical.setSizes([top - take, low + take])
                 short_h -= take
         if (short_w > 0 or short_h > 0) and not second_pass and not (self.isMaximized() or self.isFullScreen()):
-            screen = self.screen().availableGeometry() if self.screen() is not None else None
-            width = self.width() + max(0, short_w)
-            height = self.height() + max(0, short_h)
-            if screen is not None:  # as far as the screen allows -- never smaller than now
-                width = max(self.width(), min(width, screen.width()))
-                height = max(self.height(), min(height, screen.height()))
-            self.resize(width, height)
-            if screen is not None:  # keep it on the screen
-                frame = self.frameGeometry()
-                dx = min(0, screen.right() - frame.right())
-                dy = min(0, screen.bottom() - frame.bottom())
-                if dx or dy:
-                    self.move(max(screen.left(), frame.left() + dx), max(screen.top(), frame.top() + dy))
+            self._grow_window(short_w, short_h)
             # The splitters shared the new room; hand it to the tab once settled.
             QTimer.singleShot(0, lambda: self._fit_side_tab(second_pass=True))
 
@@ -450,6 +532,12 @@ class MainWindow(QMainWindow):
         point_action = bookmark_menu.addAction("Point Bookmark at Playhead")
         point_action.setShortcut("Ctrl+Shift+B")
         point_action.triggered.connect(lambda: self._on_point_bookmark_requested(self._playhead_time_us()))
+        duplicate_action = bookmark_menu.addAction("Duplicate Selected Bookmarks")
+        duplicate_action.setShortcut("Ctrl+D")
+        duplicate_action.triggered.connect(self._bookmark_panel.request_duplicate)
+        extract_action = bookmark_menu.addAction("Extract Audio of Selected Bookmarks...")
+        extract_action.setShortcut("Ctrl+E")
+        extract_action.triggered.connect(self._bookmark_panel.request_extract)
         rename_action = bookmark_menu.addAction("Rename Selected Bookmark")
         rename_action.setShortcut("F2")
         rename_action.triggered.connect(self._on_rename_shortcut)
@@ -480,7 +568,13 @@ class MainWindow(QMainWindow):
         diagnostics_action.triggered.connect(self._on_show_diagnostics)
 
         help_menu = menu_bar.addMenu("Help")
-        about_action = help_menu.addAction("About")
+        repository_action = help_menu.addAction("GitHub Repository")
+        repository_action.setToolTip(REPOSITORY_URL)
+        repository_action.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(REPOSITORY_URL)))
+        license_action = help_menu.addAction("License")
+        license_action.triggered.connect(self._on_show_license)
+        help_menu.addSeparator()
+        about_action = help_menu.addAction(f"About {APP_NAME}")
         about_action.triggered.connect(self._on_show_about)
 
     def _build_shortcuts(self) -> None:
@@ -500,6 +594,9 @@ class MainWindow(QMainWindow):
 
         self._bookmark_panel.bookmark_selected.connect(self._on_bookmark_activated)
         self._bookmark_panel.export_requested.connect(self._on_export_project)
+        self._bookmark_panel.extract_requested.connect(self.extract_bookmarks_requested.emit)
+        self._bookmark_panel.duplicate_requested.connect(self._on_duplicate_requested)
+        self._bookmark_panel.columns_changed.connect(self._on_bookmark_columns_changed)
         self._bookmark_panel.play_bookmark_requested.connect(self.play_bookmark_requested.emit)
         self._bookmark_panel.loop_bookmark_requested.connect(self.loop_bookmark_requested.emit)
         self._bookmark_panel.delete_bookmark_requested.connect(self._on_delete_bookmark_requested)
@@ -508,6 +605,10 @@ class MainWindow(QMainWindow):
         self._bookmark_panel.gap_edited.connect(self._on_bookmark_panel_gap_edited)
         self._bookmark_panel.fade_in_edited.connect(self._on_bookmark_panel_fade_in_edited)
         self._bookmark_panel.fade_out_edited.connect(self._on_bookmark_panel_fade_out_edited)
+        self._bookmark_panel.completion_edited.connect(self._on_bookmark_panel_completion_edited)
+        # The 🔁 among the playback buttons loops the bookmark selected in the list.
+        self._bookmark_panel.loop_target_changed.connect(self._transport.set_loop_target)
+        self._transport.loop_bookmark_clicked.connect(self._bookmark_panel.loop_selected)
 
         self._inspector.name_committed.connect(self._on_name_committed)
         self._inspector.loop_settings_committed.connect(self._on_loop_settings_committed)
@@ -545,6 +646,15 @@ class MainWindow(QMainWindow):
         self._volume_eq.levels_changed.connect(self.volume_levels_changed.emit)
         self._volume_eq.ramp_times_changed.connect(self.volume_ramp_times_changed.emit)
         self._volume_eq.glide_ms_changed.connect(self.equalizer_glide_ms_changed.emit)
+        tempo = self._volume_eq.tempo_panel
+        tempo.fader_moved.connect(self.tempo_changed.emit)
+        tempo.detected_bpm_corrected.connect(self.detected_bpm_corrected.emit)
+        tempo.align_skew_requested.connect(self.tempo_align_skew_requested.emit)
+        tempo.increase_requested.connect(self.tempo_increase_requested.emit)
+        tempo.reset_requested.connect(self.tempo_reset_requested.emit)
+        tempo.lower_requested.connect(self.tempo_lower_requested.emit)
+        tempo.buttons_changed.connect(self.tempo_buttons_changed.emit)
+        tempo.switched.connect(self.tempo_switched.emit)
         self._transport.volume_clicked.connect(self._on_volume_readout_clicked)
         self._playlist_panel.item_selected.connect(self.playlist_item_selected.emit)
         self._playlist_panel.item_double_clicked.connect(self.playlist_item_double_clicked.emit)
@@ -655,7 +765,9 @@ class MainWindow(QMainWindow):
         for name, splitter in self._splitters.items():
             settings.set_splitter_state(name, splitter.saveState())
         settings.set_panel_tab("side", self._side_tabs.currentIndex())
-        settings.set_header_state("bookmarks", self._bookmark_panel.header_state())
+        settings.set_header_state("bookmarks", self._bookmark_panel.header_state(),
+                                  columns=self._bookmark_panel.column_count())
+        settings.set_header_state("playlist", self._playlist_panel.header_state())
 
     def restore_layout(self, settings) -> None:  # noqa: ANN001
         # The final minimum first: a saved size below it would otherwise be widened after
@@ -673,7 +785,14 @@ class MainWindow(QMainWindow):
             self._side_tabs.setCurrentIndex(tab)
         columns = settings.header_state("bookmarks")
         if isinstance(columns, QByteArray) and not columns.isEmpty():
-            self._bookmark_panel.restore_header_state(columns)
+            saved_columns = settings.header_columns("bookmarks")
+            if saved_columns is None:
+                self._bookmark_panel.restore_header_state(columns)  # 0.7.0-0.8.0: 9 columns
+            else:
+                self._bookmark_panel.restore_header_state(columns, saved_columns=saved_columns)
+        playlist_columns = settings.header_state("playlist")
+        if isinstance(playlist_columns, QByteArray) and not playlist_columns.isEmpty():
+            self._playlist_panel.restore_header_state(playlist_columns)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
         # Closing the window is quitting too: keep what is being typed.
@@ -692,6 +811,26 @@ class MainWindow(QMainWindow):
         self._waveform_scene.set_bookmark_playback(bookmark_id, state)
         self._bookmark_panel.set_bookmark_playback(bookmark_id, state)
         self._playlist_panel.set_bookmark_song(song_vlc_id, state)
+
+    def show_bookmark_crossing(self, bookmark_ids: frozenset[UUID]) -> None:
+        """The bookmarks the playhead is crossing while a song plays (orange in the list)."""
+        self._bookmark_panel.set_crossing(bookmark_ids)
+
+    def show_tempo(self, detected: float | None, skew: float, change: float) -> None:
+        """The BPM panel: the song's detected BPM (None: not detected), where the fader's
+        middle is (the skew) and what plays (the change), both from the detected BPM."""
+        self._volume_eq.tempo_panel.show_tempo(detected, skew, change)
+
+    def show_tempo_buttons(self, buttons) -> None:  # noqa: ANN001 - TempoButtons
+        self._volume_eq.tempo_panel.set_buttons(buttons)
+
+    def show_tempo_enabled(self, enabled: bool) -> None:
+        self._volume_eq.tempo_panel.set_tempo_enabled(enabled)
+
+    def show_selection_playback(self, state: str | None) -> None:
+        """The waveform's selection looping ("playing": green) or looped ("done":
+        yellow); None: neither."""
+        self._waveform_scene.set_selection_playback(state)
 
     def set_playhead(self, time_us: int, *, follow: bool = True) -> None:
         self._waveform_scene.set_playhead_time_us(time_us)
@@ -781,7 +920,7 @@ class MainWindow(QMainWindow):
             self._selection_end_label.setText("--:--:--.---")
             self._selection_duration_label.setText("")
             self._set_selection_buttons_enabled(False)
-        # A selection is a new bookmark in the making: the Bookmark settings tab becomes
+        # A selection is a new bookmark in the making: the Bookmark Studio tab becomes
         # its form (Apply saves it). Without one, the form goes away.
         if isinstance(selection, Selection):
             self._show_new_bookmark_form(selection)
@@ -800,7 +939,7 @@ class MainWindow(QMainWindow):
         self._show_new_bookmark_form(Selection(start_us=start_us, end_us=end_us))
 
     def _show_new_bookmark_form(self, selection) -> None:  # noqa: ANN001 - Selection
-        """The Bookmark settings tab as the form for a new bookmark over `selection`. A
+        """The Bookmark Studio tab as the form for a new bookmark over `selection`. A
         bookmark shown there is left first -- its changes are already saved, and what is
         still being typed is saved now -- so nothing is lost by switching."""
         if self._inspector.is_drafting():
@@ -823,7 +962,7 @@ class MainWindow(QMainWindow):
 
     def _on_apply_new_bookmark(self) -> None:
         """Apply (or Enter in the name, or Bookmark selection): saves the new bookmark set
-        up in the Bookmark settings tab, over the waveform's selection."""
+        up in the Bookmark Studio tab, over the waveform's selection."""
         values = self._inspector.draft_values()
         selection = self._waveform_scene.selection()
         if values is None or selection is None or self._current_media_id is None:
@@ -849,12 +988,13 @@ class MainWindow(QMainWindow):
             fade_out_ms=values["fade_out_ms"],
         )
         self._create_bookmark_and_focus_name(bookmark)
+        self.selection_bookmarked.emit(bookmark.id)
         self._waveform_scene.clear_selection()
         self._flash_saved(bookmark.id)
 
     def _flash_saved(self, bookmark_id: UUID) -> None:
         """The orange flash: the bookmark's row in the list, and the name field when the
-        Bookmark settings tab shows it -- the change was saved."""
+        Bookmark Studio tab shows it -- the change was saved."""
         self._bookmark_panel.flash_bookmark(bookmark_id)
         current = self._current_inspected_bookmark()
         if current is not None and current.id == bookmark_id:
@@ -867,18 +1007,12 @@ class MainWindow(QMainWindow):
         self._selection_end_label.setText(format_timecode(end_us))
         self._selection_duration_label.setText(f"length {format_timecode(max(0, end_us - start_us))}")
 
-    def _on_bookmark_now_clicked(self) -> None:
-        if self._waveform_scene.selection() is not None:
-            self._on_bookmark_selection_clicked()
-        else:
-            self._on_point_bookmark_requested(self._playhead_time_us())
-
     def _on_bookmark_selection_clicked(self) -> None:
         selection = self._waveform_scene.selection()
         if selection is None or self._current_media_id is None:
             return
         if self._inspector.is_drafting():
-            # The same as Apply: what was set up in the Bookmark settings tab.
+            # The same as Apply: what was set up in the Bookmark Studio tab.
             self._on_apply_new_bookmark()
             return
         bookmark = Bookmark(
@@ -898,6 +1032,7 @@ class MainWindow(QMainWindow):
             completion_action=CompletionAction.CONTINUE,
         )
         self._create_bookmark_and_focus_name(bookmark)
+        self.selection_bookmarked.emit(bookmark.id)
         self._waveform_scene.clear_selection()
 
     def _on_loop_selection_clicked(self) -> None:
@@ -947,6 +1082,9 @@ class MainWindow(QMainWindow):
         self._create_bookmark_and_focus_name(bookmark)
 
     def _create_bookmark_and_focus_name(self, bookmark: Bookmark) -> None:
+        # New bookmarks go to the top of the list (0.9.0; by start time among the rest
+        # before), above whatever order the user has set.
+        bookmark = replace(bookmark, sort_index=self._top_sort_index())
         self._push(CreateBookmarkCommand(self._bookmark_repository, bookmark))
         self._refresh_bookmarks()
         # spec #46: inline name editor appears immediately after creation, no modal.
@@ -954,6 +1092,73 @@ class MainWindow(QMainWindow):
         self._bookmark_panel.select_bookmark(bookmark.id)
         self._inspector._name_edit.setFocus()
         self._inspector._name_edit.selectAll()
+
+    def _on_duplicate_requested(self, bookmark_ids: list) -> None:
+        """Duplicate: copies of the selected bookmarks -- everything the same but the name,
+        a new random one no other bookmark has -- at the top of the list, in the order they
+        were in; one undo step for them all. The copies are selected (the Bookmark Studio
+        tab shows a single one) and flash orange: saved."""
+        originals = [b for b in (self._bookmark_repository.get(i) for i in bookmark_ids) if b is not None]
+        if not originals:
+            return
+        taken = {b.name for b in self._bookmark_repository.list_all()}
+        top = self._top_sort_index()
+        copies = []
+        for position, original in enumerate(originals):
+            name = unique_bookmark_name(taken)
+            taken.add(name)
+            copies.append(replace(original, id=uuid4(), name=name,
+                                  sort_index=top - len(originals) + 1 + position))
+        self._pushing = True
+        try:
+            plural = "s" if len(copies) != 1 else ""
+            self._undo_stack.beginMacro(f"Duplicate {len(copies)} bookmark{plural}")
+            for copy in copies:
+                self._undo_stack.push(CreateBookmarkCommand(self._bookmark_repository, copy))
+            self._undo_stack.endMacro()
+        finally:
+            self._pushing = False
+        self._refresh_bookmarks()
+        self._bookmark_panel.select_bookmarks({copy.id for copy in copies})
+        if len(copies) == 1:
+            self._load_bookmark_into_inspector(copies[0])
+        for copy in copies:
+            self._bookmark_panel.flash_bookmark(copy.id)
+
+    def _top_sort_index(self) -> int:
+        """A sort_index above every bookmark in the list (the list is sorted by it)."""
+        if self._current_playlist_id is None:
+            return 0
+        listing = self._bookmark_repository.list_for_playlist(self._current_playlist_id)
+        return min((b.sort_index for b in listing), default=1) - 1
+
+    def selected_bookmark_id(self) -> UUID | None:
+        return self._bookmark_panel.selected_bookmark_id()
+
+    def open_extract_dialog(self, jobs, ffmpeg_path: str | None, settings) -> ExtractDialog:  # noqa: ANN001
+        """The Extract audio window for `jobs` (media.extract.ExtractJob), over this one."""
+        dialog = ExtractDialog(jobs, ffmpeg_path, settings, self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._extract_dialog = dialog
+        dialog.open()
+        return dialog
+
+    def end_session(self) -> None:
+        """The session is over (Application.stop): undo/redo can't change anything any
+        more. Without this, the undo stack -- clearing itself as the window is destroyed --
+        redrew a window whose waveform was already gone (an error at every quit)."""
+        try:
+            self._undo_stack.indexChanged.disconnect(self._on_undo_index_changed)
+        except (RuntimeError, TypeError):
+            pass  # already unhooked
+
+    def show_bookmark_in_studio(self, bookmark_id: UUID) -> None:
+        """Selects the bookmark in the list, so the Bookmark Studio tab shows its settings
+        (After loop: Next/Previous Bookmark moved on to it). Not while a new bookmark is
+        being set up there -- that form isn't saved yet."""
+        if self._inspector.is_drafting():
+            return
+        self._bookmark_panel.select_bookmark(bookmark_id)
 
     def _on_bookmark_activated(self, bookmark_id: UUID) -> None:
         bookmark = self._bookmark_repository.get(bookmark_id)
@@ -1118,6 +1323,16 @@ class MainWindow(QMainWindow):
             bookmark, loop_enabled=bookmark.loop_enabled, repeat_count=bookmark.repeat_count,
             gap_ms=bookmark.loop_gap_ms, completion_action=bookmark.completion_action,
             fade_in_ms=fade_in_ms, fade_out_ms=bookmark.fade_out_ms,
+        )
+
+    def _on_bookmark_panel_completion_edited(self, bookmark_id: UUID, action: CompletionAction) -> None:
+        bookmark = self._bookmark_repository.get(bookmark_id)
+        if bookmark is None:
+            return
+        self._push_bookmark_loop_change(
+            bookmark, loop_enabled=bookmark.loop_enabled, repeat_count=bookmark.repeat_count,
+            gap_ms=bookmark.loop_gap_ms, completion_action=action,
+            fade_in_ms=bookmark.fade_in_ms, fade_out_ms=bookmark.fade_out_ms,
         )
 
     def _on_bookmark_panel_fade_out_edited(self, bookmark_id: UUID, fade_out_ms: int) -> None:
@@ -1334,15 +1549,37 @@ class MainWindow(QMainWindow):
         ]
         QMessageBox.information(self, "Diagnostics", "\n".join(lines))
 
-    def _on_show_about(self) -> None:
+    def about_text(self) -> str:
         from bookmark_studio import __version__
 
+        return (
+            f"<h3>{APP_NAME} {__version__}</h3>"
+            "<p>Playlist-aware visual bookmarking and looping for VLC Media Player.</p>"
+            f"<p><b>Owner:</b> {OWNER}<br><b>Developed by:</b> {DEVELOPERS}</p>"
+            f'<p><b>GitHub:</b> <a href="{REPOSITORY_URL}">{REPOSITORY_URL}</a></p>'
+            f"<p>{COPYRIGHT}<br>{LICENSE_SUMMARY}</p>"
+        )
+
+    def _on_show_about(self) -> None:
         box = QMessageBox(self)
         box.setWindowTitle(f"About {APP_NAME}")
         box.setIconPixmap(logo_pixmap(96))
-        box.setText(f"<h3>{APP_NAME} {__version__}</h3>")
-        box.setInformativeText(
-            "Playlist-aware visual bookmarking and looping for VLC Media Player.<br><br>"
-            "Free software under the GNU GPL v3."
-        )
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText(self.about_text())
+        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
         box.exec()
+
+    def _on_show_license(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"{APP_NAME} license")
+        dialog.resize(640, 520)
+        layout = QVBoxLayout(dialog)
+        text = QPlainTextEdit(dialog)
+        text.setReadOnly(True)
+        text.setPlainText(license_text())
+        layout.addWidget(text)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dialog)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        self._license_dialog = dialog
+        dialog.open()

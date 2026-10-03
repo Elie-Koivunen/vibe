@@ -1,5 +1,6 @@
-"""Bookmark Inspector -- the "Bookmark settings" tab: name, start/end, loop settings, fades,
-tags and notes (spec #42). Loop/Repeat/After loop share a row, so do Gap/Fade in/Fade out;
+"""Bookmark Inspector -- the "Bookmark Studio" tab: at the top Bookmark selection and the
+selection's Play / Clear; then name, start/end, loop settings, fades, tags and notes
+(spec #42). Loop/Repeat/After loop share a row, so do Gap/Fade in/Fade out;
 tags are picked from the tag list (TagPicker).
 
 Two modes:
@@ -34,6 +35,7 @@ from bookmark_studio.domain.bookmark import Bookmark, default_bookmark_name
 from bookmark_studio.domain.enums import CompletionAction
 from bookmark_studio.domain.selection import Selection
 from bookmark_studio.domain.timecode import format_timecode, parse_timecode
+from bookmark_studio.ui.qt_helpers import select_all_on_focus
 from bookmark_studio.ui.tag_picker import TagPicker
 from bookmark_studio.ui.transport import TimecodeEdit
 
@@ -107,6 +109,26 @@ class BookmarkInspector(QWidget):
         self._draft = False  # a new bookmark is being set up for the waveform's selection
 
         form = QFormLayout(self)
+
+        # Above the name (0.9.0; beside the waveform before): bookmarking the selection,
+        # and its own Play (it loops the selection) and Clear. MainWindow wires them. (A
+        # point bookmark at the playhead: Bookmark menu, Ctrl+Shift+B.)
+        self.bookmark_selection_button = QPushButton("Bookmark selection", self)
+        self.bookmark_selection_button.setToolTip("Bookmark the selection (Ctrl+B)")
+        self.play_selection_button = QPushButton("▶ Selection", self)
+        self.play_selection_button.setToolTip("Play (loop) the selection")
+        self.clear_selection_button = QPushButton("✕ Clear", self)
+        self.clear_selection_button.setToolTip("Remove the selection")
+        create_row = QWidget(self)
+        create_layout = QHBoxLayout(create_row)
+        create_layout.setContentsMargins(0, 0, 0, 0)
+        create_layout.setSpacing(4)
+        create_layout.addWidget(self.bookmark_selection_button)
+        create_layout.addSpacing(12)
+        create_layout.addWidget(self.play_selection_button)
+        create_layout.addWidget(self.clear_selection_button)
+        create_layout.addStretch(1)
+        form.addRow(create_row)
 
         self._name_edit = QLineEdit(self)
         self._name_edit.editingFinished.connect(self._on_name_committed)
@@ -182,6 +204,8 @@ class BookmarkInspector(QWidget):
         self._fade_out_spin.setSpecialValueText("Off")
         self._fade_out_spin.valueChanged.connect(self._on_loop_settings_changed)
         form.addRow("Gap", _row(self, self._gap_spin, "Fade in", self._fade_in_spin, "Fade out", self._fade_out_spin))
+        # Typing replaces "Off" / "Forever" / the value: no deleting it first.
+        select_all_on_focus(self._repeat_spin, self._gap_spin, self._fade_in_spin, self._fade_out_spin)
 
         # Picked from the tag list, several at once; committed when the list closes.
         self._tags_picker = TagPicker(self)

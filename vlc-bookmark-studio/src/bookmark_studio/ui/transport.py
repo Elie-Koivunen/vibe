@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt, Signal, SignalInstance
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -19,8 +20,8 @@ from PySide6.QtWidgets import (
 from bookmark_studio.domain.timecode import format_timecode as format_timecode  # re-exported
 from bookmark_studio.domain.timecode import parse_timecode as parse_timecode  # re-exported
 
-BUTTON_FONT_POINT_SIZE = 16
-BUTTON_MIN_SIZE = 44
+BUTTON_FONT_POINT_SIZE = 14
+BUTTON_MIN_SIZE = 36
 TIME_FONT_POINT_SIZE = 12
 
 
@@ -175,9 +176,12 @@ class TimecodeEdit(QWidget):
 
 
 class TransportBar(QWidget):
-    """Playback buttons as one centred group -- previous bookmark, previous track, stop,
-    play/pause, next track, next bookmark -- with the volume on the left and the position
-    readout on the right. (Seeking by 5 s is on the Left/Right arrow keys, Playback menu.)"""
+    """The Playback group in the column beside the waveform (0.9.0; above the waveform
+    before): the position and the song's length on top, the playback buttons in a grid --
+    previous bookmark, previous track, stop, play/pause / next track, next bookmark, and
+    🔁 to loop the bookmark selected in the list -- and the volume readout below them (a
+    click opens the Volume & EQ tab). Seeking by 5 s is on the Left/Right arrow keys
+    (Playback menu)."""
 
     previous_bookmark_clicked = Signal()
     previous_track_clicked = Signal()
@@ -185,35 +189,62 @@ class TransportBar(QWidget):
     play_pause_clicked = Signal()
     next_track_clicked = Signal()
     next_bookmark_clicked = Signal()
+    loop_bookmark_clicked = Signal()  # 🔁: loop the bookmark selected in the list
     volume_clicked = Signal()  # the volume readout: opens the Volume & EQ tab
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(8)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
         button_font = QFont()
         button_font.setPointSize(BUTTON_FONT_POINT_SIZE)
 
-        # Equal stretch on both sides keeps the button group centred, whatever the
-        # widths of the volume (left) and time (right) readouts.
-        left = QWidget(self)
-        centre = QWidget(self)
-        right = QWidget(self)
-        group = QHBoxLayout(centre)
-        group.setContentsMargins(0, 0, 0, 0)
-        group.setSpacing(6)
-        volume_side = QHBoxLayout(left)
-        volume_side.setContentsMargins(0, 0, 0, 0)
-        readout = QVBoxLayout(right)
-        readout.setContentsMargins(0, 0, 0, 0)
-        readout.setSpacing(0)
-        layout.addWidget(left, 1)
-        layout.addWidget(centre, 0)
-        layout.addWidget(right, 1)
+        # Read-only: timecodes are edited on bookmarks (Bookmark Studio, the list).
+        time_font = QFont()
+        time_font.setPointSize(TIME_FONT_POINT_SIZE)
+        time_font.setBold(True)
+        self._position_label = QLabel("00:00:00.000", self)
+        self._position_label.setFont(time_font)
+        self._position_label.setToolTip("Playback position")
+        layout.addWidget(self._position_label)
+        self._duration_label = QLabel("/ 00:00:00.000", self)
+        self._duration_label.setToolTip("Length of the song")
+        layout.addWidget(self._duration_label)
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 2, 0, 0)
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(4)
+        layout.addLayout(grid)
+
+        def add_button(text: str, signal: SignalInstance, row: int, column: int, *, tooltip: str) -> QPushButton:
+            button = QPushButton(text, self)
+            button.setFont(button_font)
+            # Never narrower than its symbols (a squeezed "▶ ⏸" spilled out of its button).
+            text_width = button.fontMetrics().horizontalAdvance(text) + 16
+            # ... and no wider either: the style's usual button width would widen the
+            # column beside the waveform (and narrow the waveform) for nothing.
+            button.setFixedSize(max(BUTTON_MIN_SIZE, text_width), BUTTON_MIN_SIZE)
+            button.setToolTip(tooltip)
+            button.clicked.connect(signal.emit)
+            grid.addWidget(button, row, column)
+            return button
+
+        self.previous_bookmark_button = add_button("⏮", self.previous_bookmark_clicked, 0, 0, tooltip="Previous bookmark")
+        self.previous_track_button = add_button("⏪", self.previous_track_clicked, 0, 1, tooltip="Previous track")
+        self.stop_button = add_button("⏹", self.stop_clicked, 0, 2, tooltip="Stop")
+        self.play_pause_button = add_button("▶ ⏸", self.play_pause_clicked, 0, 3, tooltip="Play / Pause (Space)")
+        self.next_track_button = add_button("⏩", self.next_track_clicked, 1, 0, tooltip="Next track")
+        self.next_bookmark_button = add_button("⏭", self.next_bookmark_clicked, 1, 1, tooltip="Next bookmark")
+        self.loop_bookmark_button = add_button(
+            "🔁", self.loop_bookmark_clicked, 1, 2,
+            tooltip="Loop the bookmark selected in the list, with its own loop settings",
+        )
+        self.loop_bookmark_button.setEnabled(False)  # until one bookmark with a range is selected
 
         # Always visible, whichever tab is open below; a click opens Volume & EQ.
-        self.volume_button = QToolButton(left)
+        self.volume_button = QToolButton(self)
         self.volume_button.setAutoRaise(True)
         self.volume_button.setToolTip("Player volume -- click for Volume & EQ")
         self.volume_button.clicked.connect(self.volume_clicked.emit)
@@ -223,51 +254,15 @@ class TransportBar(QWidget):
         self.volume_button.setText("VOL 125 %")
         self.volume_button.setMinimumWidth(self.volume_button.sizeHint().width())
         self.set_volume_percent(100)
-        volume_side.addWidget(self.volume_button)
-        volume_side.addStretch(1)
-
-        def add_button(text: str, signal: SignalInstance, *, tooltip: str) -> QPushButton:
-            button = QPushButton(text, centre)
-            button.setFont(button_font)
-            # Never narrower than its symbols (a squeezed "▶ ⏸" spilled out of its button).
-            text_width = button.fontMetrics().horizontalAdvance(text) + 16
-            button.setMinimumSize(max(BUTTON_MIN_SIZE, text_width), BUTTON_MIN_SIZE)
-            button.setToolTip(tooltip)
-            button.clicked.connect(signal.emit)
-            group.addWidget(button)
-            return button
-
-        self.previous_bookmark_button = add_button("⏮", self.previous_bookmark_clicked, tooltip="Previous bookmark")
-        self.previous_track_button = add_button("⏪", self.previous_track_clicked, tooltip="Previous track")
-        self.stop_button = add_button("⏹", self.stop_clicked, tooltip="Stop")
-        self.play_pause_button = add_button("▶ ⏸", self.play_pause_clicked, tooltip="Play / Pause (Space)")
-        self.next_track_button = add_button("⏩", self.next_track_clicked, tooltip="Next track")
-        self.next_bookmark_button = add_button("⏭", self.next_bookmark_clicked, tooltip="Next bookmark")
-
-        # Read-only: timecodes are edited on bookmarks (Inspector, bookmark list). Two
-        # lines (position over length) keep the row narrow enough to sit above the
-        # waveform beside the playlist.
-        time_font = QFont()
-        time_font.setPointSize(TIME_FONT_POINT_SIZE)
-        time_font.setBold(True)
-        self._position_label = QLabel("00:00:00.000", right)
-        self._position_label.setFont(time_font)
-        self._position_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._position_label.setToolTip("Playback position")
-        readout.addWidget(self._position_label)
-        self._duration_label = QLabel("/ 00:00:00.000", right)
-        self._duration_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._duration_label.setToolTip("Length of the song")
-        readout.addWidget(self._duration_label)
-        # Both sides get the wider side's width as their minimum, so equal stretch
-        # really centres the buttons.
-        side_width = max(left.sizeHint().width(), right.sizeHint().width())
-        left.setMinimumWidth(side_width)
-        right.setMinimumWidth(side_width)
+        layout.addWidget(self.volume_button, 0, Qt.AlignmentFlag.AlignLeft)
 
         # Disabled until a player is connected, so a click can't silently do nothing.
         # MainWindow.set_connected() drives this and PlaylistPanel's indicator together.
         self.set_transport_enabled(False)
+
+    def set_loop_target(self, bookmark_id: object) -> None:
+        """The bookmark the 🔁 would loop (BookmarkPanel.loop_target_changed), or None."""
+        self.loop_bookmark_button.setEnabled(bookmark_id is not None)
 
     def set_time(self, position_us: int, duration_us: int | None) -> None:
         self._position_label.setText(format_timecode(position_us))

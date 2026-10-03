@@ -183,3 +183,23 @@ def test_live_libvlc_equalizer(player) -> None:
     adapter.set_equalizer(EqualizerSettings.from_preset("Rock").with_band(0, -20.0))
     adapter.set_equalizer(EqualizerSettings(enabled=False))
     _wait(lambda: adapter.get_status().time_us > 0)  # still playing after all of it
+
+
+def test_live_libvlc_tempo(player) -> None:
+    """0.9.0's Tempo fader: the in-app player plays faster or slower (VLC keeps the pitch)."""
+    adapter, items = player
+    adapter.goto_item(items[1].vlc_id)
+    _wait(lambda: adapter.get_status().state == "playing", timeout=5)
+    adapter.set_rate(1.5)
+    _wait(lambda: abs(adapter.get_status().rate - 1.5) < 0.01, timeout=5)
+    # Measured once VLC has settled: right after a change its clock resyncs (the position
+    # can jump), and libVLC's time moves in coarse steps -- a short window right away read
+    # 1.79 once in 10 runs.
+    time.sleep(1.0)
+    start_time, start_clock = adapter.get_status().time_us, time.monotonic()
+    time.sleep(2.5)
+    advanced = (adapter.get_status().time_us - start_time) / ((time.monotonic() - start_clock) * 1_000_000)
+    assert 1.3 < advanced < 1.7, advanced
+    adapter.set_rate(1.0)
+    _wait(lambda: abs(adapter.get_status().rate - 1.0) < 0.01, timeout=5)
+    adapter.stop()

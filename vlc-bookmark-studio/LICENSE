@@ -1,0 +1,37 @@
+VLC Bookmark Studio - Pre-release License
+
+Copyright (c) 2026 Elie Koivunen. All rights reserved.
+
+VLC Bookmark Studio (the "Software") is proprietary pre-release software, owned by
+Elie Koivunen and developed by Elie Koivunen with Claude (Anthropic). Until its final
+version is released, the following terms apply to this version and to every pre-release
+version distributed with this license (0.9.0 onward):
+
+1. You may download, install and run the Software to evaluate and test it.
+
+2. No other right is granted. Without the prior written permission of the copyright
+   holder you may not copy, modify, merge, publish, distribute, sublicense, sell, or
+   otherwise make the Software or any part of it available to others, in source or in
+   binary form.
+
+3. You may not remove or alter this notice or any copyright notice in the Software.
+
+4. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+   INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+   PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+   HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+   CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+   OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+The copyright holder intends to release the final version of the Software under an
+open-source license. Until then, only the terms above apply.
+
+Third-party software that the Software uses or that its packaged builds contain (VLC
+and libVLC, FFmpeg, Qt and PySide6, python-vlc, NumPy, Python, the PyInstaller
+bootloader and others) remains under its own license; see THIRD-PARTY-NOTICES.txt.
+Nothing in this license limits the rights those licenses grant.
+
+Versions 0.1.0 to 0.8.0 of the Software were published under the GNU General Public
+License v3 (the repository's LICENSE file); those versions remain available under it.
+
+Source and releases: https://github.com/Elie-Koivunen/vibe/tree/main/vlc-bookmark-studio

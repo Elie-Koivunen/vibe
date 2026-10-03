@@ -47,6 +47,20 @@ class PlaybackClock:
             sampled_at_ns=now_ns if now_ns is not None else time.monotonic_ns(),
         )
 
+    def note_rate(self, rate: float, *, now_ns: int | None = None) -> None:
+        """Our own change of rate (Tempo): estimate on from where it is now, at the new
+        rate, until the next poll reports it."""
+        previous = self._sample
+        if previous is None:
+            return
+        current_ns = now_ns if now_ns is not None else time.monotonic_ns()
+        self._sample = _Sample(
+            time_us=self.estimated_position_us(now_ns=current_ns),
+            state=previous.state,
+            rate=rate,
+            sampled_at_ns=current_ns,
+        )
+
     @property
     def rate(self) -> float:
         """Last known playback rate (1.0 until a poll has reported one)."""

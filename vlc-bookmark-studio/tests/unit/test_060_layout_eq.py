@@ -42,9 +42,10 @@ def _ini_settings(tmp_path: Path) -> SettingsService:
 # -- the layout --
 
 
-def test_transport_sits_above_the_waveform_and_the_selection_beside_it(qtbot, tmp_path) -> None:
-    """0.6.0 put the selection readout under the waveform; 0.7.0 moved it to the top of
-    the tool column, above the View group, so the waveform has the full height."""
+def test_the_column_beside_the_waveform_holds_selection_playback_and_view(qtbot, tmp_path) -> None:
+    """0.6.0 had the transport above the waveform and the selection under it; 0.7.0 moved
+    the selection readout to the top of the column beside it; 0.9.0 moved the transport
+    there too, between the selection and View -- the waveform has the full height."""
     app = _make_app(qtbot, tmp_path)
     window = app.window
     window.resize(1400, 900)
@@ -52,36 +53,49 @@ def test_transport_sits_above_the_waveform_and_the_selection_beside_it(qtbot, tm
     qtbot.waitExposed(window)
     transport, view, selection = window._transport, window._waveform_view, window._selection_bar
     view_top = _top_left(view, window).y()
-    assert _top_left(transport, window).y() + transport.height() <= view_top
-    assert _top_left(selection, window).x() >= _top_left(view, window).x() + view.width()
-    assert _top_left(selection, window).y() + selection.height() <= _top_left(window._zoom_fit_button, window).y()
+    view_right = _top_left(view, window).x() + view.width()
+    for widget in (selection, transport):
+        assert _top_left(widget, window).x() >= view_right
     assert view_top <= _top_left(selection, window).y() < view_top + 40  # at the top of the column
+    assert _top_left(selection, window).y() + selection.height() <= _top_left(transport, window).y()
+    assert _top_left(transport, window).y() + transport.height() <= _top_left(window._zoom_out_button, window).y()
 
 
-def test_view_bookmark_and_selection_buttons_stand_beside_the_waveform(qtbot, tmp_path) -> None:
+def test_view_beside_the_waveform_bookmark_and_selection_buttons_in_the_tab(qtbot, tmp_path) -> None:
+    """0.9.0: View sits below the playback buttons beside the waveform. Bookmark
+    selection and the selection's ▶ Selection / ✕ Clear are one row in the Bookmark
+    Studio tab, above the name (the selection's two were with the playback buttons in the
+    first 0.9.0 build; Bookmark now, a duplicate, went in the next)."""
     app = _make_app(qtbot, tmp_path)
     window = app.window
     window.resize(1400, 900)
     window.show()
     qtbot.waitExposed(window)
+    window.show_side_tab("bookmark")
+    QApplication.processEvents()
     view = window._waveform_view
     view_right = _top_left(view, window).x() + view.width()
     view_top = _top_left(view, window).y()
-    buttons = [window._zoom_out_button, window._zoom_in_button, window._zoom_fit_button,
-               window._bookmark_now_button, window._bookmark_selection_button,
-               window._loop_selection_button, window._clear_selection_button]
-    for button in buttons:
+    for button in (window._zoom_out_button, window._zoom_in_button, window._zoom_fit_button):
         assert button.isVisible(), button.text()
         corner = _top_left(button, window)
         assert corner.x() >= view_right, button.text()
         assert view_top <= corner.y() <= view_top + view.height(), button.text()
-    # grouped top to bottom: view, then bookmark, then selection
-    ys = [_top_left(b, window).y() for b in (window._zoom_fit_button, window._bookmark_now_button,
-                                               window._bookmark_selection_button, window._loop_selection_button,
-                                               window._clear_selection_button)]
-    assert ys == sorted(ys)
-    # none of them is left in the selection row
-    assert not [c for c in window._selection_bar.children() if c in buttons]
+    assert not hasattr(window, "_bookmark_now_button")
+    in_tab = [window._bookmark_selection_button, window._loop_selection_button, window._clear_selection_button]
+    assert [b.text() for b in in_tab] == ["Bookmark selection", "▶ Selection", "✕ Clear"]
+    name_top = _top_left(window._inspector._name_edit, window).y()
+    corners = [_top_left(b, window) for b in in_tab]
+    for button, corner in zip(in_tab, corners):
+        assert button.isVisible() and window._inspector.isAncestorOf(button), button.text()
+        assert corner.y() + button.height() <= name_top, button.text()  # above the name
+    # One row: their middles level (a symbol from a fallback font can make a button a
+    # pixel or two taller, centred in the row).
+    middles = [corner.y() + button.height() / 2 for button, corner in zip(in_tab, corners)]
+    assert max(middles) - min(middles) <= 2
+    assert [c.x() for c in corners] == sorted(c.x() for c in corners)  # in this order
+    for button in in_tab:
+        assert not window._tool_column.isAncestorOf(button), button.text()
 
 
 def test_selection_row_shows_start_end_and_length(qtbot, tmp_path) -> None:
@@ -99,11 +113,11 @@ def test_selection_row_shows_start_end_and_length(qtbot, tmp_path) -> None:
     assert not window._loop_selection_button.isEnabled()
 
 
-def test_bookmark_settings_and_volume_eq_are_two_tabs(qtbot, tmp_path) -> None:
+def test_bookmark_studio_and_volume_eq_are_two_tabs(qtbot, tmp_path) -> None:
     app = _make_app(qtbot, tmp_path)
     tabs = app.window._side_tabs
-    # (0.8.0 renamed "Bookmark" to "Bookmark settings")
-    assert [tabs.tabText(i).replace("&&", "&") for i in range(tabs.count())] == ["Bookmark settings", "Volume & EQ"]
+    # (0.8.0 renamed "Bookmark" to "Bookmark settings", 0.9.0 to "Bookmark Studio")
+    assert [tabs.tabText(i).replace("&&", "&") for i in range(tabs.count())] == ["Bookmark Studio", "Volume & EQ"]
     assert tabs.widget(0).widget() is app.window._inspector
     assert tabs.widget(1).widget() is app.window._volume_eq
     assert app.window._volume is app.window._volume_eq.volume_strip  # the fader moved into the tab
@@ -156,11 +170,16 @@ def test_at_the_smallest_window_size_nothing_overlaps(qtbot, tmp_path) -> None:
     assert minimum.width() >= 900 and minimum.height() >= 600
     bar = window._transport
     buttons = [bar.previous_bookmark_button, bar.previous_track_button, bar.stop_button,
-               bar.play_pause_button, bar.next_track_button, bar.next_bookmark_button]
-    edges = [(_top_left(b, window).x(), _top_left(b, window).x() + b.width()) for b in buttons]
-    assert all(right <= next_left for (_l, right), (next_left, _r) in zip(edges, edges[1:])), edges
-    assert _top_left(bar.volume_button, window).x() + bar.volume_button.width() <= edges[0][0]
-    assert edges[-1][1] <= _top_left(bar._position_label, window).x()
+               bar.play_pause_button, bar.next_track_button, bar.next_bookmark_button,
+               bar.loop_bookmark_button]
+    rects = [b.geometry().translated(b.parentWidget().mapTo(window, QPoint(0, 0))) for b in buttons]
+    for i, first in enumerate(rects):
+        for second in rects[i + 1:]:
+            assert not first.intersects(second), (first, second)
+    top = min(r.top() for r in rects)
+    bottom = max(r.bottom() for r in rects)
+    assert _top_left(bar._duration_label, window).y() + bar._duration_label.height() <= top  # time above
+    assert _top_left(bar.volume_button, window).y() > bottom  # volume below
     # a long playlist name is cut off in the header; it doesn't widen the window
     before = _settled_minimum_width(qtbot, window)
     window._context_names = ("A playlist with a very long name " * 12, "a song")

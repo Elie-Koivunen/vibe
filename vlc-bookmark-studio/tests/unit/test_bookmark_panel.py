@@ -126,8 +126,7 @@ def test_multi_select_enables_delete_but_not_play_loop(qtbot) -> None:
     panel.select_bookmarks({first.id, second.id})
 
     assert panel._delete_bookmark_button.isEnabled() is True
-    assert panel._play_bookmark_button.isEnabled() is False
-    assert panel._loop_bookmark_button.isEnabled() is False
+    assert panel.loop_target() is None  # the 🔁 (playback buttons) loops one bookmark only
 
 
 def test_delete_button_emits_every_selected_id(qtbot) -> None:

@@ -1,7 +1,8 @@
-"""VLC playlist sidebar: filter, bookmark-count column, Follow VLC mode (spec #145-#148)."""
+"""VLC playlist sidebar: filter, bookmark-count column, Follow VLC mode (spec #145-#148);
+since 0.9.0 in a Source Playlist tab, with the bookmark list's column menu."""
 from __future__ import annotations
 
-from PySide6.QtCore import QSignalBlocker, Signal
+from PySide6.QtCore import QByteArray, QSignalBlocker, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -9,6 +10,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -16,7 +18,8 @@ from PySide6.QtWidgets import (
 )
 
 from bookmark_studio.playback.status import VlcPlaylistItem
-from bookmark_studio.ui.qt_helpers import top_level_rows
+from bookmark_studio.ui.header_columns import HeaderColumns
+from bookmark_studio.ui.qt_helpers import style_tabs, top_level_rows
 
 COLUMNS = ["Title", "Artist", "Duration", "Bookmarks", "Status"]
 
@@ -66,36 +69,46 @@ class PlaylistPanel(QWidget):
         session_row.addWidget(self._quit_button)
         layout.addLayout(session_row)
 
-        # Connection status and the Follow checkbox, right under the button that
-        # makes the connection.
-        status_row = QHBoxLayout()
+        # Connection status, right under the button that makes the connection.
         self._connection_label = QLabel("● Offline", self)
         connection_font = QFont()
         connection_font.setPointSize(10)
         connection_font.setBold(True)
         self._connection_label.setFont(connection_font)
         self._connection_label.setStyleSheet("color: #a33;")
-        status_row.addWidget(self._connection_label)
+        layout.addWidget(self._connection_label)
 
-        self._follow_checkbox = QCheckBox("Follow currently playing VLC song", self)
+        # The player's playlist in a tab of its own (0.9.0): Follow, the filter and the list.
+        self._tabs = QTabWidget(self)
+        self._tabs.setDocumentMode(True)
+        style_tabs(self._tabs)
+        layout.addWidget(self._tabs, 1)
+        page = QWidget(self._tabs)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 6, 0, 0)
+        page_layout.setSpacing(6)
+        self._tabs.addTab(page, "Source Playlist")
+
+        self._follow_checkbox = QCheckBox("Follow currently playing VLC song", page)
         self._follow_checkbox.setChecked(True)
         self._follow_checkbox.toggled.connect(self.follow_vlc_toggled.emit)
-        status_row.addWidget(self._follow_checkbox)
-        status_row.addStretch(1)
-        layout.addLayout(status_row)
+        page_layout.addWidget(self._follow_checkbox)
 
         # Directly above the tree it filters.
-        self._filter_edit = QLineEdit(self)
+        self._filter_edit = QLineEdit(page)
         self._filter_edit.setPlaceholderText("Filter...")
         self._filter_edit.textChanged.connect(self._apply_filter)
-        layout.addWidget(self._filter_edit)
+        page_layout.addWidget(self._filter_edit)
 
-        self._tree = QTreeWidget(self)
+        self._tree = QTreeWidget(page)
         self._tree.setColumnCount(len(COLUMNS))
         self._tree.setHeaderLabels(COLUMNS)
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
-        layout.addWidget(self._tree)
+        page_layout.addWidget(self._tree)
+        # Right-click a column title: which columns show, and in which order -- as in the
+        # bookmark list (0.9.0).
+        self._columns = HeaderColumns(self._tree, COLUMNS, COLUMNS)
 
     def set_playlist(
         self, items: list[VlcPlaylistItem], bookmark_counts: dict[int, int] | None = None
@@ -185,6 +198,33 @@ class PlaylistPanel(QWidget):
 
     def follow_vlc_enabled(self) -> bool:
         return self._follow_checkbox.isChecked()
+
+    # -- columns (see HeaderColumns) --
+
+    def column_menu(self, clicked: int = -1):  # noqa: ANN201 - QMenu
+        return self._columns.menu(clicked)
+
+    def shown_columns(self) -> list[str]:
+        return self._columns.shown()
+
+    def set_column_shown(self, logical: int, shown: bool) -> None:
+        self._columns.set_shown(logical, shown)
+
+    def move_column(self, logical: int, step: int) -> None:
+        self._columns.move(logical, step)
+
+    def header_state(self) -> QByteArray:
+        """The columns' order, widths and which show (saved with the window layout)."""
+        return self._tree.header().saveState()
+
+    def restore_header_state(self, state: QByteArray) -> bool:
+        header = self._tree.header()
+        if not header.restoreState(state) or header.count() != len(COLUMNS):
+            self._columns.apply_default_order()
+            for column in range(len(COLUMNS)):
+                header.setSectionHidden(column, False)
+            return False
+        return True
 
     def _rebuild(self) -> None:
         self._tree.clear()

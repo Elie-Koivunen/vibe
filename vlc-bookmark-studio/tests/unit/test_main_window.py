@@ -5,6 +5,7 @@ import sqlite3
 from uuid import uuid4
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction
 from PySide6.QtTest import QTest
 
 from bookmark_studio.domain.media import Media
@@ -67,32 +68,37 @@ def test_double_click_waveform_creates_bookmark_via_undo_stack(qtbot) -> None:
     assert len(repo.list_for_playlist_media(playlist.id, media.id)) == 1
 
 
-def test_bookmark_now_button_creates_point_bookmark_without_a_selection(qtbot) -> None:
+def test_point_bookmark_at_playhead_without_a_selection(qtbot) -> None:
     """Direct user request: "a button to explicitly bookmark" -- must work with no
     selection made first (drag-selection was itself broken by a separate bug, see
-    scene.py's handle_empty_drag), so this is the always-available fallback."""
+    scene.py's handle_empty_drag), so this is the always-available fallback. (The
+    "Bookmark now" button went in 0.9.0 -- the user found it a duplicate; the point
+    bookmark stays in the Bookmark menu, Ctrl+Shift+B.)"""
     window, repo, playlist, media = _build_window(qtbot)
     assert window._waveform_scene.selection() is None
+    assert not hasattr(window, "_bookmark_now_button")
 
-    window._bookmark_now_button.click()
+    action = next(a for a in window.menuBar().findChildren(QAction) if a.text() == "Point Bookmark at Playhead")
+    assert action.shortcut().toString() == "Ctrl+Shift+B"
+    action.trigger()
 
     bookmarks = repo.list_for_playlist_media(playlist.id, media.id)
     assert len(bookmarks) == 1
     assert bookmarks[0].end_us is None  # a point bookmark, not a segment
 
 
-def test_bookmark_now_button_bookmarks_the_selection_when_one_exists(qtbot) -> None:
+def test_bookmark_selection_button_bookmarks_the_selection(qtbot) -> None:
     """Regression, reported live as "the bookmarking seems to have changed": with a
     region highlighted, clicking "Bookmark Now" created a point bookmark at the
-    playhead and silently ignored the selection -- confusing, not a real regression,
-    since that was always its only behavior. It must now prefer the selection.
+    playhead and silently ignored the selection. (Bookmark now then preferred the
+    selection; since 0.9.0 Bookmark selection is the one button for it.)
     """
     from bookmark_studio.domain.selection import Selection
 
     window, repo, playlist, media = _build_window(qtbot)
     window._waveform_scene.set_selection(Selection(start_us=5_000_000, end_us=9_000_000))
 
-    window._bookmark_now_button.click()
+    window._bookmark_selection_button.click()
 
     bookmarks = repo.list_for_playlist_media(playlist.id, media.id)
     assert len(bookmarks) == 1
@@ -121,24 +127,26 @@ def test_bookmark_panel_play_loop_buttons_track_selection(qtbot) -> None:
     )
     window.load_all_bookmarks([segment, point], {media.id: media.title})
     panel = window._bookmark_panel
-    assert panel._play_bookmark_button.isEnabled() is False  # nothing selected yet
+    # Since 0.9.0: a double-click plays a row (the Play button went), and the 🔁 among the
+    # playback buttons loops the selected one.
+    loop_button = window._transport.loop_bookmark_button
+    assert loop_button.isEnabled() is False  # nothing selected yet
 
     panel.select_bookmark(segment.id)
-    assert panel._play_bookmark_button.isEnabled() is True
-    assert panel._loop_bookmark_button.isEnabled() is True  # has an end_us
+    assert loop_button.isEnabled() is True  # has an end_us
 
     play_requests = []
     loop_requests = []
     window.play_bookmark_requested.connect(play_requests.append)
     window.loop_bookmark_requested.connect(loop_requests.append)
-    panel._play_bookmark_button.click()
-    panel._loop_bookmark_button.click()
+    row = panel._tree.selectedItems()[0]
+    panel._tree.itemDoubleClicked.emit(row, 0)
+    loop_button.click()
     assert play_requests == [segment.id]
     assert loop_requests == [segment.id]
 
     panel.select_bookmark(point.id)
-    assert panel._play_bookmark_button.isEnabled() is True
-    assert panel._loop_bookmark_button.isEnabled() is False  # a point has nothing to loop
+    assert loop_button.isEnabled() is False  # a point has nothing to loop
 
 
 def test_selection_label_tracks_the_selection(qtbot) -> None:

@@ -37,8 +37,10 @@ def test_the_list_is_a_tab_with_its_buttons_stacked_towards_the_bookmark_tab(qtb
     window = _shown(_make_app(qtbot, tmp_path))
     panel = window._bookmark_panel
     assert panel._tabs.tabText(0) == "Bookmarks" and panel._tabs.widget(0) is panel._tree
-    buttons = [panel._play_bookmark_button, panel._loop_bookmark_button, panel._delete_bookmark_button,
-               panel._move_up_button, panel._move_down_button]
+    # (0.9.0: no Play -- a double-click plays -- and Loop moved to the playback buttons;
+    # Delete went below Save...)
+    assert not hasattr(panel, "_play_bookmark_button") and not hasattr(panel, "_loop_bookmark_button")
+    buttons = [panel._move_up_button, panel._move_down_button, panel._export_button, panel._delete_bookmark_button]
     xs = {_top_left(b, window).x() for b in buttons}
     ys = [_top_left(b, window).y() for b in buttons]
     assert len(xs) == 1 and ys == sorted(ys)  # one column, top to bottom

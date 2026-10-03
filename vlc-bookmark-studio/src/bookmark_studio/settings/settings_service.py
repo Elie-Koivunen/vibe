@@ -1,7 +1,9 @@
 """Reads/writes QSettings: window geometry, theme, VLC path, bridge port/token (spec #120)."""
 from __future__ import annotations
 
+import json
 import secrets
+from dataclasses import dataclass
 
 from PySide6.QtCore import QByteArray, QSettings
 
@@ -16,6 +18,26 @@ DEFAULT_BRIDGE_PORT = 43119
 DEFAULT_RAMP_MS = 1500  # Max / Mute (Volume & EQ tab)
 DEFAULT_VOLUME_LEVELS = {"normalize": 80, "reset": 50}  # percent (Volume & EQ tab)
 DEFAULT_GLIDE_MS = 1000  # the equalizer moving to a chosen preset
+
+
+@dataclass(frozen=True)
+class TempoButtons:
+    """The BPM panel's settings (Volume & EQ tab); the tempo itself is never saved."""
+
+    step_bpm: int = 5  # how much Increase and Lower change the tempo
+    glide_ms: int = 2000  # how long Increase / Reset / Lower take (0: at once)
+
+
+@dataclass(frozen=True)
+class ExtractOptions:
+    """Extract's choices, kept for next time (see SettingsService.extract_options)."""
+
+    folder: str | None = None
+    format_key: str = "mp3"
+    quality: int = 0
+    apply_loops: bool = True  # each bookmark's Repeat count, as set in Bookmark Studio
+    apply_fades: bool = True  # each bookmark's fades, as set in Bookmark Studio
+    tags: tuple[tuple[str, str], ...] = ()  # the user's own (name, value) tags
 
 
 def _bytes_or_none(value: object) -> QByteArray | None:
@@ -66,8 +88,18 @@ class SettingsService:
         """A list's column order and widths (QHeaderView.saveState)."""
         return _bytes_or_none(self._settings.value(f"headers/{name}"))
 
-    def set_header_state(self, name: str, state: QByteArray) -> None:
+    def set_header_state(self, name: str, state: QByteArray, *, columns: int | None = None) -> None:
         self._settings.setValue(f"headers/{name}", state)
+        if columns is not None:
+            self._settings.setValue(f"headers/{name}_columns", int(columns))
+
+    def header_columns(self, name: str) -> int | None:
+        """How many columns the saved layout had (None: saved before 0.9.0 kept this)."""
+        try:
+            value = self._settings.value(f"headers/{name}_columns")
+            return int(str(value)) if value is not None else None
+        except ValueError:
+            return None
 
     def panel_tab(self, name: str) -> int:
         """The tab last shown in a tabbed panel (0 if none was saved)."""
@@ -222,6 +254,66 @@ class SettingsService:
             token = secrets.token_urlsafe(32)
             self._settings.setValue("bridge/token", token)
         return token
+
+    # -- Tempo buttons (Volume & EQ tab) --
+
+    def tempo_buttons(self) -> TempoButtons:
+        value = self._settings.value
+        defaults = TempoButtons()
+
+        def number(key: str, default: int, low: int, high: int) -> int:
+            try:
+                return max(low, min(high, int(str(value(f"tempo/{key}", default)))))
+            except ValueError:
+                return default
+
+        return TempoButtons(
+            step_bpm=number("step_bpm", defaults.step_bpm, 1, 50),
+            glide_ms=number("glide_ms", defaults.glide_ms, 0, 60_000),
+        )
+
+    def set_tempo_buttons(self, buttons: TempoButtons) -> None:
+        self._settings.setValue("tempo/step_bpm", int(buttons.step_bpm))
+        self._settings.setValue("tempo/glide_ms", int(buttons.glide_ms))
+
+    def tempo_enabled(self) -> bool:
+        """The BPM panel's switch: off until switched on."""
+        return str(self._settings.value("tempo/enabled", "false")).lower() in ("true", "1")
+
+    def set_tempo_enabled(self, enabled: bool) -> None:
+        self._settings.setValue("tempo/enabled", "true" if enabled else "false")
+
+    # -- Extract (bookmarks saved as audio files) --
+
+    def extract_options(self) -> ExtractOptions:
+        """The folder, format, quality and fades last used to extract bookmarks."""
+        value = self._settings.value
+        try:
+            quality = max(0, int(str(value("extract/quality", 0))))
+        except ValueError:
+            quality = 0
+        try:
+            loaded = json.loads(str(value("extract/tags", "[]") or "[]"))
+            tags = tuple((str(key), str(text)) for key, text in loaded if str(key) and str(text))
+        except (ValueError, TypeError):
+            tags = ()
+        # (0.9.0's first builds kept "fades"/"repeats", off by default; these default to on.)
+        return ExtractOptions(
+            folder=str(value("extract/folder", "") or "") or None,
+            format_key=str(value("extract/format", "mp3") or "mp3"),
+            quality=quality,
+            apply_loops=_as_bool(value("extract/apply_loops", True)),
+            apply_fades=_as_bool(value("extract/apply_fades", True)),
+            tags=tags,
+        )
+
+    def set_extract_options(self, options: ExtractOptions) -> None:
+        self._settings.setValue("extract/folder", options.folder or "")
+        self._settings.setValue("extract/format", options.format_key)
+        self._settings.setValue("extract/quality", int(options.quality))
+        self._settings.setValue("extract/apply_loops", bool(options.apply_loops))
+        self._settings.setValue("extract/apply_fades", bool(options.apply_fades))
+        self._settings.setValue("extract/tags", json.dumps([list(pair) for pair in options.tags]))
 
     # -- keyboard shortcuts (spec #84) --
 

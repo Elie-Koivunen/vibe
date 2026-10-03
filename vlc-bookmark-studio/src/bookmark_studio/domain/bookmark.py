@@ -31,6 +31,14 @@ def default_bookmark_name(*, suffix: str | None = None) -> str:
     return suffix or "".join(secrets.choice(_NAME_SUFFIX_ALPHABET) for _ in range(6))
 
 
+def unique_bookmark_name(taken: set[str]) -> str:
+    """A new random name (see default_bookmark_name) that none of `taken` has."""
+    while True:
+        name = default_bookmark_name()
+        if name not in taken:
+            return name
+
+
 def dated_bookmark_name(
     start_us: int, end_us: int | None = None, *, created: datetime | None = None, suffix: str | None = None,
 ) -> str:
