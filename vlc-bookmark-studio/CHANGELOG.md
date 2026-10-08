@@ -21,6 +21,18 @@ versions are kept in [`archive/`](archive/) and tagged in git
 | [0.2.0](#020--2026-09-29) | 2026-09-29 | Loop fixes (gaps, After loop), playlist polling no longer disturbs the UI, list dropdowns and Inspector fields fixed |
 | [0.1.0](#010) | — | First version: bookmarks, playlists, waveforms, VLC control, loops, undo, export / import |
 
+## Unreleased
+
+### Changed
+
+- **Python 3.10 stays on PySide6 below 6.12**: PySide6 6.12.0 (released 2026-10-08)
+  aborts when Python 3.10 exits after a long session (`free(): invalid pointer`) -- seen
+  in the test suite, with 0.9.0's code as well. Python 3.11 and later, and the packaged
+  builds (Python 3.12), are not affected.
+- Tests and CI only: the .m3u playlist-name test no longer uses a Windows path (it failed
+  on Linux), and a failed CI test run now reports the end of pytest's output when no
+  test is listed as failed.
+
 ## 0.10.0 — 2026-10-09
 
 ### Changed
