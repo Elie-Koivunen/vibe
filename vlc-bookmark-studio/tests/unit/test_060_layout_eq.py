@@ -45,7 +45,9 @@ def _ini_settings(tmp_path: Path) -> SettingsService:
 def test_the_column_beside_the_waveform_holds_selection_playback_and_view(qtbot, tmp_path) -> None:
     """0.6.0 had the transport above the waveform and the selection under it; 0.7.0 moved
     the selection readout to the top of the column beside it; 0.9.0 moved the transport
-    there too, between the selection and View -- the waveform has the full height."""
+    there too, between the selection and View -- the waveform has the full height. 0.10.0
+    put the waveform with the selection readout and View in the Bookmarking tab; Playback
+    is beside the tabs, for both."""
     app = _make_app(qtbot, tmp_path)
     window = app.window
     window.resize(1400, 900)
@@ -54,11 +56,15 @@ def test_the_column_beside_the_waveform_holds_selection_playback_and_view(qtbot,
     transport, view, selection = window._transport, window._waveform_view, window._selection_bar
     view_top = _top_left(view, window).y()
     view_right = _top_left(view, window).x() + view.width()
-    for widget in (selection, transport):
+    bookmarking = window._view_tabs.widget(0)
+    for widget in (selection, window._zoom_out_button):
+        assert bookmarking.isAncestorOf(widget)
         assert _top_left(widget, window).x() >= view_right
     assert view_top <= _top_left(selection, window).y() < view_top + 40  # at the top of the column
-    assert _top_left(selection, window).y() + selection.height() <= _top_left(transport, window).y()
-    assert _top_left(transport, window).y() + transport.height() <= _top_left(window._zoom_out_button, window).y()
+    assert _top_left(selection, window).y() + selection.height() <= _top_left(window._zoom_out_button, window).y()
+    assert not window._view_tabs.isAncestorOf(transport)
+    column = window._bookmarking_column
+    assert _top_left(transport, window).x() >= _top_left(column, window).x() + column.width()
 
 
 def test_view_beside_the_waveform_bookmark_and_selection_buttons_in_the_tab(qtbot, tmp_path) -> None:

@@ -56,6 +56,8 @@ from bookmark_studio.playback.loop_controller import LoopController
 from bookmark_studio.playback.playback_clock import PlaybackClock
 from bookmark_studio.playback.status import PlaybackStatus, VlcPlaylistItem
 from bookmark_studio.settings.settings_service import SettingsService, TempoButtons
+from bookmark_studio.ui.bookmark_panel import loop_label
+from bookmark_studio.ui.bookmark_tracks import CURRENT, NEXT, PREVIOUS, TrackBookmark
 from bookmark_studio.ui.deck_fader import percent_to_level
 from bookmark_studio.ui.dialogs.vlc_launch_dialog import VlcLaunchChoice, VlcLaunchDialog
 from bookmark_studio.ui.main_window import MainWindow
@@ -147,6 +149,9 @@ class Application(QObject):
         self._tempo_change_bpm = 0.0  # what plays, from the detected BPM
         self._tempo_skew_bpm = 0.0  # where the fader's middle is, from the detected BPM (Align skew)
         self._estimated_bpm: dict[UUID, float] = {}
+        # Waveforms for the BM playback view's tracks (their songs may not be on screen).
+        self._track_pyramids: dict[UUID, WaveformPyramid] = {}
+        self._track_waveforms_requested: set[UUID] = set()
         self._corrected_bpm: dict[UUID, float] = {}
         self._rate = 1.0
         self._waveform_orchestrator = WaveformOrchestrator(
@@ -296,6 +301,8 @@ class Application(QObject):
         w.next_bookmark_requested.connect(self._on_next_bookmark)
         w.seek_requested.connect(self._seek_displayed)
         w.waveform_selection_changed.connect(self._on_waveform_selection_changed)
+        w.bookmark_list_selection_changed.connect(self._show_bookmark_tracks)
+        w.bookmark_track_double_clicked.connect(self._on_bookmark_track_double_clicked)
         w.selection_bookmarked.connect(self._on_selection_bookmarked)
         w.extract_bookmarks_requested.connect(self._on_extract_bookmarks_requested)
         w.playlist_item_double_clicked.connect(self._on_playlist_item_double_clicked)
@@ -598,6 +605,7 @@ class Application(QObject):
         # Forget the old player's playlist, or its bookmarks would be applied to whatever
         # the new one plays.
         self.playlists.reset(source_uri=source_uri)
+        self.window.clear_playlist_name()
         self._clear_bookmark_playback()
         self._show_equalizer_support(new_adapter)
         self.session.swap_adapter(new_adapter, mute_on_connect=mute_on_connect)
@@ -1046,6 +1054,7 @@ class Application(QObject):
     def _show_bookmark_playback(self) -> None:
         if self._stopped:
             return
+        self._show_bookmark_tracks()
         playback = self._bookmark_playback
         if playback is None:
             self.window.show_bookmark_playback(None, None, None)
@@ -1184,12 +1193,19 @@ class Application(QObject):
         from the top (⏭) or the bottom (⏮). Like a double-click, it plays with the
         bookmark's own settings, and it is selected, so the Bookmark Studio tab shows it.
         Bookmarks of a song the player doesn't have are passed over."""
+        target = self._bookmark_step_target(step)
+        if target is not None:
+            self._play_bookmark_moved_to(target.id)
+
+    def _bookmark_step_target(self, step: int) -> Any | None:
+        """The bookmark ⏮ (-1) / ⏭ (1) would play -- also what the BM playback view shows
+        above and below the one they count from (see _step_through_bookmarks)."""
         playlist_id = self.playlists.active_playlist_id
         if playlist_id is None:
-            return
+            return None
         listing = self._bookmark_repository.list_for_playlist(playlist_id)
         if not listing:
-            return
+            return None
         ids = [b.id for b in listing]
         anchor = self._bookmark_navigation_anchor()
         if anchor in ids:
@@ -1198,9 +1214,65 @@ class Application(QObject):
             index = 0 if step > 0 else len(listing) - 1
         while 0 <= index < len(listing):
             if self._playlist_item_for_media(listing[index].media_id) is not None:
-                self._play_bookmark_moved_to(listing[index].id)
-                return
+                return listing[index]
             index += step
+        return None
+
+    # -- the BM playback view (0.10.0) --
+
+    def _show_bookmark_tracks(self) -> None:
+        """The three tracks: what ⏮ would play, the bookmark ⏮ / ⏭ count from, and what ⏭
+        would play -- each with its song's waveform (asked for when it isn't here yet)."""
+        if self._stopped:
+            return
+        anchor = self._bookmark_navigation_anchor()
+        current = self._bookmark_repository.get(anchor) if anchor is not None else None
+        self.window.show_bookmark_tracks(
+            self._track_bookmark(self._bookmark_step_target(-1)),
+            self._track_bookmark(current),
+            self._track_bookmark(self._bookmark_step_target(1)),
+        )
+
+    def _track_bookmark(self, bookmark: Any | None) -> TrackBookmark | None:
+        if bookmark is None:
+            return None
+        playback = self._bookmark_playback
+        state = playback.state if playback is not None and playback.bookmark_id == bookmark.id else None
+        pyramid = self._track_pyramids.get(bookmark.media_id)
+        if pyramid is None:
+            self._request_track_waveform(bookmark.media_id)
+            pyramid = self._track_pyramids.get(bookmark.media_id)  # a cached one comes at once
+        return TrackBookmark(
+            bookmark_id=bookmark.id, media_id=bookmark.media_id, name=bookmark.name,
+            song=self.playlists.song_names.get(bookmark.media_id, ""),
+            start_us=bookmark.start_us, end_us=bookmark.end_us,
+            loop_text=loop_label(True, bookmark.repeat_count) if bookmark.loop_enabled else "",
+            state=state, pyramid=pyramid,
+        )
+
+    def _request_track_waveform(self, media_id: UUID) -> None:
+        """Once per song -- counted only when asked for: before the playlist is read, its
+        song (and file) isn't known yet, and a later refresh asks again."""
+        if media_id in self._track_waveforms_requested:
+            return
+        for item, media in self.playlists.resolved:
+            if media.id == media_id and media.fast_fingerprint:
+                local_path = uri_to_local_path(media.canonical_uri or item.uri)
+                if local_path is not None and local_path.exists():
+                    self._track_waveforms_requested.add(media_id)
+                    self._waveform_orchestrator.request(media.id, media.fast_fingerprint, str(local_path))
+                return
+
+    def _on_bookmark_track_double_clicked(self, role: int) -> None:
+        """The outer tracks do what ⏮ / ⏭ do; the middle one plays as a double-click in
+        the bookmark list does."""
+        if role in (PREVIOUS, NEXT):
+            self._step_through_bookmarks(role)
+            return
+        anchor = self._bookmark_navigation_anchor()
+        if role == CURRENT and anchor is not None:
+            self._on_play_bookmark_requested(anchor)
+            self.window.show_bookmark_in_studio(anchor)
 
     def _bookmark_navigation_anchor(self) -> UUID | None:
         """Where ⏮ / ⏭ count from (see _step_through_bookmarks)."""
@@ -1243,6 +1315,9 @@ class Application(QObject):
             # The playhead follows the player only while its song is the one on screen.
             if self._current_vlc_item_id is not None and self._current_vlc_item_id == status.current_playlist_item_id:
                 self.window.set_playhead(status.time_us)
+            playing_media = next((media.id for item, media in self.playlists.resolved
+                                  if item.vlc_id == status.current_playlist_item_id), None)
+            self.window.set_bookmark_tracks_playhead(playing_media, status.time_us)
             self._check_external_stop(status)
             self._loop_controller.on_tick()
             self._check_bookmark_playback_done(status)
@@ -1434,6 +1509,7 @@ class Application(QObject):
                 counts[item.vlc_id] = len(self._bookmark_repository.list_global_for_media(media.id))
             self.window.load_all_bookmarks([], {})
         self.window.set_playlist([item for item, _media in resolved], counts)
+        self._show_bookmark_tracks()
 
     _refresh_bookmark_panel = _refresh_bookmark_views
 
@@ -1486,6 +1562,7 @@ class Application(QObject):
             self._waveform_orchestrator.request(media.id, media.fast_fingerprint, str(local_path))
 
     def _on_waveform_ready(self, media_id: UUID, pyramid: WaveformPyramid) -> None:
+        self._keep_track_pyramid(media_id, pyramid)
         bpm = estimate_bpm(pyramid)
         if bpm is not None:
             self._estimated_bpm[media_id] = bpm
@@ -1495,6 +1572,16 @@ class Application(QObject):
         if media_id != self._current_media_id:
             return  # switched songs before this one finished (spec #65)
         self.window.show_waveform(pyramid, pyramid.duration_us or self.window.waveform_duration_us())
+
+    def _keep_track_pyramid(self, media_id: UUID, pyramid: WaveformPyramid) -> None:
+        """A song's waveform, for the BM playback view: a few kept (the tracks' songs and
+        the ones before), the oldest let go."""
+        self._track_pyramids.pop(media_id, None)
+        self._track_pyramids[media_id] = pyramid
+        while len(self._track_pyramids) > 8:
+            del self._track_pyramids[next(iter(self._track_pyramids))]
+        if not self._stopped:
+            QTimer.singleShot(0, self._show_bookmark_tracks)  # (outside the orchestrator's emit)
 
     def _on_waveform_progress(self, media_id: UUID, pyramid: WaveformPyramid) -> None:
         """A partial waveform while a long file is still being decoded."""

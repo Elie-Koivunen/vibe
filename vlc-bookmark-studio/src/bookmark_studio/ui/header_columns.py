@@ -19,12 +19,14 @@ class HeaderColumns(QObject):
     changed = Signal(bool)
 
     def __init__(self, tree: QTreeWidget, names: list[str], default_order: list[str], *,
-                 fit: Callable[[], None] | None = None) -> None:
-        """`fit`: sizes the columns once the defaults are back (default: to contents)."""
+                 fit: Callable[[], None] | None = None, hidden: tuple[str, ...] = ()) -> None:
+        """`fit`: sizes the columns once the defaults are back (default: to contents);
+        `hidden`: the columns not shown by default (shown again from the menu)."""
         super().__init__(tree)
         self._tree = tree
         self._names = names
         self._default_order = default_order
+        self._hidden_by_default = hidden
         self._fit = fit or self._fit_to_contents
         header = tree.header()
         header.setSectionsMovable(True)
@@ -32,9 +34,12 @@ class HeaderColumns(QObject):
         header.customContextMenuRequested.connect(self._show_menu)
 
     def apply_default_order(self) -> None:
+        """The default order, and which columns show by default."""
         header = self._tree.header()
         for visual, name in enumerate(self._default_order):
             header.moveSection(header.visualIndex(self._names.index(name)), visual)
+        for logical, name in enumerate(self._names):
+            header.setSectionHidden(logical, name in self._hidden_by_default)
 
     def _show_menu(self, pos) -> None:  # noqa: ANN001 - QPoint
         header = self._tree.header()
@@ -116,6 +121,7 @@ class HeaderColumns(QObject):
         dialog = ColumnsDialog(
             [(logical, self._names[logical], not header.isSectionHidden(logical)) for logical in self.order()],
             [self._names.index(name) for name in self._default_order], self._tree,
+            default_hidden={self._names.index(name) for name in self._hidden_by_default},
         )
         if clicked >= 0:
             dialog.select_column(clicked)
@@ -123,7 +129,8 @@ class HeaderColumns(QObject):
             self.set_layout(dialog.layout_chosen())
 
     def restore_defaults(self) -> None:
-        self.set_layout([(self._names.index(name), True) for name in self._default_order])
+        self.set_layout([(self._names.index(name), name not in self._hidden_by_default)
+                         for name in self._default_order])
         self._fit()
         self.changed.emit(True)
 

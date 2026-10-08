@@ -1,5 +1,7 @@
 """VLC playlist sidebar: filter, bookmark-count column, Follow VLC mode (spec #145-#148);
-since 0.9.0 in a Source Playlist tab, with the bookmark list's column menu."""
+since 0.9.0 in a Source Playlist tab, with the bookmark list's column menu; since 0.10.0
+everything is in the tab -- the playlist's name, the connection, Launch VLC... and Quit,
+Follow, the filter and the list (Title and Bookmarks shown by default)."""
 from __future__ import annotations
 
 from PySide6.QtCore import QByteArray, QSignalBlocker, Signal
@@ -22,6 +24,8 @@ from bookmark_studio.ui.header_columns import HeaderColumns
 from bookmark_studio.ui.qt_helpers import style_tabs, top_level_rows
 
 COLUMNS = ["Title", "Artist", "Duration", "Bookmarks", "Status"]
+# Shown again from the column menu (0.10.0: Title and Bookmarks only, by default).
+HIDDEN_BY_DEFAULT = ("Artist", "Duration", "Status")
 
 # The current song's row is tinted: green while it plays, blue while it is only
 # loaded (paused/stopped).
@@ -52,33 +56,9 @@ class PlaylistPanel(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        # Opens VlcLaunchDialog: attach to a running VLC, launch one with a playlist,
-        # or play inside the app.
-        self._launch_vlc_button = QPushButton("Launch VLC...", self)
-        self._launch_vlc_button.setToolTip(
-            "Attach to an already-open VLC instance, or launch a new one with a playlist"
-        )
-        self._launch_vlc_button.clicked.connect(self.launch_vlc_requested.emit)
-        self._quit_button = QPushButton("Quit", self)
-        self._quit_button.setToolTip(
-            "Save everything, close the VLC this app launched, and quit (Ctrl+Q)"
-        )
-        self._quit_button.clicked.connect(self.quit_requested.emit)
-        session_row = QHBoxLayout()
-        session_row.addWidget(self._launch_vlc_button, 1)
-        session_row.addWidget(self._quit_button)
-        layout.addLayout(session_row)
-
-        # Connection status, right under the button that makes the connection.
-        self._connection_label = QLabel("● Offline", self)
-        connection_font = QFont()
-        connection_font.setPointSize(10)
-        connection_font.setBold(True)
-        self._connection_label.setFont(connection_font)
-        self._connection_label.setStyleSheet("color: #a33;")
-        layout.addWidget(self._connection_label)
-
-        # The player's playlist in a tab of its own (0.9.0): Follow, the filter and the list.
+        # The player's playlist in a tab of its own (0.9.0), holding everything (0.10.0):
+        # the playlist's name, the connection, Launch VLC... and Quit, Follow, the filter
+        # and the list.
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
         style_tabs(self._tabs)
@@ -88,6 +68,44 @@ class PlaylistPanel(QWidget):
         page_layout.setContentsMargins(0, 6, 0, 0)
         page_layout.setSpacing(6)
         self._tabs.addTab(page, "Source Playlist")
+
+        # The source playlist's name (0.10.0): the .m3u it came from, or the name the app
+        # gave a playlist VLC had open ("Unsaved VLC Playlist <date>").
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("Playlist", page))
+        self._playlist_name = QLineEdit(page)
+        self._playlist_name.setReadOnly(True)
+        self._playlist_name.setPlaceholderText("No playlist yet")
+        self._playlist_name.setToolTip("The source playlist: the .m3u it was opened from, or the name "
+                                       "given to a playlist VLC had open")
+        name_row.addWidget(self._playlist_name, 1)
+        page_layout.addLayout(name_row)
+
+        # Connection status, above the button that makes the connection.
+        self._connection_label = QLabel("● Offline", page)
+        connection_font = QFont()
+        connection_font.setPointSize(10)
+        connection_font.setBold(True)
+        self._connection_label.setFont(connection_font)
+        self._connection_label.setStyleSheet("color: #a33;")
+        page_layout.addWidget(self._connection_label)
+
+        # Opens VlcLaunchDialog: attach to a running VLC, launch one with a playlist,
+        # or play inside the app.
+        self._launch_vlc_button = QPushButton("Launch VLC...", page)
+        self._launch_vlc_button.setToolTip(
+            "Attach to an already-open VLC instance, or launch a new one with a playlist"
+        )
+        self._launch_vlc_button.clicked.connect(self.launch_vlc_requested.emit)
+        self._quit_button = QPushButton("Quit", page)
+        self._quit_button.setToolTip(
+            "Save everything, close the VLC this app launched, and quit (Ctrl+Q)"
+        )
+        self._quit_button.clicked.connect(self.quit_requested.emit)
+        session_row = QHBoxLayout()
+        session_row.addWidget(self._launch_vlc_button, 1)
+        session_row.addWidget(self._quit_button)
+        page_layout.addLayout(session_row)
 
         self._follow_checkbox = QCheckBox("Follow currently playing VLC song", page)
         self._follow_checkbox.setChecked(True)
@@ -108,7 +126,8 @@ class PlaylistPanel(QWidget):
         page_layout.addWidget(self._tree)
         # Right-click a column title: which columns show, and in which order -- as in the
         # bookmark list (0.9.0).
-        self._columns = HeaderColumns(self._tree, COLUMNS, COLUMNS)
+        self._columns = HeaderColumns(self._tree, COLUMNS, COLUMNS, hidden=HIDDEN_BY_DEFAULT)
+        self._columns.apply_default_order()
 
     def set_playlist(
         self, items: list[VlcPlaylistItem], bookmark_counts: dict[int, int] | None = None
@@ -171,6 +190,14 @@ class PlaylistPanel(QWidget):
                 self._tree.setCurrentItem(row)
                 return
 
+    def set_playlist_name(self, name: str | None) -> None:
+        self._playlist_name.setText(name or "")
+        self._playlist_name.setCursorPosition(0)  # a long name shows its start
+        self._playlist_name.setToolTip(name or "")
+
+    def playlist_name(self) -> str:
+        return self._playlist_name.text()
+
     def set_connected(self, connected: bool) -> None:
         if connected:
             self._connection_label.setText("● Connected")
@@ -221,8 +248,6 @@ class PlaylistPanel(QWidget):
         header = self._tree.header()
         if not header.restoreState(state) or header.count() != len(COLUMNS):
             self._columns.apply_default_order()
-            for column in range(len(COLUMNS)):
-                header.setSectionHidden(column, False)
             return False
         return True
 

@@ -1,6 +1,6 @@
 [project]
 name = "vlc-bookmark-studio"
-version = "0.9.0"
+version = "0.10.0"
 description = "VLC Bookmark Studio — playlist-aware visual bookmarking and looping for VLC Media Player"
 readme = "README.md"
 # Proprietary pre-release until the final version, which will be open source (LICENSE).

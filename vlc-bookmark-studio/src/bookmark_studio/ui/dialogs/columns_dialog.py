@@ -24,9 +24,10 @@ class ColumnsDialog(QDialog):
     the arrangement chosen: [(logical index, shown)] in the new order."""
 
     def __init__(self, columns: list[tuple[int, str, bool]], default_order: list[int],
-                 parent: QWidget | None = None) -> None:
+                 parent: QWidget | None = None, *, default_hidden: set[int] | None = None) -> None:
         super().__init__(parent)
         self._default_order = default_order
+        self._default_hidden = default_hidden or set()
         self.setWindowTitle("Arrange columns")
         self.setModal(True)
         self.resize(320, 380)
@@ -47,7 +48,7 @@ class ColumnsDialog(QDialog):
         self._down_button = QPushButton("Move down", self)
         self._down_button.clicked.connect(lambda: self._move(1))
         self._defaults_button = QPushButton("Defaults", self)
-        self._defaults_button.setToolTip("Every column, in the original order")
+        self._defaults_button.setToolTip("The original columns, in the original order")
         self._defaults_button.clicked.connect(self.restore_defaults)
         for button in (self._up_button, self._down_button, self._defaults_button):
             buttons.addWidget(button)
@@ -95,7 +96,7 @@ class ColumnsDialog(QDialog):
         self._list.setCurrentRow(target)
 
     def restore_defaults(self) -> None:
-        self._fill([(logical, True) for logical in self._default_order])
+        self._fill([(logical, logical not in self._default_hidden) for logical in self._default_order])
 
     def set_shown(self, logical: int, shown: bool) -> None:
         for i in range(self._list.count()):

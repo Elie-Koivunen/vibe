@@ -55,7 +55,7 @@ def test_windows_and_dialogs_carry_the_logo(qtbot) -> None:
 
     app = _make_app(qtbot, Path(qtbot._request.getfixturevalue("tmp_path")))
     assert not app.window.windowIcon().isNull()
-    assert app.window._logo.pixmap() is not None and not app.window._logo.pixmap().isNull()
+    # (0.10.0: no logo under the menu any more -- the window's icon and About carry it.)
     dialog = VlcLaunchDialog([], "All files (*)", can_launch_vlc=True)
     qtbot.addWidget(dialog)
     logos = [label for label in dialog.findChildren(QLabel) if label.pixmap() is not None and not label.pixmap().isNull()]

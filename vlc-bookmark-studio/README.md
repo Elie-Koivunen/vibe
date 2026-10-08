@@ -20,6 +20,12 @@ next bookmark.
 
 ![The main window: a bookmark playing, its settings in Bookmark Studio](docs/screenshots/main-window.png)
 
+**BM playback view:** the bookmark playing in the middle (with the red line), the one
+before and the one after it in the list above and below -- each its own range, at one
+time scale.
+
+![The BM playback view: three bookmark tracks](docs/screenshots/bm-playback-view.png)
+
 **Volume & EQ:** the volume fader with Max / Normalize / Reset / Mute, the **BPM**
 panel (switched on, playing 10 BPM above the song's detected 120) and VLC's equalizer.
 
@@ -160,17 +166,20 @@ looping, the loop stops instead of resuming playback.
 
 ### The window
 
-- **Top left:** Launch VLC... and Quit, the connection, and the **Source Playlist** tab
-  -- *Follow currently playing VLC song*, the filter and the player's playlist. Its
-  column titles have the bookmark list's right-click menu (which columns show, in which
-  order); the layout is kept.
-- **The waveform** has the whole height of the top half.
-- **Beside it, top to bottom:** the selection -- start, end and length -- while you drag
-  one out ([ and ] set its start and end at the playhead); **Playback**: the position
-  and the song's length, the playback buttons (previous bookmark, previous track, stop,
-  play/pause, next track, next bookmark, and 🔁 to loop the bookmark selected in the
-  list) and the volume (click it for the Volume & EQ tab); then **View** (Zoom −,
-  Zoom +, Fit). Previous / next bookmark play the row above / below in the bookmark
+- **Top left, the Source Playlist tab:** the playlist's name (the .m3u it was opened
+  from, or "Unsaved VLC Playlist <date>" for one VLC had open), the connection, Launch
+  VLC... and Quit, *Follow currently playing VLC song*, the filter and the player's
+  playlist -- Title and Bookmarks; its column titles have the bookmark list's
+  right-click menu for Artist, Duration and Status, and the order. The layout is kept.
+- **Top middle, two tabs:** **Bookmarking** -- the breadcrumb (playlist › song › its
+  bookmarks), the waveform below it, and beside it the selection (start, end and length
+  while you drag one out -- orange until it is a bookmark; [ and ] set its start and end
+  at the playhead), **View** (Zoom −, Zoom +, Fit) and **Bookmark selection** -- and the
+  **BM playback view** (below). The open tab comes back on the next start.
+- **Top right, for both tabs: Playback** -- the position and the song's length, the
+  playback buttons (previous bookmark, previous track, stop, play/pause, next track,
+  next bookmark, and 🔁 to loop the bookmark selected in the list) and the volume (click
+  it for the Volume & EQ tab). Previous / next bookmark play the row above / below in the bookmark
   list (across songs), counting from the bookmark playing -- else the selected row --
   and select it, so the Bookmark Studio tab shows it. Play plays the song on screen --
   one picked in the playlist (a single click shows it) is switched to first. Seeking by
@@ -192,6 +201,16 @@ looping, the loop stops instead of resuming playback.
   Gap, Fade in and Fade out on the next; tags; notes); **Volume & EQ** the player's
   volume and equalizer. The selected tab is orange. The open tab, the window size and
   the panel sizes come back on the next start.
+
+**BM playback view:** three tracks, top to bottom -- **◀ PREVIOUS**, the bookmark
+⏮ (previous bookmark) would play; the bookmark ⏮ / ⏭ count from (**▶ PLAYING**, green,
+with the red line moving through it; else **● CURRENT**: the one selected in the list,
+or the one played last); and **▷ NEXT**, the one ⏭ (next bookmark) would play -- across
+songs, in the list's order. Each track shows its bookmark's range only, with its name,
+song, times and loop count above it; all three share one time scale (the longest fills
+the width), so a shorter bookmark is narrower. Double-click the top or bottom track to
+play it, as ⏮ / ⏭ do -- the tracks move on with it -- or the middle one to play it, as
+a double-click in the list does.
 
 **Bookmark Studio:** a change to a bookmark is saved the moment you make it; its row
 in the list and the Name field flash orange to show it was saved. Beside the name,
@@ -332,6 +351,8 @@ applied to whichever player you use -- the in-app player or a VLC window (throug
 HTTP interface; they stay across song changes). The band frequencies follow the player:
 60 Hz ... 16 kHz in a VLC window, 31 Hz ... 16 kHz in the in-app player. A switched-off
 equalizer leaves a VLC window's own equalizer setting alone.
+In a narrow tab its controls wrap onto a second line and the faders close up, instead
+of the tab scrolling sideways.
 
 **Quit** (the button next to Launch VLC…, File > Quit or Ctrl+Q) saves whatever is
 still being typed in the Inspector, the window layout and a final sync file, closes the

@@ -80,6 +80,9 @@ def _loop_label(loop_enabled: bool, repeat_count: int | None) -> str:
     return "∞" if repeat_count is None else f"×{repeat_count}"
 
 
+loop_label = _loop_label  # (the BM playback view's tracks say it the list's way)
+
+
 def _loop_from_label(label: str) -> tuple[bool, int | None] | None:
     label = label.strip()
     if label == "Off":
@@ -206,6 +209,7 @@ class BookmarkPanel(QWidget):
     # The one selected bookmark that can loop (it has a range), or None: what the 🔁
     # among the playback buttons acts on.
     loop_target_changed = Signal(object)
+    selection_changed = Signal()  # any change of the rows selected
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -698,6 +702,7 @@ class BookmarkPanel(QWidget):
         if len(ids) == 1:
             self.bookmark_selected.emit(ids[0])
         self._update_buttons_for_selection()
+        self.selection_changed.emit()
 
     def _update_buttons_for_selection(self) -> None:
         ids = self._selected_bookmark_ids()

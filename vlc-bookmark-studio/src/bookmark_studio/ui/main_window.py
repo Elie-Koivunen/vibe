@@ -39,13 +39,14 @@ from bookmark_studio.domain.equalizer import EqualizerSettings
 from bookmark_studio.persistence.bookmark_repository import BookmarkRepository
 from bookmark_studio.persistence.tag_repository import TagRepository
 from bookmark_studio.ui.bookmark_panel import BookmarkPanel
+from bookmark_studio.ui.bookmark_tracks import BookmarkTracksView, TrackBookmark
 from bookmark_studio.ui.branding import APP_NAME, app_icon, logo_pixmap
 from bookmark_studio.ui.deck_fader import VolumeStrip, level_to_percent
 from bookmark_studio.ui.dialogs.extract_dialog import ExtractDialog
 from bookmark_studio.ui.dialogs.tag_catalog_dialog import TagCatalogDialog
 from bookmark_studio.ui.inspector import BookmarkInspector
 from bookmark_studio.ui.playlist_panel import PlaylistPanel
-from bookmark_studio.ui.qt_helpers import style_tabs
+from bookmark_studio.ui.qt_helpers import SELECTED_TAB_COLOR, SELECTED_TAB_TEXT_COLOR, style_tabs
 from bookmark_studio.ui.transport import TransportBar
 from bookmark_studio.ui.volume_eq_panel import VolumeEqPanel
 from bookmark_studio.ui.waveform.scene import WaveformScene
@@ -64,6 +65,11 @@ def _scrolling(widget: QWidget, *, vertical_only: bool = False) -> QScrollArea:
         # Room for a scroll bar, so one appearing never squeezes the buttons.
         area.setFixedWidth(widget.sizeHint().width() + area.verticalScrollBar().sizeHint().width())
     return area
+
+
+# The selection readout while a new bookmark is being marked out: the app's orange.
+MARKING_STYLE = (f"QFrame#selectionBar {{ background: {SELECTED_TAB_COLOR}; border: 1px solid #c97700; border-radius: 4px; }}"
+                 f" QFrame#selectionBar QLabel {{ color: {SELECTED_TAB_TEXT_COLOR}; background: transparent; }}")
 
 
 class MainWindow(QMainWindow):
@@ -116,6 +122,8 @@ class MainWindow(QMainWindow):
 
     # Waveform / playlist
     waveform_selection_changed = Signal(object)  # Selection | None
+    bookmark_list_selection_changed = Signal()  # the rows selected in the bookmark list
+    bookmark_track_double_clicked = Signal(int)  # BM playback view: -1 previous, 0 middle, 1 next
     # A bookmark was just made from the waveform's selection (before the selection is
     # cleared): a selection playing right now carries on as that bookmark.
     selection_bookmarked = Signal(object)  # bookmark id
@@ -150,17 +158,15 @@ class MainWindow(QMainWindow):
         self._bookmark_fit_pending = False
         self._tab_width_to_keep: int | None = None
 
-        self._logo = QLabel(self)
-        self._logo.setPixmap(logo_pixmap(28))
-        self._logo.setToolTip(APP_NAME)
         self._context_names = ("No playlist", "No track")
         self._breadcrumb = QLabel("No playlist › No track › 0 bookmarks", self)
-        self._breadcrumb.setStyleSheet("padding: 4px 8px; font-weight: 600;")
+        self._breadcrumb.setStyleSheet("padding: 2px 4px; font-weight: 600;")
         self._breadcrumb.setMinimumWidth(1)  # a long playlist name is cut off, never widens the window
 
         self._playlist_panel = PlaylistPanel(self)
         self._waveform_scene = WaveformScene()
         self._waveform_view = WaveformView(self._waveform_scene)
+        self._bookmark_tracks = BookmarkTracksView(self)
         self._bookmark_panel = BookmarkPanel(self)
         self._inspector = BookmarkInspector(self)
         self._transport = TransportBar(self)
@@ -214,6 +220,7 @@ class MainWindow(QMainWindow):
         selection while it is dragged or resized (see SelectionItem's handles); saved
         bookmarks are edited in the list and the Bookmark tab."""
         self._selection_bar = QFrame(self)
+        self._selection_bar.setObjectName("selectionBar")
         self._selection_bar.setFrameShape(QFrame.Shape.StyledPanel)
         layout = QVBoxLayout(self._selection_bar)
         layout.setContentsMargins(6, 4, 6, 4)
@@ -238,34 +245,39 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._selection_duration_label)
 
     def _build_tool_column(self) -> None:
-        """The column beside the waveform, top to bottom: the selection readout, the
-        Playback group (time, playback buttons with 🔁, volume), and View (zoom). Bookmark
-        selection and the selection's Play / Clear are in the Bookmark Studio tab (0.9.0). The selection's buttons are a persistent control that enables
-        when a selection exists (spec #37), not a floating popup."""
+        """Beside the waveform, in the Bookmarking tab (0.10.0): the selection readout and
+        View (zoom). Beside the tabs, for both of them: the Playback group (time, playback
+        buttons with 🔁, volume). Bookmark selection and the selection's Play / Clear are in
+        the Bookmark Studio tab (0.9.0). The selection's buttons are a persistent control
+        that enables when a selection exists (spec #37), not a floating popup."""
         self._tool_column = QWidget(self)
-        layout = QVBoxLayout(self._tool_column)
+        playback = QVBoxLayout(self._tool_column)
+        playback.setContentsMargins(0, 0, 0, 0)
+        playback.setSpacing(4)
+        self._bookmarking_column = QWidget(self)
+        layout = QVBoxLayout(self._bookmarking_column)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
-        def heading(text: str) -> None:
-            label = QLabel(text, self._tool_column)
+        def heading(text: str, column: QWidget, into: QVBoxLayout) -> None:
+            label = QLabel(text, column)
             label.setStyleSheet("font-size: 8pt; font-weight: 700; letter-spacing: 1px;")
-            layout.addSpacing(4)
-            layout.addWidget(label)
+            into.addSpacing(4)
+            into.addWidget(label)
 
         def button(text: str, tooltip: str, slot) -> QPushButton:  # noqa: ANN001
-            widget = QPushButton(text, self._tool_column)
+            widget = QPushButton(text, self._bookmarking_column)
             widget.setToolTip(tooltip)
             widget.clicked.connect(slot)
             return widget
 
+        heading("PLAYBACK", self._tool_column, playback)
+        playback.addWidget(self._transport)
+        playback.addStretch(1)
+
         layout.addWidget(self._selection_bar)
-
-        heading("PLAYBACK")
-        layout.addWidget(self._transport)
-
         # Visible zoom buttons: Ctrl+wheel/Ctrl+0 (spec #84) alone are too easy to miss.
-        heading("VIEW")
+        heading("VIEW", self._bookmarking_column, layout)
         zoom_row = QHBoxLayout()
         zoom_row.setSpacing(4)
         self._zoom_out_button = button("Zoom −", "Zoom out (Ctrl+-, or Ctrl+wheel)",
@@ -277,6 +289,12 @@ class MainWindow(QMainWindow):
         layout.addLayout(zoom_row)
         self._zoom_fit_button = button("Fit", "Show the whole song (Ctrl+0)", self._waveform_view.fit_entire_media)
         layout.addWidget(self._zoom_fit_button)
+        # Under Fit (0.10.0): the same Bookmark selection as in the Bookmark Studio tab,
+        # beside the waveform the selection is made on.
+        layout.addSpacing(6)
+        self._bookmark_selection_beside_waveform = QPushButton("Bookmark selection", self._bookmarking_column)
+        self._bookmark_selection_beside_waveform.setToolTip(self._inspector.bookmark_selection_button.toolTip())
+        layout.addWidget(self._bookmark_selection_beside_waveform)
 
         layout.addStretch(1)
 
@@ -285,6 +303,7 @@ class MainWindow(QMainWindow):
         # selection's Play loops it, like a new bookmark.
         self._bookmark_selection_button = self._inspector.bookmark_selection_button
         self._bookmark_selection_button.clicked.connect(self._on_bookmark_selection_clicked)
+        self._bookmark_selection_beside_waveform.clicked.connect(self._on_bookmark_selection_clicked)
         self._loop_selection_button = self._inspector.play_selection_button
         self._loop_selection_button.clicked.connect(self._on_loop_selection_clicked)
         self._clear_selection_button = self._inspector.clear_selection_button
@@ -295,21 +314,38 @@ class MainWindow(QMainWindow):
     def _set_selection_buttons_enabled(self, enabled: bool) -> None:
         for button in (
             self._bookmark_selection_button, self._loop_selection_button, self._clear_selection_button,
+            self._bookmark_selection_beside_waveform,
         ):
             button.setEnabled(enabled)
 
     def _build_layout(self) -> None:
-        # The deck: the waveform at full height, the tool column (selection readout,
-        # Playback, View) beside it.
-        deck = QWidget(self)
-        deck_layout = QVBoxLayout(deck)
-        deck_layout.setContentsMargins(0, 0, 0, 0)
-        deck_layout.setSpacing(4)
+        # The deck (0.10.0): two tabs -- Bookmarking (the waveform at full height, the
+        # selection readout and View beside it) and BM playback view (three bookmark
+        # tracks) -- and the Playback group beside them, for both.
+        bookmarking = QWidget(self)
+        bookmarking_layout = QVBoxLayout(bookmarking)
+        bookmarking_layout.setContentsMargins(0, 2, 0, 0)
+        bookmarking_layout.setSpacing(2)
+        # Playlist › song › bookmarks, above the waveform (0.10.0; it was under the menu).
+        bookmarking_layout.addWidget(self._breadcrumb)
         waveform_row = QHBoxLayout()
         waveform_row.setSpacing(6)
         waveform_row.addWidget(self._waveform_view, 1)
-        waveform_row.addWidget(_scrolling(self._tool_column, vertical_only=True))
-        deck_layout.addLayout(waveform_row, 1)
+        waveform_row.addWidget(_scrolling(self._bookmarking_column, vertical_only=True))
+        bookmarking_layout.addLayout(waveform_row, 1)
+        self._view_tabs = QTabWidget(self)
+        self._view_tabs.setDocumentMode(True)
+        self._view_tabs.addTab(bookmarking, "Bookmarking")
+        self._view_tabs.addTab(self._bookmark_tracks, "BM playback view")
+        style_tabs(self._view_tabs)
+        self._view_tabs.setTabToolTip(0, "The song's waveform: make, move and resize bookmarks")
+        self._view_tabs.setTabToolTip(1, "The bookmark playing with the one before and after it in the list")
+        deck = QWidget(self)
+        deck_layout = QHBoxLayout(deck)
+        deck_layout.setContentsMargins(0, 0, 0, 0)
+        deck_layout.setSpacing(6)
+        deck_layout.addWidget(self._view_tabs, 1)
+        deck_layout.addWidget(_scrolling(self._tool_column, vertical_only=True))
 
         top_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         top_splitter.addWidget(self._playlist_panel)
@@ -348,15 +384,11 @@ class MainWindow(QMainWindow):
         for splitter in self._splitters.values():
             splitter.installEventFilter(self)
 
-        header = QHBoxLayout()
-        header.setContentsMargins(4, 0, 0, 0)
-        header.addWidget(self._logo)
-        header.addWidget(self._breadcrumb, 1)
-
+        # (No logo row under the menu since 0.10.0: the window and About carry the logo,
+        # the breadcrumb is in the Bookmarking tab.)
         central = QWidget(self)
         layout = QVBoxLayout(central)
         layout.setSpacing(6)
-        layout.addLayout(header)
         layout.addWidget(vertical_splitter, 1)
         self.setCentralWidget(central)
 
@@ -608,6 +640,8 @@ class MainWindow(QMainWindow):
         self._bookmark_panel.completion_edited.connect(self._on_bookmark_panel_completion_edited)
         # The 🔁 among the playback buttons loops the bookmark selected in the list.
         self._bookmark_panel.loop_target_changed.connect(self._transport.set_loop_target)
+        self._bookmark_panel.selection_changed.connect(self.bookmark_list_selection_changed.emit)
+        self._bookmark_tracks.track_double_clicked.connect(self.bookmark_track_double_clicked.emit)
         self._transport.loop_bookmark_clicked.connect(self._bookmark_panel.loop_selected)
 
         self._inspector.name_committed.connect(self._on_name_committed)
@@ -765,9 +799,10 @@ class MainWindow(QMainWindow):
         for name, splitter in self._splitters.items():
             settings.set_splitter_state(name, splitter.saveState())
         settings.set_panel_tab("side", self._side_tabs.currentIndex())
+        settings.set_panel_tab("view", self._view_tabs.currentIndex())
         settings.set_header_state("bookmarks", self._bookmark_panel.header_state(),
                                   columns=self._bookmark_panel.column_count())
-        settings.set_header_state("playlist", self._playlist_panel.header_state())
+        settings.set_header_state("source_playlist", self._playlist_panel.header_state())
 
     def restore_layout(self, settings) -> None:  # noqa: ANN001
         # The final minimum first: a saved size below it would otherwise be widened after
@@ -783,6 +818,9 @@ class MainWindow(QMainWindow):
         tab = settings.panel_tab("side")
         if 0 <= tab < self._side_tabs.count():
             self._side_tabs.setCurrentIndex(tab)
+        view_tab = settings.panel_tab("view")
+        if 0 <= view_tab < self._view_tabs.count():
+            self._view_tabs.setCurrentIndex(view_tab)
         columns = settings.header_state("bookmarks")
         if isinstance(columns, QByteArray) and not columns.isEmpty():
             saved_columns = settings.header_columns("bookmarks")
@@ -790,7 +828,9 @@ class MainWindow(QMainWindow):
                 self._bookmark_panel.restore_header_state(columns)  # 0.7.0-0.8.0: 9 columns
             else:
                 self._bookmark_panel.restore_header_state(columns, saved_columns=saved_columns)
-        playlist_columns = settings.header_state("playlist")
+        # (Saved under a new name in 0.10.0: Title and Bookmarks only is the new default,
+        # so layouts saved before it are left behind once.)
+        playlist_columns = settings.header_state("source_playlist")
         if isinstance(playlist_columns, QByteArray) and not playlist_columns.isEmpty():
             self._playlist_panel.restore_header_state(playlist_columns)
 
@@ -869,12 +909,34 @@ class MainWindow(QMainWindow):
 
     # -- context --
 
+    # -- the BM playback view --
+
+    def show_bookmark_tracks(self, previous: TrackBookmark | None, current: TrackBookmark | None,
+                             following: TrackBookmark | None) -> None:
+        self._bookmark_tracks.show_tracks(previous, current, following)
+
+    def set_bookmark_tracks_playhead(self, media_id: UUID | None, time_us: int | None) -> None:
+        self._bookmark_tracks.set_playhead(media_id, time_us)
+
+    def selection_box_marking(self) -> bool:
+        """The selection readout in orange: a new bookmark being marked out."""
+        return bool(self._selection_bar.styleSheet())
+
+    def show_view_tab(self, name: str) -> None:
+        """"bookmarking" or "tracks" (the BM playback view)."""
+        self._view_tabs.setCurrentIndex({"bookmarking": 0, "tracks": 1}[name])
+
+    def clear_playlist_name(self) -> None:
+        """Another player: its playlist isn't known yet."""
+        self._playlist_panel.set_playlist_name(None)
+
     def set_context(self, *, playlist_name: str, track_name: str, playlist_id: UUID | None,
                      media_id: UUID | None, bookmark_count: int, duration_us: int = 0) -> None:
         self._current_playlist_id = playlist_id
         self._current_media_id = media_id
         self._context_names = (playlist_name, track_name)
         self._show_breadcrumb(bookmark_count)
+        self._playlist_panel.set_playlist_name(playlist_name if playlist_id is not None else None)
         self._waveform_scene.set_duration_us(duration_us)
 
     def _show_breadcrumb(self, bookmark_count: int) -> None:
@@ -897,7 +959,7 @@ class MainWindow(QMainWindow):
         self._waveform_scene.set_playhead_time_us(time_us)
 
     def set_connected(self, connected: bool) -> None:
-        """Drives both the connection indicator (PlaylistPanel, above Launch VLC)
+        """Drives both the connection indicator (PlaylistPanel, above its tab)
         and the transport buttons'
         enabled state (TransportBar) together, so callers have one place to report
         connection changes instead of reaching into two widgets.
@@ -910,6 +972,9 @@ class MainWindow(QMainWindow):
     def _on_selection_changed(self, selection: object) -> None:
         from bookmark_studio.domain.selection import Selection
 
+        # Orange while a new bookmark is being marked out (0.10.0): Bookmark selection (or
+        # Apply) makes it and clears the selection -- the box is back to normal then.
+        self._selection_bar.setStyleSheet(MARKING_STYLE if isinstance(selection, Selection) else "")
         if isinstance(selection, Selection):
             self._selection_label.setText("Selection")
             self._show_selection_range(selection.start_us, selection.end_us)

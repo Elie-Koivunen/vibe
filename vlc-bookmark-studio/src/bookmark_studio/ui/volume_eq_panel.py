@@ -47,6 +47,7 @@ from bookmark_studio.domain.equalizer import (
     band_label,
 )
 from bookmark_studio.ui.deck_fader import _LIT, _PANEL, _SCALE, _SLOT, _UNITY, VolumeStrip
+from bookmark_studio.ui.flow_layout import FlowLayout
 from bookmark_studio.ui.tempo_panel import TempoPanel
 
 CUSTOM_PRESET = "Custom"
@@ -59,6 +60,17 @@ _STEPS_PER_DB = 10  # the slider counts tenths of a dB
 _CAP_W = 22
 _CAP_H = 12
 _PAD = _CAP_H // 2 + 3
+
+
+def _labelled(text: str, control: QWidget, parent: QWidget) -> QWidget:
+    """A label and its control, kept together when the row wraps."""
+    pair = QWidget(parent)
+    layout = QHBoxLayout(pair)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(6)
+    layout.addWidget(QLabel(text, pair))
+    layout.addWidget(control)
+    return pair
 
 
 class EqFader(QSlider):
@@ -243,27 +255,26 @@ class VolumeEqPanel(QWidget):
         eq.setSpacing(6)
         layout.addLayout(eq, 1)
 
-        header = QHBoxLayout()
+        # The equalizer's controls wrap onto a second line when the tab is narrow (0.10.0),
+        # so the faders below can narrow too, instead of the tab scrolling sideways.
+        self._eq_header = FlowLayout(spacing=8)
+        header = self._eq_header
         self._enabled_check = QCheckBox("Equalizer", self)
         self._enabled_check.setStyleSheet("font-weight: 700;")
         self._enabled_check.setToolTip("Switch the player's equalizer on or off")
         self._enabled_check.toggled.connect(self._on_enabled_toggled)
         header.addWidget(self._enabled_check)
-        header.addStretch(1)
-        header.addWidget(QLabel("Preset", self))
         self._preset_combo = QComboBox(self)
         self._preset_combo.addItem(CUSTOM_PRESET)
         for name in PRESETS:
             self._preset_combo.addItem(name)
         self._preset_combo.setToolTip("VLC's equalizer presets")
         self._preset_combo.activated.connect(self._on_preset_chosen)
-        header.addWidget(self._preset_combo)
+        header.addWidget(_labelled("Preset", self._preset_combo, self))
         self._reset_button = QPushButton("Flat", self)
         self._reset_button.setToolTip("Back to flat (no change to the sound)")
         self._reset_button.clicked.connect(lambda: self._apply_preset("Flat"))
         header.addWidget(self._reset_button)
-        header.addSpacing(8)
-        header.addWidget(QLabel("Glide", self))
         self._glide_ms = QSpinBox(self)
         self._glide_ms.setRange(0, 60_000)
         self._glide_ms.setSingleStep(250)
@@ -275,7 +286,7 @@ class VolumeEqPanel(QWidget):
             "something plays, like Max and Mute; at once otherwise"
         )
         self._glide_ms.valueChanged.connect(self.glide_ms_changed.emit)
-        header.addWidget(self._glide_ms)
+        header.addWidget(_labelled("Glide", self._glide_ms, self))
         eq.addLayout(header)
 
         # A preset glides there: every step goes to the player like a fader drag.

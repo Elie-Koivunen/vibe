@@ -111,7 +111,7 @@ def test_loop_settings_and_gap_fades_each_share_one_row(qtbot, tmp_path) -> None
 def test_the_selection_readout_sits_above_the_view_group(qtbot, tmp_path) -> None:
     window = _shown(_make_app(qtbot, tmp_path))
     readout = window._selection_bar
-    assert readout.parent() is window._tool_column
+    assert readout.parent() is window._bookmarking_column  # (0.10.0: in the Bookmarking tab)
     bottom = _top_left(readout, window).y() + readout.height()
     assert bottom <= _top_left(window._zoom_out_button, window).y()
 

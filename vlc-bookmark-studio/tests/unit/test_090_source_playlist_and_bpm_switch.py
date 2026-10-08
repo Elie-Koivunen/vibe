@@ -35,13 +35,12 @@ def test_the_source_playlist_tab_holds_follow_the_filter_and_the_playlist(qtbot,
     page = tabs.widget(0)
     for widget in (panel._follow_checkbox, panel._filter_edit, panel._tree):
         assert page.isAncestorOf(widget)
-    for widget in (panel._launch_vlc_button, panel._quit_button, panel._connection_label):
-        assert not tabs.isAncestorOf(widget)  # above the tab, as before
+    # (0.10.0 moved Launch VLC..., Quit, the playlist's name and the connection into the
+    # tab too: test_0100_source_playlist.py.)
 
     def y(widget) -> int:  # noqa: ANN001
         return widget.mapTo(window, QPoint(0, 0)).y()
 
-    assert y(panel._launch_vlc_button) < y(panel._connection_label) < y(tabs)
     assert y(panel._follow_checkbox) < y(panel._filter_edit) < y(panel._tree)
     assert panel._tree.topLevelItemCount() == 2  # the playlist, there
 
@@ -55,23 +54,24 @@ def test_the_playlists_column_titles_have_the_column_menu(qtbot) -> None:
     texts = [action.text() for action in menu.actions() if action.text()]
     assert texts[:len(COLUMNS)] == COLUMNS
     assert {"Move “Artist” Left", "Move “Artist” Right", "Arrange Columns...", "Restore Default Columns"} <= set(texts)
-    menu.actions()[COLUMNS.index("Artist")].toggle()  # unticked: hidden
-    assert panel.shown_columns() == ["Title", "Duration", "Bookmarks", "Status"]
+    menu.actions()[COLUMNS.index("Artist")].toggle()  # ticked: shown (0.10.0: hidden by default)
+    assert panel.shown_columns() == ["Title", "Artist", "Bookmarks"]
+    panel.set_column_shown(COLUMNS.index("Status"), True)
     panel.move_column(COLUMNS.index("Status"), -1)
-    assert panel.shown_columns() == ["Title", "Duration", "Status", "Bookmarks"]
+    assert panel.shown_columns() == ["Title", "Artist", "Status", "Bookmarks"]
     restore = [a for a in panel.column_menu().actions() if a.text() == "Restore Default Columns"][0]
     restore.trigger()
-    assert panel.shown_columns() == COLUMNS
+    assert panel.shown_columns() == ["Title", "Bookmarks"]
 
 
 def test_the_playlists_columns_are_saved_with_the_window_layout(qtbot, tmp_path) -> None:
     settings = _settings(tmp_path)
     first = _make_app(qtbot, tmp_path, settings=settings, quit_app=lambda: None)
     panel = first.window._playlist_panel
-    panel.set_column_shown(COLUMNS.index("Artist"), False)
+    panel.set_column_shown(COLUMNS.index("Duration"), True)
     panel.move_column(COLUMNS.index("Bookmarks"), -1)
     shown = panel.shown_columns()
-    assert shown == ["Title", "Bookmarks", "Duration", "Status"]
+    assert shown == ["Title", "Bookmarks", "Duration"]
     first.quit()
     first.stop()
     second_dir = tmp_path / "second"

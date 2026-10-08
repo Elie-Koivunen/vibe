@@ -4,6 +4,61 @@ All notable changes to VLC Bookmark Studio (called bm4vlc up to 0.3.1). Previous
 versions are kept in [`archive/`](archive/) and tagged in git
 (`vlc-bookmark-studio-v<version>`; `bm4vlc-v<version>` up to 0.3.1).
 
+## Versions at a glance
+
+| Version | Released | Highlights |
+|---|---|---|
+| [0.10.0](#0100--2026-10-09) | 2026-10-09 | Bookmarking and **BM playback view** tabs (the bookmark playing with the one before and after it); the whole source playlist in its tab (its name, the connection, Launch VLC / Quit), Title and Bookmarks by default; no logo row, the breadcrumb above the waveform; Bookmark selection under Fit; the selection orange while marking; an equalizer that narrows instead of scrolling |
+| [0.9.0](#090--2026-10-03) | 2026-10-03 | Bookmark Studio tab; **Extract** to audio files; Duplicate; **BPM** panel with an on/off switch; Source Playlist tab; column menus; fades once per loop; orange row while the song plays through a bookmark; proprietary pre-release license |
+| [0.8.0](#080--2026-10-01) | 2026-10-01 | Apply for new bookmarks, Undo / Redo buttons, the orange "saved" flash, Normalize / Reset levels, gliding equalizer presets, green / yellow playback colours |
+| [0.7.0](#070--2026-10-01) | 2026-10-01 | Tag catalog and picker, Tags column, Max / Reset / Mute, short random bookmark names, the Bookmarks tab |
+| [0.6.0](#060--2026-09-30) | 2026-09-30 | New layout (transport above the waveform, tool column, Bookmark and Volume & EQ tabs), the equalizer |
+| [0.5.1](#051--2026-09-30) | 2026-09-30 | Playback buttons centred again |
+| [0.5.0](#050--2026-09-30) | 2026-09-30 | The logo everywhere, a DJ-style volume fader, Quit, fast waveform zoom |
+| [0.4.0](#040--2026-09-30) | 2026-09-30 | Renamed bm4vlc → VLC Bookmark Studio; a crash on loop-setting edits fixed |
+| [0.3.1](#031--2026-09-30) | 2026-09-30 | Linux in-app player fixed; an unloadable libVLC no longer closes the app |
+| [0.3.0](#030--2026-09-29) | 2026-09-29 | In-app libVLC player, folder sync, command line with self-test, packaged builds; the HTTP password off VLC's command line |
+| [0.2.0](#020--2026-09-29) | 2026-09-29 | Loop fixes (gaps, After loop), playlist polling no longer disturbs the UI, list dropdowns and Inspector fields fixed |
+| [0.1.0](#010) | — | First version: bookmarks, playlists, waveforms, VLC control, loops, undo, export / import |
+
+## 0.10.0 — 2026-10-09
+
+### Changed
+
+- **The top half has two tabs**: **Bookmarking** -- the waveform, with the selection
+  readout and View (zoom) beside it -- and the new **BM playback view**. Playback (the
+  position, the playback buttons and the volume) stays beside them, for both. The open
+  tab is remembered.
+- **Everything about the source playlist is in its tab**: the playlist's name, the
+  connection, Launch VLC... and Quit, Follow currently playing VLC song, the filter and
+  the playlist.
+- **The playlist shows Title and Bookmarks by default**; Artist, Duration and Status come
+  back from the column menu (Restore Default Columns and Arrange Columns' Defaults
+  return to the two). A column layout saved before is left behind once, so the new
+  default shows.
+- **No logo row under the menu**: the breadcrumb (playlist › song › bookmarks) is at the
+  top of the Bookmarking tab, above the waveform, and the tabs move up. The logo stays
+  on the window and in Help > About.
+- **The equalizer narrows instead of scrolling**: its controls wrap onto a second line
+  and the faders close up (down to 24 px wide) when the Volume & EQ tab is narrow -- the
+  tab's minimum went from about 1030 to 800 px, so opening it also stretches the window
+  less. With room, it looks as before.
+
+### New
+
+- **BM playback view**: three waveform tracks -- the bookmark ⏮ would play, the one ⏮ /
+  ⏭ count from (the one playing, with the red line; else the one selected, or played
+  last) and the one ⏭ would play, across songs in the list's order. Each shows its
+  bookmark's range only, all three at one time scale; a double-click on the top or
+  bottom track plays it as ⏮ / ⏭ do, on the middle one as the list's double-click does.
+  The tracks' songs' waveforms are fetched even when another song is on screen.
+- **The source playlist's name**, above the connection status: the .m3u it was opened
+  from, or the name given to a playlist VLC had open ("Unsaved VLC Playlist <date>").
+- **Bookmark selection under Fit**, beside the waveform: the same as the one in the
+  Bookmark Studio tab (and Ctrl+B), enabled with it.
+- **The selection readout turns orange while a new bookmark is being marked out**, and
+  back once Bookmark selection (or Apply) has made it, or the selection is cleared.
+
 ## 0.9.0 — 2026-10-03
 
 ### Changed
