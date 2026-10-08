@@ -55,14 +55,16 @@ def test_the_playlists_name_is_shown_above_the_connection(qtbot, tmp_path) -> No
     assert y(panel._tabs) < y(panel._playlist_name) < y(panel._connection_label) < y(panel._launch_vlc_button)
 
 
-def test_a_playlist_from_an_m3u_shows_its_file_name(qtbot) -> None:
+def test_a_playlist_from_an_m3u_shows_its_file_name(qtbot, tmp_path) -> None:
     from bookmark_studio.playlist.synchronizer import _playlist_name_from_source
 
     panel = PlaylistPanel()
     qtbot.addWidget(panel)
     assert panel.playlist_name() == "" and panel._playlist_name.placeholderText()
-    name = _playlist_name_from_source("file:///C:/Music/Practice%20set.m3u")
+    # A path of the system the test runs on (a Windows C: path means nothing to Linux).
+    name = _playlist_name_from_source((tmp_path / "Practice set.m3u").as_uri())
+    assert name == "Practice set"
     panel.set_playlist_name(name)
-    assert panel.playlist_name() == name and "Practice set" in name
+    assert panel.playlist_name() == name
     panel.set_playlist_name(None)  # another player, its playlist not known yet
     assert panel.playlist_name() == ""
