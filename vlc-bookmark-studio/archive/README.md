@@ -15,6 +15,7 @@ the previous version is kept here unchanged.
 | [`v0.6.0/`](v0.6.0/) | 0.6.0 | `vlc-bookmark-studio-0.6.0.zip`: the `vlc-bookmark-studio/` folder at tag `vlc-bookmark-studio-v0.6.0` (commit `632fa7a`), without `archive/`. The last version with dated bookmark names (`<date>-<random>-<start>-<end>`) and free-text tags. | `vlc-bookmark-studio-v0.6.0` |
 | [`v0.7.0/`](v0.7.0/) | 0.7.0 | `vlc-bookmark-studio-0.7.0.zip`: the `vlc-bookmark-studio/` folder at tag `vlc-bookmark-studio-v0.7.0` (commit `fe2a82a`), without `archive/`. The last version with an instant volume Reset, instant equalizer preset changes and no Apply button for new bookmarks. | `vlc-bookmark-studio-v0.7.0` |
 | [`v0.8.0/`](v0.8.0/) | 0.8.0 | `vlc-bookmark-studio-0.8.0.zip`: the `vlc-bookmark-studio/` folder at tag `vlc-bookmark-studio-v0.8.0` (commit `879c940`), without `archive/`. The last version with the playback buttons above the waveform and Play/Loop buttons beside the bookmark list. | `vlc-bookmark-studio-v0.8.0` |
+| [`v0.9.0/`](v0.9.0/) | 0.9.0 | `vlc-bookmark-studio-0.9.0.zip`: the `vlc-bookmark-studio/` folder at tag `vlc-bookmark-studio-v0.9.0` (commit `499090a`), without `archive/`. The first version under the proprietary pre-release license; the last with Launch VLC/Quit above the Source Playlist tab and a single waveform view. | `vlc-bookmark-studio-v0.9.0` |
 
 Every version is also tagged in git (`git tag -l "bm4vlc-v*" "vlc-bookmark-studio-v*"`), so
 `git checkout bm4vlc-v0.2.0 -- bm4vlc/` restores 0.2.0 as it was (under its old folder name).
