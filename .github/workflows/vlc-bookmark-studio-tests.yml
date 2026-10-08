@@ -51,10 +51,12 @@ jobs:
           LOG="$RUNNER_TEMP/pytest.log"
           if ! python -m pytest -q -rfs 2>&1 | tee "$LOG"
           then
-            lines=$(grep -E '^(FAILED|ERROR|E  )' "$LOG" | head -n 30)
+            # (|| true: the step runs with -e -o pipefail, and a grep that finds nothing would
+            # end it here -- before the annotation, which then never showed what went wrong.)
+            lines=$(grep -E '^(FAILED|ERROR|E  )' "$LOG" | head -n 30 || true)
             # No failed test listed (a crash, an error at exit): the end of the output instead.
-            if [ -z "$lines" ]; then lines=$(tail -n 30 "$LOG"); fi
-            msg=$(printf '%s\n' "$lines" | cut -c1-180 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            if [ -z "$lines" ]; then lines=$(tail -n 30 "$LOG" || true); fi
+            msg=$(printf '%s\n' "$lines" | cut -c1-180 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}' || true)
             echo "::error title=tests failed::$msg"
             exit 1
           fi
