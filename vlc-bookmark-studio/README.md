@@ -1,5 +1,11 @@
 # VLC Bookmark Studio
 
+> **Moved.** VLC Bookmark Studio now lives in its own repository,
+> [Elie-Koivunen/vlc-bookmark-studio](https://github.com/Elie-Koivunen/vlc-bookmark-studio) (private), with this folder's whole
+> history and every version tag. This copy is frozen as it was moved (0.10.0 and the fixes
+> after it) and is no longer updated; the packaged builds of 0.3.1-0.10.0 stay on this
+> repository's [Releases](https://github.com/Elie-Koivunen/vibe/releases) page.
+
 <img src="src/bookmark_studio/resources/icon.svg" alt="VLC Bookmark Studio logo" width="96" align="right">
 
 A playlist-aware visual bookmarking, segment-selection, navigation and
